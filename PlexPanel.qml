@@ -356,6 +356,9 @@ Item {
     interval: 300
     repeat: false
     onTriggered: {
+      // The old process can outlive its socket quit for more than 300 ms;
+      // defer instead of dropping the replacement launch.
+      if (mpvProc.running) { restart(); return }
       // Fixed args, validated URL; --no-config drops user scripts/hooks and
       // --no-ytdl prevents extractor spawning on attacker-chosen URLs.
       // Residual risk, accepted for a single-user desktop: the token header
@@ -449,8 +452,12 @@ Item {
         root.scrobbled = true
         sendScrobble()
       }
-      if (root.tickCount % 10 === 0)
-        sendTimeline(root.mpvPaused ? "paused" : "playing")
+      if (root.tickCount % 10 === 0) {
+        var paused = root.backend === "mpv"
+          ? root.mpvPaused
+          : player.playbackState === MediaPlayer.PausedState
+        sendTimeline(paused ? "paused" : "playing")
+      }
     }
   }
 
