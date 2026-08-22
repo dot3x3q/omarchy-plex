@@ -44,7 +44,7 @@ Item {
   readonly property color urgent: Color.urgent
   readonly property color muted: foreground
 
-  readonly property int videoWidth: 460
+  property int videoWidth: 460
   readonly property int videoHeight: Math.round(videoWidth * 9 / 16)
   function tint(a) { return Qt.rgba(root.accent.r, root.accent.g, root.accent.b, a) }
 
@@ -117,6 +117,7 @@ Item {
   property bool userStop: false
   property bool scrobbled: false
   property int tickCount: 0
+  property int resumeSec: 0
   property int playGen: 0 // guards mpv exit handler against item switches
 
   // mpv remote state (seconds)
@@ -137,6 +138,11 @@ Item {
     if (h > 0) root.marginBottom = Math.max(0, Math.min(root.marginBottom, h - window.height))
   }
 
+  function saveWidth() {
+    posSave.width = "" + root.videoWidth
+    posSave.running = true
+  }
+
   function savePosition() {
     posSave.right = "" + Math.round(root.marginRight)
     posSave.bottom = "" + Math.round(root.marginBottom)
@@ -147,10 +153,11 @@ Item {
     id: posSave
     property string right: "14"
     property string bottom: "14"
+    property string width: "460"
     running: false
     command: ["sh", "-c",
-      "mkdir -p '" + root.stateDir + "' && printf '{\"right\":%s,\"bottom\":%s}' "
-      + posSave.right + " " + posSave.bottom
+      "mkdir -p '" + root.stateDir + "' && printf '{\"right\":%s,\"bottom\":%s,\"width\":%s}' "
+      + posSave.right + " " + posSave.bottom + " " + posSave.width
       + " > '" + root.stateDir + "/window.json'"]
   }
 
@@ -163,6 +170,7 @@ Item {
         var doc = JSON.parse(text())
         if (doc.right !== undefined) root.marginRight = Math.max(0, doc.right | 0)
         if (doc.bottom !== undefined) root.marginBottom = Math.max(0, doc.bottom | 0)
+        if (doc.width !== undefined) root.videoWidth = Math.max(280, Math.min(900, doc.width | 0))
       } catch (e) { /* keep defaults */ }
     }
   }
@@ -265,6 +273,7 @@ Item {
       root.userStop = false
       root.scrobbled = false
       root.tickCount = 0
+      root.resumeSec = Math.round((md.viewOffset || 0) / 1000)
       var mediaUrl = root.server + partKey
       if (root.backend !== "mpv") mediaUrl += "?X-Plex-Token=" + root.token
       playSource(mediaUrl, resolve.title)
@@ -324,12 +333,14 @@ Item {
         "--no-config", "--no-ytdl",
         "--hwdec=auto", "--vo=gpu-next",
         "--really-quiet", "--keep-open=no",
+        "--start=" + Math.max(0, root.resumeSec) + ".5",
         "--input-ipc-server=" + root.ipcSock,
         "--http-header-fields=X-Plex-Token: " + root.token,
         // bottom-right miniplayer placement instead of centre-screen
         "--autofit=" + root.videoWidth + "x" + root.videoHeight,
         "--geometry=-" + (root.marginRight + 14) + "-" + (root.marginBottom + 130),
         mpvStarter.url]
+      root.resumeSec = 0
       mpvProc.gen = mpvStarter.gen
       mpvProc.running = true
     }
@@ -493,6 +504,10 @@ Item {
       volume: 0.6
     }
     onMediaStatusChanged: function(status) {
+      if (status === MediaPlayer.LoadedMedia && root.resumeSec > 0) {
+        player.position = root.resumeSec * 1000
+        root.resumeSec = 0
+      }
       if (status === MediaPlayer.EndOfMedia) finishPlayback()
       else if (status === MediaPlayer.InvalidMedia) playbackFailed()
     }
@@ -538,7 +553,9 @@ Item {
         + "&duration=" + Math.round(root.dispDuration * 1000)
         + "&time=" + Math.round(root.dispTime * 1000)
         + "&state=" + state
-        + "&hasMDE=1&identifier=com.plexapp.plugins.library")])
+        + "&hasMDE=1&identifier=com.plexapp.plugins.library"
+        + "&X-Plex-Client-Identifier=io.github.joshuaswarren.plexmini"
+        + "&X-Plex-Product=Plex%20Mini&X-Plex-Device-Name=PlexMini")])
     timelinePost.running = true
   }
 
@@ -821,8 +838,8 @@ Item {
 
       // search bar (list mode)
       Rectangle {
-        width: parent.width - 20
-        x: 10
+        width: parent.width - 24
+        x: 12
         height: root.mode === "list" || root.mode === "error" ? 30 : 0
         visible: height > 0
         radius: Style.cornerRadius
@@ -899,16 +916,13 @@ Item {
           required property var modelData
           required property int index
           readonly property bool selected: ListView.isCurrentItem
-          width: ListView.view.width - 20
-          x: 10
+          width: ListView.view.width - 24
+          x: 12
           height: 40
           radius: Style.cornerRadius
           color: rowMouse.containsPress ? root.tint(0.28)
-            : (resultRow.selected ? root.tint(0.14)
+            : (resultRow.selected ? root.tint(0.16)
               : (rowMouse.containsMouse ? root.tint(0.15) : "transparent"))
-          border.color: resultRow.selected && !rowMouse.containsMouse ? root.tint(0.55) : "transparent"
-          border.width: 1
-
           Behavior on color { ColorAnimation { duration: 100 } }
 
           Column {
