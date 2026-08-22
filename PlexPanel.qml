@@ -216,7 +216,20 @@ Item {
     if (root.items.length === 0) loadOnDeck()
   }
 
-  function close() { root.opened = false }
+  function close() {
+    // Plex is video, not radio: hiding the miniplayer must never leave audio
+    // running in the background. Pause, then hide; reopening stays paused.
+    if (root.mode === "playing") {
+      if (root.backend === "mpv") {
+        mpvSend('{"command":["set_property","pause",true]}')
+        root.mpvPaused = true
+      } else {
+        player.pause()
+      }
+      sendTimeline("paused")
+    }
+    root.opened = false
+  }
 
   // ---- Plex API ----
   // Token travels as a header, never a URL query: query strings leak via
@@ -668,6 +681,26 @@ Item {
 
     onVisibleChanged: if (visible) keyHost.forceActiveFocus()
 
+      // resize grip — thin strip on the panel's left edge, inside bounds.
+      // Dragging left grows the miniwindow; width persists across restarts.
+      MouseArea {
+        id: resizeGrip
+        anchors.left: parent.left
+        anchors.top: parent.top
+        width: 28
+        height: 28
+        z: 100
+        cursorShape: Qt.SizeFDiagCursor
+        property int sx: 0
+        property int startW: 0
+        onPressed: function(mouse) { sx = mapToItem(null, mouse.x, mouse.y).x; startW = root.videoWidth }
+        onPositionChanged: function(mouse) {
+          if (!pressed) return
+          var gx = mapToItem(null, mouse.x, mouse.y).x
+          root.videoWidth = Math.max(280, Math.min(900, startW + (sx - gx)))
+          root.saveWidth()
+        }
+      }
     Column {
       anchors.fill: parent
       anchors.margins: 1
@@ -751,26 +784,6 @@ Item {
 
       Rectangle { width: parent.width; height: 1; color: root.accent; opacity: 0.35 }
 
-      // resize grip — thin strip on the panel's left edge, inside bounds.
-      // Dragging left grows the miniwindow; width persists across restarts.
-      MouseArea {
-        id: resizeGrip
-        anchors.left: parent.left
-        anchors.bottom: parent.bottom
-        width: 28
-        height: 28
-        z: 100
-        cursorShape: Qt.SizeFDiagCursor
-        property int sx: 0
-        property int startW: 0
-        onPressed: function(mouse) { sx = mapToItem(null, mouse.x, mouse.y).x; startW = root.videoWidth }
-        onPositionChanged: function(mouse) {
-          if (!pressed) return
-          var gx = mapToItem(null, mouse.x, mouse.y).x
-          root.videoWidth = Math.max(280, Math.min(900, startW + (sx - gx)))
-          root.saveWidth()
-        }
-      }
 
       // setup form
       Column {
@@ -954,7 +967,6 @@ Item {
           width: ListView.view.width - 24
           height: 44
           x: 12
-          height: 40
           radius: Style.cornerRadius
           color: rowMouse.containsPress ? root.tint(0.28)
             : (resultRow.selected ? root.tint(0.16)
