@@ -32,7 +32,9 @@ The default `internal` backend renders inside the panel via QtMultimedia. Set `"
 Open Plex Mini and enter:
 
 1. Your server origin, e.g. `http://192.168.1.50:32400`
-2. An `X-Plex-Token`
+2. An `X-Plex-Token` — follow Plex's official guide: [Finding an authentication token / X-Plex-Token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)
+
+The linked article is maintained by Plex and documents the supported web-app XML method, including where the token appears.
 
 Credentials are validated and stored at `~/.config/plexmini/config.json` with mode `0600` inside a `0700` directory.
 
