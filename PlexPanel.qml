@@ -449,7 +449,7 @@ Item {
     // so binding it here throws ReferenceError on load.
     audioOutput: AudioOutput {
       id: audio
-      volume: 0.9
+      volume: 0.6
     }
     onMediaStatusChanged: function(status) {
       if (status === MediaPlayer.EndOfMedia) finishPlayback()
