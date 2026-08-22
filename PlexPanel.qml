@@ -45,6 +45,7 @@ Item {
 
   readonly property int videoWidth: 460
   readonly property int videoHeight: Math.round(videoWidth * 9 / 16)
+  function tint(a) { return Qt.rgba(root.accent.r, root.accent.g, root.accent.b, a) }
 
   // ---- config ----
   property string server: ""
@@ -172,6 +173,21 @@ Item {
   property var lockService: null
   readonly property bool sessionLocked: lockService !== null && lockService.locked === true
 
+  // Unlike the radio, a video player pauses when the session locks and
+  // resumes when it unlocks.
+  property bool wasPlayingBeforeLock: false
+  onSessionLockedChanged: {
+    if (root.mode !== "playing") return
+    if (root.sessionLocked) {
+      root.wasPlayingBeforeLock = !root.mpvPaused && (root.backend === "mpv"
+        || player.playbackState === MediaPlayer.PlayingState)
+      if (root.backend === "mpv") mpvSend('{"command":["set_property","pause",true]}')
+      else player.pause()
+    } else if (root.wasPlayingBeforeLock) {
+      if (root.backend === "mpv") mpvSend('{"command":["set_property","pause",false]}')
+      else player.play()
+    }
+  }
   Timer {
     id: lockServiceResolve
     interval: 1000
@@ -306,6 +322,7 @@ Item {
   function startMpv(url) {
     // One mpv at a time owns the IPC socket: quit any previous instance,
     // wait out the socket release, then launch.
+    root.mode = "playing"
     mpvQuit.running = true
     mpvStarter.url = url
     mpvStarter.gen = root.playGen
@@ -319,6 +336,9 @@ Item {
     onTriggered: {
       // Fixed args, validated URL; --no-config drops user scripts/hooks and
       // --no-ytdl prevents extractor spawning on attacker-chosen URLs.
+      // Residual risk, accepted for a single-user desktop: the token header
+      // is visible in mpv's argv (/proc/PID/cmdline). mpv cannot read
+      // headers from a file; rotating the token closes any exposure window.
       mpvProc.command = ["mpv",
         "--no-config", "--no-ytdl",
         "--hwdec=auto", "--vo=gpu-next",
@@ -331,6 +351,23 @@ Item {
     }
   }
 
+  Process {
+    id: mpvProc
+    property int gen: 0
+    running: false
+    onExited: function(exitCode) {
+      // A newer playSource supersedes this exit; ignore it.
+      if (mpvProc.gen !== root.playGen || root.backend !== "mpv") return
+      if (root.mode !== "playing") return
+      pollTimer.stop()
+      if (root.userStop || exitCode === 0) {
+        finishPlayback()
+        return
+      }
+      // mpv choked on the codec — fall back to server transcode.
+      playbackFailed()
+    }
+  }
   Process {
     id: mpvQuit
     running: false
@@ -595,7 +632,7 @@ Item {
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
     exclusionMode: ExclusionMode.Ignore
 
-    onVisibleChanged: if (visible && root.mode === "list") resultList.forceActiveFocus()
+    onVisibleChanged: if (visible) resultList.forceActiveFocus()
     Keys.onSpacePressed: function(event) {
       event.accepted = true
       root.togglePause()
@@ -604,8 +641,11 @@ Item {
     Keys.onRightPressed: root.seekRel(30)
     Keys.onUpPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.moveSel(-1) } }
     Keys.onDownPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.moveSel(1) } }
-    Keys.onPageUpPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.moveSel(-8) } }
-    Keys.onPageDownPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.moveSel(8) } }
+    Keys.onPressed: function(event) {
+      if (root.mode !== "list") return
+      if (event.key === Qt.Key_PageUp) { event.accepted = true; root.moveSel(-8) }
+      else if (event.key === Qt.Key_PageDown) { event.accepted = true; root.moveSel(8) }
+    }
     Keys.onReturnPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.playSel() } }
     Keys.onEnterPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.playSel() } }
     Keys.onEscapePressed: root.close()
@@ -840,6 +880,15 @@ Item {
         height: root.mode === "list" || root.mode === "error"
           ? window.height - 34 - 1 - (searchInput.visible ? 30 : 0) - 14 : 0
         visible: height > 0
+        focus: true
+        Keys.onUpPressed: function(event) { event.accepted = true; root.moveSel(-1) }
+        Keys.onDownPressed: function(event) { event.accepted = true; root.moveSel(1) }
+        Keys.onReturnPressed: function(event) { event.accepted = true; root.playSel() }
+        Keys.onEnterPressed: function(event) { event.accepted = true; root.playSel() }
+        Keys.onSpacePressed: function(event) { event.accepted = true; root.togglePause() }
+        Keys.onEscapePressed: root.close()
+        Keys.onLeftPressed: function(event) { if (root.mode === "playing") { event.accepted = true; root.seekRel(-30) } }
+        Keys.onRightPressed: function(event) { if (root.mode === "playing") { event.accepted = true; root.seekRel(30) } }
         clip: true
         spacing: 2
         model: root.items
