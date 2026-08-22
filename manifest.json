@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.joshuaswarren.plexmini",
+  "name": "Plex Mini",
+  "version": "0.1.0",
+  "author": "Joshua Warren",
+  "description": "Miniwindow Plex player for the Omarchy shell: Continue Watching, search, direct play of movies and episodes from your server while you work.",
+  "kinds": [
+    "panel",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "panel": "PlexPanel.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Plex Mini",
+    "description": "Opens the Plex Mini floating player",
+    "category": "Media",
+    "defaultSection": "right",
+    "allowMultiple": false
+  }
+}
