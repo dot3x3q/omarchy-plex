@@ -4,6 +4,7 @@ import Quickshell.Wayland
 import QtQuick
 import QtMultimedia
 import qs.Commons
+import "Model.js" as Model
 
 // Plex Mini panel entry point.
 // Hosted by omarchy-shell; summoned with:
@@ -52,9 +53,6 @@ Item {
   property string token: ""
   property string backend: "mpv"
 
-  function validServer(s) { return /^https?:\/\/[A-Za-z0-9.\-_]+(:\d+)?$/.test(s) }
-  function validToken(t) { return /^[A-Za-z0-9]{10,}$/.test(t) }
-
   FileView {
     id: configFile
     path: root.configDir + "/config.json"
@@ -65,8 +63,8 @@ Item {
         var s = String(doc.server || "")
         var t = String(doc.token || "")
         // Only accept well-formed persisted values; anything else re-runs setup.
-        if (root.validServer(s)) root.server = s
-        if (root.validToken(t)) root.token = t
+        if (Model.validServer(s)) root.server = s
+        if (Model.validToken(t)) root.token = t
         if (doc.backend === "internal") root.backend = "internal"
       } catch (e) { /* first run */ }
     }
@@ -75,11 +73,11 @@ Item {
   function saveConfig() {
     // Validate visibly instead of silently mangling; nothing user-controlled
     // is ever interpolated into shell source.
-    if (!root.validServer(root.server)) {
+    if (!Model.validServer(root.server)) {
       fail("Server must look like http://host:32400")
       return false
     }
-    if (!root.validToken(root.token)) {
+    if (!Model.validToken(root.token)) {
       fail("Token looks wrong — Plex tokens are letters/digits, 20ish chars")
       return false
     }
@@ -276,28 +274,7 @@ Item {
 
   function applyList(jsonText, op) {
     try {
-      var mc = JSON.parse(jsonText).MediaContainer
-      // No flatMap/filter chains: the V4 engine lacks Array.prototype.flatMap.
-      var meta = []
-      if (op === "search" && mc.SearchResults) {
-        for (var r = 0; r < mc.SearchResults.length; r++) {
-          var group = mc.SearchResults[r]
-          if (!group || !group.Metadata) continue
-          for (var k = 0; k < group.Metadata.length; k++) meta.push(group.Metadata[k])
-        }
-      } else if (mc.Metadata) {
-        for (var m2 = 0; m2 < mc.Metadata.length; m2++) meta.push(mc.Metadata[m2])
-      }
-      var out = []
-      for (var i = 0; i < meta.length; i++) {
-        var m = meta[i]
-        out.push({
-          ratingKey: String(m.ratingKey),
-          title: String(m.title || ""),
-          sub: String(m.grandparentTitle ? m.grandparentTitle + " — S" + (m.parentIndex || "?") + "E" + (m.index || "?") : (m.year || m.type || ""))
-        })
-      }
-      root.items = out
+      root.items = Model.mapItems(JSON.parse(jsonText).MediaContainer, op)
       root.mode = "list"
       root.statusText = op === "search" && out.length === 0 ? "No results" : ""
     } catch (e) {
@@ -605,14 +582,7 @@ Item {
   readonly property real dispTime: mpvMode ? root.mpvTime : player.position / 1000
   readonly property real dispDuration: mpvMode ? root.mpvDuration : player.duration / 1000
 
-  function fmt(sec) {
-    sec = Math.max(0, Math.floor(sec))
-    var h = Math.floor(sec / 3600)
-    var m = Math.floor((sec % 3600) / 60)
-    var s = sec % 60
-    return h > 0 ? h + ":" + ("0" + m).slice(-2) + ":" + ("0" + s).slice(-2)
-                 : m + ":" + ("0" + s).slice(-2)
-  }
+
 
   // ---- window ----
   PanelWindow {
@@ -858,8 +828,19 @@ Item {
           Keys.onEscapePressed: { if (text !== "") text = ""; else root.close() }
           Keys.onUpPressed: function(event) { event.accepted = true; root.moveSel(-1) }
           Keys.onDownPressed: function(event) { event.accepted = true; root.moveSel(1) }
-          Keys.onReturnPressed: function(event) { event.accepted = true; root.playSel() }
-          Keys.onEnterPressed: function(event) { event.accepted = true; root.playSel() }
+          // Keys handlers consume the key before TextInput's keyPressEvent,
+          // so onAccepted would never fire: play a selection if one exists,
+          // otherwise treat Enter as "run this search".
+          Keys.onReturnPressed: function(event) {
+            event.accepted = true
+            if (resultList.currentIndex >= 0 && resultList.currentIndex < root.items.length) root.playSel()
+            else root.search(text)
+          }
+          Keys.onEnterPressed: function(event) {
+            event.accepted = true
+            if (resultList.currentIndex >= 0 && resultList.currentIndex < root.items.length) root.playSel()
+            else root.search(text)
+          }
 
           Text {
             visible: searchInput.text === "" && !searchInput.activeFocus
@@ -1020,7 +1001,7 @@ Item {
           color: root.muted
           font.pixelSize: 13
           font.family: Style.fontFamily
-          text: root.fmt(root.dispTime) + " / " + root.fmt(root.dispDuration)
+          text: Model.fmtDuration(root.dispTime) + " / " + Model.fmtDuration(root.dispDuration)
         }
 
         Row {
