@@ -2,6 +2,10 @@
 
 A small floating Plex player and remote for the Omarchy shell. Continue Watching and full library search in a miniwindow; playback launches in standalone **mpv with hardware decode** (`--hwdec=auto --vo=gpu-next`) so movies and shows render on your dGPU while you work. The panel doubles as a remote over mpv's JSON IPC socket.
 
+![Plex Mini panel](preview.png)
+
+![demo](assets/demo.gif)
+
 Works alongside [plex-mpv-shim](https://github.com/iwalton3/plex-mpv-shim) — same engine, no conflicts. Watch progress is reported back to your server every 10 seconds and items are marked watched at 90%, so positions stay in sync across your devices.
 
 ## Install
@@ -38,6 +42,19 @@ Config file format:
 ```json
 { "server": "http://192.168.1.50:32400", "token": "YOUR_TOKEN", "backend": "mpv" }
 ```
+
+## Keyboard
+
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` | Move the selection |
+| `PgUp` / `PgDn` | Move by eight |
+| `Enter` | Play the selected item |
+| `Space` | Pause / resume |
+| `Left` / `Right` | Seek 30s |
+| `Esc` | Clear the search, or hide the panel |
+
+The results list takes focus when the panel opens; typing in the search field keeps arrows and `Enter` on the results.
 
 ## Usage
 
