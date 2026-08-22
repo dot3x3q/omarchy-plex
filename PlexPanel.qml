@@ -274,7 +274,8 @@ Item {
 
   function applyList(jsonText, op) {
     try {
-      root.items = Model.mapItems(JSON.parse(jsonText).MediaContainer, op)
+      var out = Model.mapItems(JSON.parse(jsonText).MediaContainer, op)
+      root.items = out
       root.mode = "list"
       root.statusText = op === "search" && out.length === 0 ? "No results" : ""
     } catch (e) {

@@ -15,7 +15,7 @@ const ctx = vm.createContext({})
 vm.runInNewContext(
   source +
     "\nthis.M = { validServer: validServer, validToken: validToken," +
-    " mapItems: mapItems, fmtDuration: fmt }",
+    " mapItems: mapItems, fmtDuration: fmtDuration }",
   ctx
 )
 const M = ctx.M

@@ -48,7 +48,7 @@ function mapItems(mc, op) {
 }
 
 // Seconds -> h:mm:ss or m:ss for the seek bar readout.
-function fmt(sec) {
+function fmtDuration(sec) {
   sec = Math.max(0, Math.floor(Number(sec) || 0))
   var h = Math.floor(sec / 3600)
   var m = Math.floor((sec % 3600) / 60)
