@@ -435,6 +435,7 @@ Item {
   // ---- internal backend (fallback) ----
   function startInternal(url) {
     player.stop()
+    if (typeof videoOut !== "undefined" && videoOut !== null) player.videoOutput = videoOut
     player.source = url
     root.mode = "playing"
     root.statusText = ""
@@ -443,7 +444,9 @@ Item {
 
   MediaPlayer {
     id: player
-    videoOutput: videoOut
+    // videoOutput is assigned in startInternal(): the surface lives inside
+    // the PanelWindow, whose children do not exist until the panel is shown,
+    // so binding it here throws ReferenceError on load.
     audioOutput: AudioOutput {
       id: audio
       volume: 0.9
@@ -560,8 +563,10 @@ Item {
     visible: root.opened && !root.sessionLocked
     anchors { top: false; left: false; right: true; bottom: true }
     margins { right: root.marginRight; bottom: root.marginBottom }
-    width: root.videoWidth
-    height: root.mode === "playing" ? root.videoHeight * 0.45 + 92 : 380
+    implicitWidth: root.videoWidth
+    implicitHeight: root.mode === "playing"
+      ? (root.backend === "mpv" ? root.videoHeight * 0.45 : root.videoHeight) + 92
+      : 380
     onWidthChanged: root.clampMargins()
     onHeightChanged: root.clampMargins()
     color: root.background
@@ -854,6 +859,18 @@ Item {
         }
       }
 
+      // video surface — internal backend renders in-panel; mpv uses its own
+      // window, so this collapses to zero height in mpv mode.
+      Item {
+        width: parent.width
+        height: root.mode === "playing" && root.backend === "internal" ? root.videoHeight : 0
+
+        VideoOutput {
+          id: videoOut
+          anchors.fill: parent
+          fillMode: VideoOutput.PreserveAspectFit
+        }
+      }
       // mpv status plate (mpv renders in its own window)
       Item {
         width: parent.width
