@@ -737,6 +737,26 @@ Item {
 
       Rectangle { width: parent.width; height: 1; color: root.accent; opacity: 0.35 }
 
+      // resize grip — thin strip on the panel's left edge, inside bounds.
+      // Dragging left grows the miniwindow; width persists across restarts.
+      MouseArea {
+        id: resizeGrip
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: 10
+        cursorShape: Qt.SizeHorCursor
+        property int sx: 0
+        property int startW: 0
+        onPressed: function(mouse) { sx = mapToItem(null, mouse.x, mouse.y).x; startW = root.videoWidth }
+        onPositionChanged: function(mouse) {
+          if (!pressed) return
+          var gx = mapToItem(null, mouse.x, mouse.y).x
+          root.videoWidth = Math.max(280, Math.min(900, startW + (sx - gx)))
+          root.saveWidth()
+        }
+      }
+
       // setup form
       Column {
         width: parent.width
