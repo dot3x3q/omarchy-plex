@@ -4,7 +4,7 @@
   "name": "Plex Mini",
   "version": "0.1.0",
   "author": "Joshua Warren",
-  "description": "Miniwindow Plex player for the Omarchy shell: Continue Watching, search, direct play of movies and episodes from your server while you work.",
+  "description": "Resizable Plex miniplayer for Omarchy: Continue Watching, live search, resume, keyboard controls, progress sync, and transcode fallback.",
   "kinds": [
     "panel",
     "bar-widget"
