@@ -412,6 +412,26 @@ Item {
     if (root.backend !== "mpv" || root.dispDuration <= 0) return
     mpvSend('{"command":["set_property","time-pos",' + (fraction * root.dispDuration).toFixed(1) + ']}')
   }
+  // ---- keyboard navigation ----
+  // Up/Down move a selection through the results, Enter plays it, Space
+  // toggles pause, Left/Right seek, Escape hides. The search field shares
+  // the arrows and Enter with the list, launcher-style.
+  function moveSel(delta) {
+    var n = resultList.count
+    if (n === 0 || root.mode !== "list") return
+    var i = resultList.currentIndex
+    if (i < 0) i = delta > 0 ? 0 : n - 1
+    else i = ((i + delta) % n + n) % n
+    resultList.currentIndex = i
+    resultList.positionViewAtIndex(i, ListView.Contain)
+  }
+
+  function playSel() {
+    if (root.mode !== "list") return
+    if (resultList.currentIndex >= 0 && resultList.currentIndex < root.items.length)
+      root.playItem(root.items[resultList.currentIndex].ratingKey,
+                    root.items[resultList.currentIndex].title)
+  }
 
   function finishPlayback() {
     sendTimeline("stopped")
@@ -575,12 +595,19 @@ Item {
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
     exclusionMode: ExclusionMode.Ignore
 
+    onVisibleChanged: if (visible && root.mode === "list") resultList.forceActiveFocus()
     Keys.onSpacePressed: function(event) {
       event.accepted = true
       root.togglePause()
     }
     Keys.onLeftPressed: root.seekRel(-30)
     Keys.onRightPressed: root.seekRel(30)
+    Keys.onUpPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.moveSel(-1) } }
+    Keys.onDownPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.moveSel(1) } }
+    Keys.onPageUpPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.moveSel(-8) } }
+    Keys.onPageDownPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.moveSel(8) } }
+    Keys.onReturnPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.playSel() } }
+    Keys.onEnterPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.playSel() } }
     Keys.onEscapePressed: root.close()
 
     Column {
@@ -788,6 +815,11 @@ Item {
           clip: true
           verticalAlignment: TextInput.AlignVCenter
           onAccepted: root.search(text)
+          Keys.onEscapePressed: { if (text !== "") text = ""; else root.close() }
+          Keys.onUpPressed: function(event) { event.accepted = true; root.moveSel(-1) }
+          Keys.onDownPressed: function(event) { event.accepted = true; root.moveSel(1) }
+          Keys.onReturnPressed: function(event) { event.accepted = true; root.playSel() }
+          Keys.onEnterPressed: function(event) { event.accepted = true; root.playSel() }
 
           Text {
             visible: searchInput.text === "" && !searchInput.activeFocus
@@ -802,9 +834,8 @@ Item {
           }
         }
       }
-
-      // library list
       ListView {
+        id: resultList
         width: parent.width
         height: root.mode === "list" || root.mode === "error"
           ? window.height - 34 - 1 - (searchInput.visible ? 30 : 0) - 14 : 0
@@ -812,12 +843,22 @@ Item {
         clip: true
         spacing: 2
         model: root.items
+        currentIndex: -1
+        keyNavigationEnabled: false // window-level handlers own the keys
         delegate: Rectangle {
+          id: resultRow
+          required property var modelData
+          required property int index
+          readonly property bool selected: ListView.isCurrentItem
           width: ListView.view.width - 20
           x: 10
           height: 40
           radius: Style.cornerRadius
-          color: rowMouse.containsMouse ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.15) : "transparent"
+          color: rowMouse.containsPress ? root.tint(0.28)
+            : (resultRow.selected ? root.tint(0.14)
+              : (rowMouse.containsMouse ? root.tint(0.15) : "transparent"))
+          border.color: resultRow.selected && !rowMouse.containsMouse ? root.tint(0.55) : "transparent"
+          border.width: 1
 
           Behavior on color { ColorAnimation { duration: 100 } }
 
