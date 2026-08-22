@@ -264,6 +264,13 @@ Item {
     apiFetch.running = true
   }
 
+  Timer {
+    id: searchDebounce
+    interval: 300
+    repeat: false
+    onTriggered: if (root.opened && root.configured()) root.search(searchInput.text)
+  }
+
   function search(q) {
     if (q.trim() === "") { loadOnDeck(); return }
     apiFetch.op = "search"
@@ -919,6 +926,10 @@ Item {
           font.family: Style.fontFamily
           clip: true
           verticalAlignment: TextInput.AlignVCenter
+          onTextChanged: {
+            resultList.currentIndex = -1
+            searchDebounce.restart()
+          }
           onAccepted: root.search(text)
           Keys.onEscapePressed: { if (text !== "") text = ""; else root.close() }
           Keys.onUpPressed: function(event) { event.accepted = true; root.moveSel(-1) }
