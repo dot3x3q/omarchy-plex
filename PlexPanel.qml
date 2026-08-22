@@ -209,10 +209,20 @@ Item {
   }
 
   // ---- lifecycle ----
+  function focusPrimary() {
+    // Defer until the mode's UI is visible; typing should search immediately.
+    Qt.callLater(function() {
+      if (!root.opened) return
+      if (root.mode === "list" || root.mode === "error") searchInput.forceActiveFocus()
+      else keyHost.forceActiveFocus()
+    })
+  }
+
   function open() {
     root.opened = true
-    if (!configured()) { root.mode = "setup"; return }
-    if (window.visible) keyHost.forceActiveFocus()
+    if (!configured()) { root.mode = "setup"; root.focusPrimary(); return }
+    root.mode = "list"
+    root.focusPrimary()
     if (root.items.length === 0) loadOnDeck()
   }
 
@@ -301,6 +311,7 @@ Item {
       root.items = out
       root.mode = "list"
       root.statusText = op === "search" && out.length === 0 ? "No results" : ""
+      root.focusPrimary()
     } catch (e) {
       fail("Plex request failed — check server URL and token")
     }
@@ -650,7 +661,9 @@ Item {
     color: root.background
     WlrLayershell.namespace: "plexmini"
     WlrLayershell.layer: WlrLayer.Top
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
+    // A launcher-style picker must receive typing immediately on open;
+    // OnDemand does not request Wayland keyboard focus until a mouse click.
+    WlrLayershell.keyboardFocus: root.opened ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
     exclusionMode: ExclusionMode.Ignore
 
     // Keyboard host. PanelWindow cannot carry a Keys attachment (it is not
@@ -679,7 +692,7 @@ Item {
       Keys.onEscapePressed: function(event) { event.accepted = true; root.close() }
     }
 
-    onVisibleChanged: if (visible) keyHost.forceActiveFocus()
+    onVisibleChanged: if (visible) root.focusPrimary()
 
       // resize grip — thin strip on the panel's left edge, inside bounds.
       // Dragging left grows the miniwindow; width persists across restarts.
