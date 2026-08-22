@@ -16,6 +16,15 @@ function validToken(t) {
   return /^[A-Za-z0-9]{10,}$/.test(String(t || ""))
 }
 
+var MAX_ITEMS = 256
+var MAX_FIELD = 256
+var MAX_KEY = 96
+
+function cap(value, limit) {
+  var s = String(value === undefined || value === null ? "" : value)
+  return s.length > limit ? s.slice(0, limit) : s
+}
+
 // Map a /library/onDeck or /search MediaContainer into the list-model shape:
 // [{ ratingKey, title, sub }]. Handles both response shapes (onDeck puts a
 // flat Metadata array on the container; search nests arrays under
@@ -25,23 +34,23 @@ function mapItems(mc, op) {
   if (!mc) return []
   var meta = []
   if (op === "search" && mc.SearchResults) {
-    for (var r = 0; r < mc.SearchResults.length; r++) {
+    for (var r = 0; r < mc.SearchResults.length && meta.length < MAX_ITEMS; r++) {
       var group = mc.SearchResults[r]
       if (!group || !group.Metadata) continue
-      for (var k = 0; k < group.Metadata.length; k++) meta.push(group.Metadata[k])
+      for (var k = 0; k < group.Metadata.length && meta.length < MAX_ITEMS; k++) meta.push(group.Metadata[k])
     }
   } else if (mc.Metadata) {
-    for (var m2 = 0; m2 < mc.Metadata.length; m2++) meta.push(mc.Metadata[m2])
+    for (var m2 = 0; m2 < mc.Metadata.length && meta.length < MAX_ITEMS; m2++) meta.push(mc.Metadata[m2])
   }
   var out = []
   for (var i = 0; i < meta.length; i++) {
     var m = meta[i]
     out.push({
-      ratingKey: String(m.ratingKey),
-      title: String(m.title || ""),
-      sub: String(m.grandparentTitle
+      ratingKey: cap(m.ratingKey, MAX_KEY),
+      title: cap(m.title, MAX_FIELD),
+      sub: cap(m.grandparentTitle
         ? m.grandparentTitle + " — S" + (m.parentIndex || "?") + "E" + (m.index || "?")
-        : (m.year || m.type || ""))
+        : (m.year || m.type || ""), MAX_FIELD)
     })
   }
   return out
@@ -55,4 +64,18 @@ function fmtDuration(sec) {
   var s = sec % 60
   return h > 0 ? h + ":" + ("0" + m).slice(-2) + ":" + ("0" + s).slice(-2)
                : m + ":" + ("0" + s).slice(-2)
+}
+
+// Parse one /library/metadata response into the playback contract. Keeps
+// remote strings bounded and requires an absolute Plex library part path.
+function parsePlaybackMetadata(jsonText) {
+  var doc = JSON.parse(jsonText)
+  var md = doc && doc.MediaContainer && doc.MediaContainer.Metadata && doc.MediaContainer.Metadata[0]
+  if (!md || !md.Media || !md.Media[0] || !md.Media[0].Part || !md.Media[0].Part[0]) return null
+  var partKey = cap(md.Media[0].Part[0].key, 512)
+  if (partKey.indexOf("/") !== 0) return null
+  return {
+    partKey: partKey,
+    viewOffsetSec: Math.max(0, Math.round((Number(md.viewOffset) || 0) / 1000))
+  }
 }

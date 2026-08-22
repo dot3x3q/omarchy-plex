@@ -93,7 +93,7 @@ Item {
       + " && umask 077 && printf '{\"server\":\"%s\",\"token\":\"%s\",\"backend\":\"%s\"}' "
       + "'" + root.server + "' '" + root.token + "' "
       + "'" + (root.backend === "internal" ? "internal" : "mpv") + "'"
-      + " > '" + root.configDir + "/config.json'"]
+      + " > '" + root.configDir + "/config.json' && chmod 600 '" + root.configDir + "/config.json'"]
   }
 
   Component.onCompleted: {
@@ -258,7 +258,7 @@ Item {
 
   function loadOnDeck() {
     apiFetch.op = "onDeck"
-    apiFetch.command = ["curl", "-s", "--fail", "--max-time", "10"]
+    apiFetch.command = ["curl", "-s", "--fail", "--max-time", "10", "--max-filesize", "4194304"]
       .concat(root.plexHeaders)
       .concat([apiUrl("/library/onDeck")])
     apiFetch.running = true
@@ -274,7 +274,7 @@ Item {
   function search(q) {
     if (q.trim() === "") { loadOnDeck(); return }
     apiFetch.op = "search"
-    apiFetch.command = ["curl", "-s", "--fail", "--max-time", "10"]
+    apiFetch.command = ["curl", "-s", "--fail", "--max-time", "10", "--max-filesize", "4194304"]
       .concat(root.plexHeaders)
       .concat([apiUrl("/search?query=" + encodeURIComponent(q.trim()))])
     apiFetch.running = true
@@ -285,7 +285,7 @@ Item {
   function playItem(ratingKey, title) {
     resolve.ratingKey = ratingKey
     resolve.title = title
-    resolve.command = ["curl", "-s", "--fail", "--max-time", "10"]
+    resolve.command = ["curl", "-s", "--fail", "--max-time", "10", "--max-filesize", "2097152"]
       .concat(root.plexHeaders)
       .concat([apiUrl("/library/metadata/" + ratingKey)])
     resolve.running = true
@@ -293,17 +293,16 @@ Item {
 
   function applyMetadata(jsonText) {
     try {
-      var md = JSON.parse(jsonText).MediaContainer.Metadata[0]
-      var partKey = String(md.Media[0].Part[0].key || "")
-      // Server-derived value: must be an absolute Plex library path.
-      if (partKey.indexOf("/") !== 0) { fail("No playable part found"); return }
+      var parsed = Model.parsePlaybackMetadata(jsonText)
+      if (!parsed) { fail("No playable part found"); return }
+      var partKey = parsed.partKey
       root.currentRatingKey = String(resolve.ratingKey)
       root.sessionId = "" + Date.now()
       root.triedTranscode = false
       root.userStop = false
       root.scrobbled = false
       root.tickCount = 0
-      root.resumeSec = Math.round((md.viewOffset || 0) / 1000)
+      root.resumeSec = parsed.viewOffsetSec
       var mediaUrl = root.server + partKey
       if (root.backend !== "mpv") mediaUrl += "?X-Plex-Token=" + root.token
       playSource(mediaUrl, resolve.title)

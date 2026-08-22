@@ -1,67 +1,79 @@
 # Plex Mini for Omarchy
 
-A small floating Plex player and remote for the Omarchy shell. Continue Watching and full library search in a miniwindow; playback launches in standalone **mpv with hardware decode** (`--hwdec=auto --vo=gpu-next`) so movies and shows render on your dGPU while you work. The panel doubles as a remote over mpv's JSON IPC socket.
+A floating, resizable Plex miniplayer for Omarchy. Open it and type immediately to search your library, or pick from Continue Watching. Video plays inside the panel by default, with resume, seek, pause, stop, scrobbling, and transcode fallback.
 
-![Plex Mini panel](preview.png)
+![Plex Mini — Continue Watching](preview.png)
 
-![demo](assets/demo.gif)
-
-Works alongside [plex-mpv-shim](https://github.com/iwalton3/plex-mpv-shim) — same engine, no conflicts. Watch progress is reported back to your server every 10 seconds and items are marked watched at 90%, so positions stay in sync across your devices.
+![Plex Mini demo](assets/demo.gif)
 
 ## Install
 
-From Omarchy Plugin Control (Super+Shift+P → Plugins), search for **Plex Mini** and install — or run the install command shown on the plugin's marketplace page.
+Install **Plex Mini** from Omarchy Plugin Control or use the command shown on its marketplace page.
 
 ## Remove
 
-Uninstall from Omarchy Plugin Control, then delete config and state if you want a fully clean slate:
+Uninstall it from Plugin Control. For a complete reset:
 
-```
+```bash
 rm -rf ~/.config/plexmini ~/.local/state/plexmini
 ```
 
-## External dependencies
+## Requirements
 
-- `mpv` — default playback backend (`sudo pacman -S mpv`)
-- `socat` — remote control over mpv's IPC socket (`sudo pacman -S socat`)
-- `curl` (included with Omarchy) — talks to your Plex server
+- Omarchy Quattro / Quickshell
+- `curl` (included with Omarchy)
+- Plex server URL and `X-Plex-Token`
+- Optional mpv backend: `mpv` and `socat`
 
-Setting `"backend": "internal"` in the config plays inside the panel via QtMultimedia instead and drops the mpv/socat requirements.
+The default `internal` backend renders inside the panel via QtMultimedia. Set `"backend": "mpv"` only when you explicitly want a separate dGPU-backed mpv window.
 
 ## Setup
 
-1. Open Plex Mini from the bar (or command palette)
-2. Enter your server URL, e.g. `http://192.168.1.50:32400`
-3. Enter an X-Plex-Token:
-   - Sign in at app.plex.tv, play anything, and copy the `X-Plex-Token` query parameter from the page URL, **or**
-   - Fetch `https://plex.tv/api/resources?includeHttps=1&X-Plex-Token=...` after obtaining a token via the plex.tv/devices flow
-4. Press Enter — the token is stored chmod 600 in `~/.config/plexmini/config.json`
+Open Plex Mini and enter:
 
-Config file format:
+1. Your server origin, e.g. `http://192.168.1.50:32400`
+2. An `X-Plex-Token`
+
+Credentials are validated and stored at `~/.config/plexmini/config.json` with mode `0600` inside a `0700` directory.
 
 ```json
-{ "server": "http://192.168.1.50:32400", "token": "YOUR_TOKEN", "backend": "mpv" }
+{ "server": "http://192.168.1.50:32400", "token": "YOUR_TOKEN", "backend": "internal" }
 ```
 
-## Keyboard
+## Interaction
 
-| Key | Action |
-| --- | --- |
-| `Up` / `Down` | Move the selection |
-| `PgUp` / `PgDn` | Move by eight |
-| `Enter` | Play the selected item |
-| `Space` | Pause / resume |
-| `Left` / `Right` | Seek 30s |
-| `Esc` | Clear the search, or hide the panel |
+- Start typing immediately: live search runs after a 300 ms debounce
+- `Up` / `Down`: select result
+- `PgUp` / `PgDn`: move eight results
+- `Enter`: play selection
+- `Space`: pause / resume
+- `Left` / `Right`: seek 30 seconds
+- `M`: mute internal playback
+- `Esc` or close: pause, then hide
+- Drag header: move panel
+- Drag top-left grip: resize (280–900 px), persisted
 
-The results list takes focus when the panel opens; typing in the search field keeps arrows and `Enter` on the results.
+During playback the selector collapses; only video and controls remain. Direct play resumes from Plex's `viewOffset`; progress reports every 10 seconds and scrobbles at 90%. Unsupported media retries through Plex universal-transcode HLS.
 
-## Usage
+## Security and limits
 
-- Pick from **Continue Watching** or search your library (movies, shows, episodes)
-- Playback opens in an mpv window using your GPU for decode; the panel shows position, pause state, and controls (±30s, seek bar, stop)
-- Keyboard: `Space` pause, `←/→` seek 30s, `Esc` hide panel
-- Direct play is tried first; unsupported codecs automatically fall back to server transcoding (HLS)
+- API token travels in headers; API requests do not follow redirects
+- Config is strict-shape validated and chmod `0600`
+- Remote part paths must remain absolute Plex library paths
+- Remote titles render as `Text.PlainText`
+- mpv runs `--no-config --no-ytdl` with a randomized IPC socket
+- API response buffering is capped: 4 MiB list/search, 2 MiB metadata
+- Model mapping caps responses to 256 items and 256-character display fields
+
+Residual media-leg risk: mpv requires its token header in process arguments. The default internal backend avoids argv exposure but QtMultimedia cannot set request headers, so its direct-play/transcode token rides in the media URL query and redirect handling is player-controlled. API requests themselves remain header-only and non-redirecting.
+
+## Tests
+
+```bash
+node --test tests/*.test.mjs
+```
+
+The suite covers validation, bounded response mapping, grouped search results, playback metadata and resume extraction, time formatting, plus static integration contracts for buffering caps, delegate sizing, sticky resume, pause-on-close, live search, keyboard focus, and resize layout.
 
 ## License
 

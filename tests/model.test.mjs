@@ -15,7 +15,7 @@ const ctx = vm.createContext({})
 vm.runInNewContext(
   source +
     "\nthis.M = { validServer: validServer, validToken: validToken," +
-    " mapItems: mapItems, fmtDuration: fmtDuration }",
+    " mapItems: mapItems, fmtDuration: fmtDuration, parsePlaybackMetadata: parsePlaybackMetadata }",
   ctx
 )
 const M = ctx.M
@@ -23,7 +23,7 @@ const M = ctx.M
 test("validServer accepts http(s) origins with optional port", () => {
   assert.equal(M.validServer("http://192.168.10.249:32400"), true)
   assert.equal(M.validServer("https://plex.home.arpa"), true)
-  assert.equal(M.validServer("https://plex.home.arpa:8443"), false || true === false ? M.validServer("https://plex.home.arpa:8443") : true) // port form is legal
+  assert.equal(M.validServer("https://plex.home.arpa:8443"), true) // port form is legal
 })
 
 test("validServer rejects paths and garbage", () => {
@@ -89,4 +89,25 @@ test("fmtDuration renders hours only when present", () => {
   assert.equal(M.fmtDuration(27 * 60 + 12), "27:12")
   assert.equal(M.fmtDuration((2 * 3600) + (7 * 60) + 12), "2:07:12")
   assert.equal(M.fmtDuration(-5), "0:00")
+})
+
+
+test("mapItems caps item count and remote field lengths", () => {
+  const mc = { Metadata: Array.from({ length: 400 }, (_, i) => ({ ratingKey: "k" + i, title: "T".repeat(500), type: "movie" })) }
+  const out = M.mapItems(mc, "onDeck")
+  assert.equal(out.length, 256)
+  assert.equal(out[0].title.length, 256)
+})
+
+test("parsePlaybackMetadata extracts bounded part path and resume offset", () => {
+  const doc = JSON.stringify({ MediaContainer: { Metadata: [{ viewOffset: 3706000, Media: [{ Part: [{ key: "/library/parts/1/file.mkv" }] }] }] } })
+  const p = M.parsePlaybackMetadata(doc)
+  assert.equal(p.partKey, "/library/parts/1/file.mkv")
+  assert.equal(p.viewOffsetSec, 3706)
+})
+
+test("parsePlaybackMetadata rejects missing or foreign part paths", () => {
+  assert.equal(M.parsePlaybackMetadata(JSON.stringify({ MediaContainer: { Metadata: [] } })), null)
+  const foreign = JSON.stringify({ MediaContainer: { Metadata: [{ Media: [{ Part: [{ key: "https://evil.test/x" }] }] }] } })
+  assert.equal(M.parsePlaybackMetadata(foreign), null)
 })
