@@ -12,3 +12,14 @@ test("panel contract pins integration chokepoints", () => {
   assert.match(qml, /WlrKeyboardFocus\.Exclusive/)
   assert.match(qml, /id: searchDebounce[\s\S]{0,300}root\.search\(searchInput\.text\)/)
 })
+
+test("config and state IO is bounded, regular-file only, and atomic", () => {
+  assert.doesNotMatch(qml, /FileView\s*\{/)
+  assert.match(qml, /\[ -f \\?"?\$f/)
+  assert.match(qml, /\[ ! -L \\?"?\$f/)
+  assert.match(qml, /-le 4096/)
+  assert.match(qml, /-le 1024/)
+  assert.match(qml, /\.config\.\$\$\.tmp/)
+  assert.match(qml, /\.window\.\$\$\.tmp/)
+  assert.match(qml, /mv -f --/)
+})

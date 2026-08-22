@@ -52,20 +52,27 @@ Item {
   property string token: ""
   property string backend: "internal"
 
-  FileView {
-    id: configFile
-    path: root.configDir + "/config.json"
-    watchChanges: false
-    onLoaded: {
-      try {
-        var doc = JSON.parse(text())
-        var s = String(doc.server || "")
-        var t = String(doc.token || "")
-        // Only accept well-formed persisted values; anything else re-runs setup.
-        if (Model.validServer(s)) root.server = s
-        if (Model.validToken(t)) root.token = t
-        if (doc.backend === "mpv") root.backend = "mpv"
-      } catch (e) { /* first run */ }
+  // Bounded regular-file read: reject symlinks, FIFOs/devices, and files
+  // over 4 KiB before StdioCollector sees a byte.
+  Process {
+    id: configRead
+    running: false
+    command: ["sh", "-c",
+      "d='" + root.configDir + "'; f=\"$d/config.json\"; "
+      + "[ -d \"$d\" ] && [ ! -L \"$d\" ] && [ -f \"$f\" ] && [ ! -L \"$f\" ] "
+      + "&& sz=$(stat -c %s -- \"$f\") && [ \"$sz\" -le 4096 ] && cat -- \"$f\" || true"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var doc = JSON.parse(String(text || ""))
+          var s = String(doc.server || "")
+          var t = String(doc.token || "")
+          if (Model.validServer(s)) root.server = s
+          if (Model.validToken(t)) root.token = t
+          if (doc.backend === "mpv") root.backend = "mpv"
+        } catch (e) { /* first run or rejected file */ }
+      }
     }
   }
 
@@ -87,17 +94,19 @@ Item {
   Process {
     id: saveProcess
     running: false
+    // Atomic temp+rename replaces a destination symlink instead of following
+    // it. Reject a symlinked config directory before touching credentials.
     command: ["sh", "-c",
-      "mkdir -p '" + root.configDir + "' && chmod 700 '" + root.configDir + "'"
-      + " && umask 077 && printf '{\"server\":\"%s\",\"token\":\"%s\",\"backend\":\"%s\"}' "
-      + "'" + root.server + "' '" + root.token + "' "
-      + "'" + (root.backend === "internal" ? "internal" : "mpv") + "'"
-      + " > '" + root.configDir + "/config.json' && chmod 600 '" + root.configDir + "/config.json'"]
+      "d='" + root.configDir + "'; mkdir -p \"$d\" && [ ! -L \"$d\" ] && chmod 700 \"$d\" "
+      + "&& umask 077 && t=\"$d/.config.$$.tmp\" && trap 'rm -f \"$t\"' EXIT "
+      + "&& printf '{\"server\":\"%s\",\"token\":\"%s\",\"backend\":\"%s\"}' "
+      + "'" + root.server + "' '" + root.token + "' '" + (root.backend === "internal" ? "internal" : "mpv") + "' "
+      + "> \"$t\" && chmod 600 \"$t\" && mv -f -- \"$t\" \"$d/config.json\" && trap - EXIT"]
   }
 
   Component.onCompleted: {
-    configFile.reload()
-    positionFile.reload()
+    configRead.running = true
+    positionRead.running = true
   }
 
   function configured() { return root.server !== "" && root.token !== "" }
@@ -156,22 +165,31 @@ Item {
     property string width: "460"
     running: false
     command: ["sh", "-c",
-      "mkdir -p '" + root.stateDir + "' && printf '{\"right\":%s,\"bottom\":%s,\"width\":%s}' "
+      "d='" + root.stateDir + "'; mkdir -p \"$d\" && [ ! -L \"$d\" ] && chmod 700 \"$d\" "
+      + "&& umask 077 && t=\"$d/.window.$$.tmp\" && trap 'rm -f \"$t\"' EXIT "
+      + "&& printf '{\"right\":%s,\"bottom\":%s,\"width\":%s}' "
       + posSave.right + " " + posSave.bottom + " " + posSave.width
-      + " > '" + root.stateDir + "/window.json'"]
+      + " > \"$t\" && chmod 600 \"$t\" && mv -f -- \"$t\" \"$d/window.json\" && trap - EXIT"]
   }
 
-  FileView {
-    id: positionFile
-    path: root.stateDir + "/window.json"
-    watchChanges: false
-    onLoaded: {
-      try {
-        var doc = JSON.parse(text())
-        if (doc.right !== undefined) root.marginRight = Math.max(0, doc.right | 0)
-        if (doc.bottom !== undefined) root.marginBottom = Math.max(0, doc.bottom | 0)
-        if (doc.width !== undefined) root.videoWidth = Math.max(280, Math.min(900, doc.width | 0))
-      } catch (e) { /* keep defaults */ }
+  // Bounded regular-file state read: no symlinks or special files; 1 KiB max.
+  Process {
+    id: positionRead
+    running: false
+    command: ["sh", "-c",
+      "d='" + root.stateDir + "'; f=\"$d/window.json\"; "
+      + "[ -d \"$d\" ] && [ ! -L \"$d\" ] && [ -f \"$f\" ] && [ ! -L \"$f\" ] "
+      + "&& sz=$(stat -c %s -- \"$f\") && [ \"$sz\" -le 1024 ] && cat -- \"$f\" || true"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var doc = JSON.parse(String(text || ""))
+          if (doc.right !== undefined) root.marginRight = Math.max(0, doc.right | 0)
+          if (doc.bottom !== undefined) root.marginBottom = Math.max(0, doc.bottom | 0)
+          if (doc.width !== undefined) root.videoWidth = Math.max(280, Math.min(900, doc.width | 0))
+        } catch (e) { /* keep defaults */ }
+      }
     }
   }
 
