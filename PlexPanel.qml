@@ -42,7 +42,6 @@ Item {
   readonly property color foreground: Color.foreground
   readonly property color accent: Color.accent
   readonly property color urgent: Color.urgent
-  readonly property color muted: foreground
 
   property int videoWidth: 460
   readonly property int videoHeight: Math.round(videoWidth * 9 / 16)
@@ -119,6 +118,7 @@ Item {
   property int tickCount: 0
   property int resumeSec: 0
   property int playGen: 0 // guards mpv exit handler against item switches
+  property string pendingMpvUrl: "" // staged for mpvRelay's 300 ms socket-release wait
 
   // mpv remote state (seconds)
   property real mpvTime: 0
@@ -221,23 +221,29 @@ Item {
   function open() {
     root.opened = true
     if (!configured()) { root.mode = "setup"; root.focusPrimary(); return }
-    root.mode = "list"
+    // A hidden panel can still hold a live playback session; returning to
+    // the player beats orphaning audio behind a list.
+    if (root.mode !== "playing") {
+      root.mode = "list"
+      if (root.items.length === 0) loadOnDeck()
+    }
     root.focusPrimary()
-    if (root.items.length === 0) loadOnDeck()
   }
 
   function close() {
     // Plex is video, not radio: hiding the miniplayer must never leave audio
     // running in the background. Pause, then hide; reopening stays paused.
-    if (root.mode === "playing") {
-      if (root.backend === "mpv") {
+    // Guard on real playback state, not mode: mode can lag the player when
+    // the panel was reopened mid-session.
+    if (root.backend === "mpv") {
+      if (root.mode === "playing") {
         mpvSend('{"command":["set_property","pause",true]}')
         root.mpvPaused = true
-      } else {
-        player.pause()
       }
-      sendTimeline("paused")
+    } else if (player.playbackState === MediaPlayer.PlayingState) {
+      player.pause()
     }
+    if (root.mode === "playing") sendTimeline("paused")
     root.opened = false
   }
 
@@ -246,21 +252,18 @@ Item {
   // process lists, server logs, and cross-host redirects. No redirect
   // following: Plex does not redirect API calls, and following one would
   // forward credentials.
-  function apiUrl(path) {
-    return root.server + path
-  }
 
   readonly property var plexHeaders: [
     "-H", "Accept: application/json",
     "-H", "X-Plex-Token: " + root.token,
-    "-H", "X-Plex-Client-Identifier: io.github.joshuaswarren.plexmini"
+    "-H", "X-Plex-Client-Identifier: " + root.pluginId
   ]
 
   function loadOnDeck() {
     apiFetch.op = "onDeck"
     apiFetch.command = ["curl", "-s", "--fail", "--max-time", "10", "--max-filesize", "4194304"]
       .concat(root.plexHeaders)
-      .concat([apiUrl("/library/onDeck")])
+      .concat([root.server + "/library/onDeck"])
     apiFetch.running = true
   }
 
@@ -276,7 +279,7 @@ Item {
     apiFetch.op = "search"
     apiFetch.command = ["curl", "-s", "--fail", "--max-time", "10", "--max-filesize", "4194304"]
       .concat(root.plexHeaders)
-      .concat([apiUrl("/search?query=" + encodeURIComponent(q.trim()))])
+      .concat([root.server + "/search?query=" + encodeURIComponent(q.trim())])
     apiFetch.running = true
   }
 
@@ -287,7 +290,7 @@ Item {
     resolve.title = title
     resolve.command = ["curl", "-s", "--fail", "--max-time", "10", "--max-filesize", "2097152"]
       .concat(root.plexHeaders)
-      .concat([apiUrl("/library/metadata/" + ratingKey)])
+      .concat([root.server + "/library/metadata/" + ratingKey])
     resolve.running = true
   }
 
@@ -334,6 +337,8 @@ Item {
     if (root.backend === "mpv") startMpv(url)
     else startInternal(url)
     pollTimer.restart()
+    // The search field hides with the list; transport keys need a home.
+    keyHost.forceActiveFocus()
   }
 
   // ---- mpv backend ----
@@ -342,8 +347,7 @@ Item {
     // wait out the socket release, then launch.
     root.mode = "playing"
     mpvQuit.running = true
-    mpvStarter.url = url
-    mpvStarter.gen = root.playGen
+    root.pendingMpvUrl = url
     mpvRelay.restart()
   }
 
@@ -357,8 +361,6 @@ Item {
       // Residual risk, accepted for a single-user desktop: the token header
       // is visible in mpv's argv (/proc/PID/cmdline). mpv cannot read
       // headers from a file; rotating the token closes any exposure window.
-      var sw = window && window.screen ? Math.round(window.screen.width) : 1920
-      var sh = window && window.screen ? Math.round(window.screen.height) : 1080
       mpvProc.command = ["mpv",
         "--no-config", "--no-ytdl",
         "--hwdec=auto", "--vo=gpu-next",
@@ -369,9 +371,9 @@ Item {
         // bottom-right miniplayer placement instead of centre-screen
         "--autofit=" + root.videoWidth + "x" + root.videoHeight,
         "--geometry=-" + (root.marginRight + 14) + "-" + (root.marginBottom + 130),
-        mpvStarter.url]
+        root.pendingMpvUrl]
       root.resumeSec = 0
-      mpvProc.gen = mpvStarter.gen
+      mpvProc.gen = root.playGen
       mpvProc.running = true
     }
   }
@@ -398,13 +400,6 @@ Item {
     running: false
     command: ["sh", "-c",
       "test -S '" + root.ipcSock + "' && echo '{\"command\":[\"quit\"]}' | socat - UNIX-CONNECT:'" + root.ipcSock + "' >/dev/null 2>&1 || true"]
-  }
-
-  Process {
-    id: mpvStarter
-    property string url: ""
-    property int gen: 0
-    running: false
   }
 
   function mpvSend(payload) {
@@ -565,14 +560,14 @@ Item {
     // Universal transcode HLS: server re-encodes, player plays the playlist.
     // Token stays in the query because HLS players fetch segments themselves;
     // the URL exists only inside this machine's mpv/player process.
-    return apiUrl("/video/:/transcode/universal/start.m3u8"
+    return root.server + "/video/:/transcode/universal/start.m3u8"
       + "?Path=" + encodeURIComponent("/library/metadata/" + root.currentRatingKey)
       + "&mediaIndex=0&partIndex=0&protocol=hls"
       + "&directPlay=0&directStream=0&hasMDE=1"
       + "&videoQuality=60&maxVideoBitrate=6000&audioBoost=100&subtitleSize=100"
       + "&session=" + root.sessionId
       + "&X-Plex-Token=" + root.token
-      + "&X-Plex-Product=Plex%20Mini&X-Plex-Client-Identifier=io.github.joshuaswarren.plexmini")
+      + "&X-Plex-Product=Plex%20Mini&X-Plex-Client-Identifier=" + root.pluginId
   }
 
   function playbackFailed() {
@@ -592,14 +587,14 @@ Item {
     if (root.currentRatingKey === "") return
     timelinePost.command = ["curl", "-s", "--fail", "--max-time", "5", "-o", "/dev/null"]
       .concat(root.plexHeaders)
-      .concat([apiUrl("/:/timeline?ratingKey=" + root.currentRatingKey
+        .concat([root.server + "/:/timeline?ratingKey=" + root.currentRatingKey
         + "&key=" + encodeURIComponent("/library/metadata/" + root.currentRatingKey)
         + "&duration=" + Math.round(root.dispDuration * 1000)
         + "&time=" + Math.round(root.dispTime * 1000)
         + "&state=" + state
         + "&hasMDE=1&identifier=com.plexapp.plugins.library"
-        + "&X-Plex-Client-Identifier=io.github.joshuaswarren.plexmini"
-        + "&X-Plex-Product=Plex%20Mini&X-Plex-Device-Name=PlexMini")])
+        + "&X-Plex-Client-Identifier=" + root.pluginId
+        + "&X-Plex-Product=Plex%20Mini&X-Plex-Device-Name=PlexMini"])
     timelinePost.running = true
   }
 
@@ -607,8 +602,8 @@ Item {
     if (root.currentRatingKey === "") return
     scrobblePost.command = ["curl", "-s", "--fail", "--max-time", "5", "-o", "/dev/null"]
       .concat(root.plexHeaders)
-      .concat([apiUrl("/:/scrobble?key=" + encodeURIComponent("/library/metadata/" + root.currentRatingKey)
-        + "&identifier=com.plexapp.plugins.library")])
+        .concat([root.server + "/:/scrobble?key=" + encodeURIComponent("/library/metadata/" + root.currentRatingKey)
+        + "&identifier=com.plexapp.plugins.library"])
     scrobblePost.running = true
   }
 
@@ -824,7 +819,7 @@ Item {
             height: 32
             radius: Style.cornerRadius
             color: root.background
-            border.color: input.activeFocus ? root.accent : root.muted
+            border.color: input.activeFocus ? root.accent : root.foreground
             border.width: 1
             opacity: 0.9
 
@@ -856,7 +851,7 @@ Item {
                 anchors.fill: parent
                 anchors.margins: 8
                 verticalAlignment: Text.AlignVCenter
-                color: root.muted
+                color: root.foreground
                 opacity: 0.6
                 font.pixelSize: 12
                 font.family: Style.fontFamily
@@ -868,7 +863,7 @@ Item {
 
         Text {
           x: 12
-          color: root.muted
+          color: root.foreground
           opacity: 0.7
           font.pixelSize: 11
           font.family: Style.fontFamily
@@ -881,8 +876,6 @@ Item {
           x: 10
           radius: Style.cornerRadius
           color: mouseSave.containsPress ? root.accent : Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.2)
-
-          Behavior on opacity { NumberAnimation { duration: 120 } }
 
           Text {
             anchors.centerIn: parent
@@ -911,7 +904,7 @@ Item {
         visible: height > 0
         radius: Style.cornerRadius
         color: root.background
-        border.color: searchInput.activeFocus ? root.accent : root.muted
+        border.color: searchInput.activeFocus ? root.accent : root.foreground
         border.width: 1
         opacity: 0.9
 
@@ -929,7 +922,6 @@ Item {
             resultList.currentIndex = -1
             searchDebounce.restart()
           }
-          onAccepted: root.search(text)
           Keys.onEscapePressed: { if (text !== "") text = ""; else root.close() }
           Keys.onUpPressed: function(event) { event.accepted = true; root.moveSel(-1) }
           Keys.onDownPressed: function(event) { event.accepted = true; root.moveSel(1) }
@@ -953,7 +945,7 @@ Item {
             anchors.fill: parent
             anchors.margins: 7
             verticalAlignment: Text.AlignVCenter
-            color: root.muted
+            color: root.foreground
             opacity: 0.6
             font.pixelSize: 12
             font.family: Style.fontFamily
@@ -969,14 +961,6 @@ Item {
           : 0
         visible: height > 0
         focus: true
-        Keys.onUpPressed: function(event) { event.accepted = true; root.moveSel(-1) }
-        Keys.onDownPressed: function(event) { event.accepted = true; root.moveSel(1) }
-        Keys.onReturnPressed: function(event) { event.accepted = true; root.playSel() }
-        Keys.onEnterPressed: function(event) { event.accepted = true; root.playSel() }
-        Keys.onSpacePressed: function(event) { event.accepted = true; root.togglePause() }
-        Keys.onEscapePressed: root.close()
-        Keys.onLeftPressed: function(event) { if (root.mode === "playing") { event.accepted = true; root.seekRel(-30) } }
-        Keys.onRightPressed: function(event) { if (root.mode === "playing") { event.accepted = true; root.seekRel(30) } }
         clip: true
         spacing: 2
         model: root.items
@@ -1017,7 +1001,7 @@ Item {
               elide: Text.ElideRight
               visible: modelData.sub !== ""
               textFormat: Text.PlainText
-              color: root.muted
+              color: root.foreground
               opacity: 0.55
               font.pixelSize: 11
               font.family: Style.fontFamily
@@ -1052,7 +1036,7 @@ Item {
         height: root.mode === "playing" && root.backend === "mpv" ? root.videoHeight * 0.45 : 0
         Text {
           anchors.centerIn: parent
-          color: root.muted
+          color: root.foreground
           opacity: 0.5
           font.pixelSize: 12
           font.family: Style.fontFamily
@@ -1075,7 +1059,7 @@ Item {
           anchors.rightMargin: 14
           height: 7
           radius: 3
-          color: root.muted
+          color: root.foreground
           opacity: 0.25
 
           Rectangle {
@@ -1102,7 +1086,7 @@ Item {
           anchors.leftMargin: 14
           anchors.top: seekBar.bottom
           anchors.topMargin: 9
-          color: root.muted
+          color: root.foreground
           font.pixelSize: 13
           font.family: Style.fontFamily
           text: Model.fmtDuration(root.dispTime) + " / " + Model.fmtDuration(root.dispDuration)

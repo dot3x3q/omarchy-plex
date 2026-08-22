@@ -57,6 +57,10 @@ Credentials are validated and stored at `~/.config/plexmini/config.json` with mo
 
 During playback the selector collapses; only video and controls remain. Direct play resumes from Plex's `viewOffset`; progress reports every 10 seconds and scrobbles at 90%. Unsupported media retries through Plex universal-transcode HLS.
 
+## Scope
+
+No transcode-quality settings UI, no subtitle selection, no multi-server support. Library access is Continue Watching plus search.
+
 ## Security and limits
 
 - API token travels in headers; API requests do not follow redirects
@@ -75,7 +79,7 @@ Residual media-leg risk: mpv requires its token header in process arguments. The
 node --test tests/*.test.mjs
 ```
 
-The suite covers validation, bounded response mapping, grouped search results, playback metadata and resume extraction, time formatting, plus static integration contracts for buffering caps, delegate sizing, sticky resume, pause-on-close, live search, keyboard focus, and resize layout.
+The suite covers validation, bounded response mapping, grouped search results, playback metadata and resume extraction, time formatting, plus static integration contracts for buffering caps, sticky resume, pause-on-close, live search, and keyboard focus.
 
 ## License
 

@@ -37,7 +37,7 @@ Item {
       cursorShape: Qt.PointingHandCursor
       onClicked: {
         if (!root.bar) return
-        root.bar.run("omarchy-shell shell toggle io.github.joshuaswarren.plexmini")
+        root.bar.run("omarchy-shell shell toggle " + root.moduleName)
       }
     }
   }
