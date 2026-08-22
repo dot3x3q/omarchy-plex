@@ -494,6 +494,20 @@ Item {
     player.play()
   }
 
+  // Network media can report LoadedMedia before it is seekable. Retry the
+  // resume seek until the player reports it actually reached the offset.
+  Timer {
+    id: resumeRetry
+    interval: 250
+    repeat: true
+    onTriggered: {
+      if (root.resumeSec <= 0 || root.mode !== "playing") { stop(); return }
+      var target = root.resumeSec * 1000
+      if (player.position >= target - 1000) { root.resumeSec = 0; stop(); return }
+      player.position = target
+    }
+  }
+
   MediaPlayer {
     id: player
     // videoOutput is assigned in startInternal(): the surface lives inside
@@ -506,7 +520,7 @@ Item {
     onMediaStatusChanged: function(status) {
       if (status === MediaPlayer.LoadedMedia && root.resumeSec > 0) {
         player.position = root.resumeSec * 1000
-        root.resumeSec = 0
+        resumeRetry.restart()
       }
       if (status === MediaPlayer.EndOfMedia) finishPlayback()
       else if (status === MediaPlayer.InvalidMedia) playbackFailed()
@@ -742,10 +756,11 @@ Item {
       MouseArea {
         id: resizeGrip
         anchors.left: parent.left
-        anchors.top: parent.top
         anchors.bottom: parent.bottom
-        width: 10
-        cursorShape: Qt.SizeHorCursor
+        width: 28
+        height: 28
+        z: 100
+        cursorShape: Qt.SizeFDiagCursor
         property int sx: 0
         property int startW: 0
         onPressed: function(mouse) { sx = mapToItem(null, mouse.x, mouse.y).x; startW = root.videoWidth }
@@ -937,6 +952,7 @@ Item {
           required property int index
           readonly property bool selected: ListView.isCurrentItem
           width: ListView.view.width - 24
+          height: 44
           x: 12
           height: 40
           radius: Style.cornerRadius
