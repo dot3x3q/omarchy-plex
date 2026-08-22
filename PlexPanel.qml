@@ -10,12 +10,12 @@ import "Model.js" as Model
 // Hosted by omarchy-shell; summoned with:
 //   omarchy-shell shell toggle io.github.joshuaswarren.plexmini
 // Config lives in ~/.config/plexmini/config.json:
-//   { "server": "http://host:32400", "token": "...", "backend": "mpv" }
-// backend "mpv" (default): playback launches in a standalone mpv window with
-//   hardware decode (--hwdec=auto --vo=gpu-next) — the same engine as
-//   plex-mpv-shim, so it coexists with a running shim and uses the dGPU.
-//   The panel acts as a remote via mpv's JSON IPC socket.
-// backend "internal": QtMultimedia inside the panel (fallback).
+//   { "server": "http://host:32400", "token": "...", "backend": "internal" }
+// backend "internal" (default): ytmini-style miniplayer — video renders
+//   inside the floating panel with transport controls under it.
+// backend "mpv" (opt-in): playback launches in a standalone mpv window,
+//   pinned bottom-right (--hwdec=auto --vo=gpu-next for dGPU decode, same
+//   engine as plex-mpv-shim); the panel becomes the remote over mpv's IPC.
 //
 // Security posture: the X-Plex-Token travels only in HTTP headers for API
 // calls (never URL query — process lists, logs, and redirects leak those).
@@ -51,7 +51,7 @@ Item {
   // ---- config ----
   property string server: ""
   property string token: ""
-  property string backend: "mpv"
+  property string backend: "internal"
 
   FileView {
     id: configFile
@@ -65,7 +65,7 @@ Item {
         // Only accept well-formed persisted values; anything else re-runs setup.
         if (Model.validServer(s)) root.server = s
         if (Model.validToken(t)) root.token = t
-        if (doc.backend === "internal") root.backend = "internal"
+        if (doc.backend === "mpv") root.backend = "mpv"
       } catch (e) { /* first run */ }
     }
   }
@@ -204,6 +204,7 @@ Item {
   function open() {
     root.opened = true
     if (!configured()) { root.mode = "setup"; return }
+    if (window.visible) keyHost.forceActiveFocus()
     if (root.items.length === 0) loadOnDeck()
   }
 
@@ -317,12 +318,17 @@ Item {
       // Residual risk, accepted for a single-user desktop: the token header
       // is visible in mpv's argv (/proc/PID/cmdline). mpv cannot read
       // headers from a file; rotating the token closes any exposure window.
+      var sw = window && window.screen ? Math.round(window.screen.width) : 1920
+      var sh = window && window.screen ? Math.round(window.screen.height) : 1080
       mpvProc.command = ["mpv",
         "--no-config", "--no-ytdl",
         "--hwdec=auto", "--vo=gpu-next",
         "--really-quiet", "--keep-open=no",
         "--input-ipc-server=" + root.ipcSock,
         "--http-header-fields=X-Plex-Token: " + root.token,
+        // bottom-right miniplayer placement instead of centre-screen
+        "--autofit=" + root.videoWidth + "x" + root.videoHeight,
+        "--geometry=-" + (root.marginRight + 14) + "-" + (root.marginBottom + 130),
         mpvStarter.url]
       mpvProc.gen = mpvStarter.gen
       mpvProc.running = true
@@ -603,23 +609,33 @@ Item {
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
     exclusionMode: ExclusionMode.Ignore
 
-    onVisibleChanged: if (visible) resultList.forceActiveFocus()
-    Keys.onSpacePressed: function(event) {
-      event.accepted = true
-      root.togglePause()
+    // Keyboard host. PanelWindow cannot carry a Keys attachment (it is not
+    // an Item — the shell logs "Could not attach Keys"), so every shortcut
+    // lives here and this Item owns focus whenever the search field does not.
+    //   Space pause · Left/Right seek · Up/Down select · Enter play
+    //   PgUp/PgDn page the list · Esc hide · M mute (internal backend)
+    Item {
+      id: keyHost
+      width: 0; height: 0
+      focus: true
+
+      Keys.onSpacePressed: function(event) { event.accepted = true; root.togglePause() }
+      Keys.onLeftPressed: function(event) { event.accepted = true; root.seekRel(-30) }
+      Keys.onRightPressed: function(event) { event.accepted = true; root.seekRel(30) }
+      Keys.onUpPressed: function(event) { event.accepted = true; root.moveSel(-1) }
+      Keys.onDownPressed: function(event) { event.accepted = true; root.moveSel(1) }
+      // PageUp/PageDown/M have no attached-signal form; catch them here.
+      Keys.onPressed: function(event) {
+        if (event.key === Qt.Key_PageUp) { event.accepted = true; root.moveSel(-8) }
+        else if (event.key === Qt.Key_PageDown) { event.accepted = true; root.moveSel(8) }
+        else if (event.key === Qt.Key_M && !root.mpvMode) { event.accepted = true; audio.muted = !audio.muted }
+      }
+      Keys.onReturnPressed: function(event) { event.accepted = true; root.playSel() }
+      Keys.onEnterPressed: function(event) { event.accepted = true; root.playSel() }
+      Keys.onEscapePressed: function(event) { event.accepted = true; root.close() }
     }
-    Keys.onLeftPressed: root.seekRel(-30)
-    Keys.onRightPressed: root.seekRel(30)
-    Keys.onUpPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.moveSel(-1) } }
-    Keys.onDownPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.moveSel(1) } }
-    Keys.onPressed: function(event) {
-      if (root.mode !== "list") return
-      if (event.key === Qt.Key_PageUp) { event.accepted = true; root.moveSel(-8) }
-      else if (event.key === Qt.Key_PageDown) { event.accepted = true; root.moveSel(8) }
-    }
-    Keys.onReturnPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.playSel() } }
-    Keys.onEnterPressed: function(event) { if (root.mode === "list") { event.accepted = true; root.playSel() } }
-    Keys.onEscapePressed: root.close()
+
+    onVisibleChanged: if (visible) keyHost.forceActiveFocus()
 
     Column {
       anchors.fill: parent
@@ -797,7 +813,7 @@ Item {
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             onClicked: {
-              if (root.saveConfig()) root.loadOnDeck()
+              if (root.saveConfig()) { root.loadOnDeck(); keyHost.forceActiveFocus() }
             }
           }
         }
@@ -835,13 +851,14 @@ Item {
           Keys.onReturnPressed: function(event) {
             event.accepted = true
             if (resultList.currentIndex >= 0 && resultList.currentIndex < root.items.length) root.playSel()
-            else root.search(text)
+            else if (text.trim() !== "") root.search(text)
           }
           Keys.onEnterPressed: function(event) {
             event.accepted = true
             if (resultList.currentIndex >= 0 && resultList.currentIndex < root.items.length) root.playSel()
-            else root.search(text)
+            else if (text.trim() !== "") root.search(text)
           }
+          Keys.onTabPressed: function(event) { event.accepted = true; keyHost.forceActiveFocus() }
 
           Text {
             visible: searchInput.text === "" && !searchInput.activeFocus
@@ -859,8 +876,9 @@ Item {
       ListView {
         id: resultList
         width: parent.width
-        height: root.mode === "list" || root.mode === "error"
-          ? window.height - 34 - 1 - (searchInput.visible ? 30 : 0) - 14 : 0
+        height: root.mode !== "playing"
+          ? Math.max(0, window.height - 34 - 1 - (searchInput.visible ? 30 : 0) - 14)
+          : 0
         visible: height > 0
         focus: true
         Keys.onUpPressed: function(event) { event.accepted = true; root.moveSel(-1) }
