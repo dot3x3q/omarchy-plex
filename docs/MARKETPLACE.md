@@ -18,7 +18,7 @@ A resizable Plex miniplayer for Omarchy: Continue Watching, live type-to-search,
 
 ## Maintainer notes
 
-Plex Mini is a theme-aware Quickshell panel with an optional bar widget. It opens into Continue Watching with immediate live search (300 ms debounce), full keyboard navigation, and a resizable ytmini-style in-panel player. Direct playback seeks to Plex's stored `viewOffset`, reports timeline progress every 10 seconds, scrobbles at 90%, pauses on close/lock, and falls back once to universal-transcode HLS when direct play fails. Default playback uses QtMultimedia; an opt-in mpv backend provides separate dGPU-backed playback. Credentials are validated and stored chmod 600. API transfers and model mapping are explicitly bounded. Pure logic lives in Model.js with 12 passing node:test tests, including static QML integration contracts. External dependency: curl; optional mpv mode also needs mpv + socat.
+Plex Mini is a theme-aware Quickshell panel with an optional bar widget. It opens into Continue Watching with immediate live search (300 ms debounce), full keyboard navigation, and a resizable ytmini-style in-panel player. Direct playback seeks to Plex's stored `viewOffset`, reports timeline progress every 10 seconds, scrobbles at 90%, pauses on close/lock, and falls back once to universal-transcode HLS when direct play fails. Default playback uses QtMultimedia; an opt-in mpv backend provides separate dGPU-backed playback. Credentials are validated and stored chmod 600. API transfers and model mapping are explicitly bounded. Pure logic lives in Model.js with 16 passing node:test tests, including static QML integration contracts. External dependency: curl; optional mpv mode also needs mpv + socat.
 
 ## Submission body
 
@@ -40,7 +40,7 @@ _No response_
 
 ### Maintainer notes
 
-Plex Mini is a theme-aware Quickshell panel with an optional bar widget. It opens into Continue Watching with immediate live search (300 ms debounce), full keyboard navigation, and a resizable ytmini-style in-panel player. Direct playback seeks to Plex's stored `viewOffset`, reports timeline progress every 10 seconds, scrobbles at 90%, pauses on close/lock, and falls back once to universal-transcode HLS when direct play fails. Default playback uses QtMultimedia; an opt-in mpv backend provides separate dGPU-backed playback. Credentials are validated and stored chmod 600. API transfers and model mapping are explicitly bounded. Pure logic lives in Model.js with 12 passing node:test tests, including static QML integration contracts. External dependency: curl; optional mpv mode also needs mpv + socat.
+Plex Mini is a theme-aware Quickshell panel with an optional bar widget. It opens into Continue Watching with immediate live search (300 ms debounce), full keyboard navigation, and a resizable ytmini-style in-panel player. Direct playback seeks to Plex's stored `viewOffset`, reports timeline progress every 10 seconds, scrobbles at 90%, pauses on close/lock, and falls back once to universal-transcode HLS when direct play fails. Default playback uses QtMultimedia; an opt-in mpv backend provides separate dGPU-backed playback. Credentials are validated and stored chmod 600. API transfers and model mapping are explicitly bounded. Pure logic lives in Model.js with 16 passing node:test tests, including static QML integration contracts. External dependency: curl; optional mpv mode also needs mpv + socat.
 
 ### Submission checklist
 

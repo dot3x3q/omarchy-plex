@@ -52,20 +52,24 @@ Item {
   property string token: ""
   property string backend: "internal"
 
-  // Bounded regular-file read: reject symlinks, FIFOs/devices, and files
-  // over 4 KiB before StdioCollector sees a byte.
+  // Single bounded open: symlinks fail O_NOFOLLOW, FIFOs/devices cannot
+  // block under O_NONBLOCK, and the 4097th byte makes JS reject oversize.
   Process {
     id: configRead
     running: false
     command: ["sh", "-c",
-      "d='" + root.configDir + "'; f=\"$d/config.json\"; "
-      + "[ -d \"$d\" ] && [ ! -L \"$d\" ] && [ -f \"$f\" ] && [ ! -L \"$f\" ] "
-      + "&& sz=$(stat -c %s -- \"$f\") && [ \"$sz\" -le 4096 ] && cat -- \"$f\" || true"]
+      "d='" + root.configDir + "'; d=${d%/}; b=${d##*/}; "
+      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 0; "
+      + "[ -d \"$p/$b\" ] && [ ! -L \"$p/$b\" ] && cd -P -- \"$p/$b\" "
+      + "&& [ \"$(pwd -P)\" = \"$p/$b\" ] "
+      + "&& dd if=config.json iflag=nofollow,nonblock bs=4097 count=1 status=none 2>/dev/null || true"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var doc = JSON.parse(String(text || ""))
+          var raw = String(text || "")
+          if (raw.length > 4096) return
+          var doc = JSON.parse(raw)
           var s = String(doc.server || "")
           var t = String(doc.token || "")
           if (Model.validServer(s)) root.server = s
@@ -80,13 +84,14 @@ Item {
     // Validate visibly instead of silently mangling; nothing user-controlled
     // is ever interpolated into shell source.
     if (!Model.validServer(root.server)) {
-      fail("Server must look like http://host:32400")
+      root.statusText = "Server must look like http://host:32400"
       return false
     }
     if (!Model.validToken(root.token)) {
-      fail("Token looks wrong — Plex tokens are letters/digits, 20ish chars")
+      root.statusText = "Token looks wrong — Plex tokens are letters/digits, 20ish chars"
       return false
     }
+    root.statusText = ""
     saveProcess.running = true
     return true
   }
@@ -94,14 +99,22 @@ Item {
   Process {
     id: saveProcess
     running: false
-    // Atomic temp+rename replaces a destination symlink instead of following
-    // it. Reject a symlinked config directory before touching credentials.
+    // Secrets travel through the process stdin pipe, never argv, shell
+    // source, or world-readable cmdline. Pin cwd to the canonical directory
+    // inode, then write/rename relative names so a path swap cannot redirect.
+    stdinEnabled: true
+    onStarted: write(root.server + "\t" + root.token + "\t"
+      + (root.backend === "internal" ? "internal" : "mpv") + "\n")
     command: ["sh", "-c",
-      "d='" + root.configDir + "'; mkdir -p \"$d\" && [ ! -L \"$d\" ] && chmod 700 \"$d\" "
-      + "&& umask 077 && t=\"$d/.config.$$.tmp\" && trap 'rm -f \"$t\"' EXIT "
+      "IFS=$(printf '\t') read -r plex_server plex_token plex_backend || exit 1; "
+      + "d='" + root.configDir + "'; d=${d%/}; b=${d##*/}; "
+      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 1; "
+      + "mkdir -p -- \"$p/$b\" && [ ! -L \"$p/$b\" ] && chmod 700 \"$p/$b\" "
+      + "&& cd -P -- \"$p/$b\" && [ \"$(pwd -P)\" = \"$p/$b\" ] "
+      + "&& umask 077 && t=.config.$$.tmp && trap 'rm -f -- \"$t\"' EXIT "
       + "&& printf '{\"server\":\"%s\",\"token\":\"%s\",\"backend\":\"%s\"}' "
-      + "'" + root.server + "' '" + root.token + "' '" + (root.backend === "internal" ? "internal" : "mpv") + "' "
-      + "> \"$t\" && chmod 600 \"$t\" && mv -f -- \"$t\" \"$d/config.json\" && trap - EXIT"]
+      + "\"$plex_server\" \"$plex_token\" \"$plex_backend\" > \"$t\" "
+      + "&& chmod 600 \"$t\" && mv -f -- \"$t\" config.json && trap - EXIT"]
   }
 
   Component.onCompleted: {
@@ -122,6 +135,7 @@ Item {
   property string currentRatingKey: ""
   property string sessionId: ""
   property bool triedTranscode: false
+  property real lastFailMs: 0
   property bool userStop: false
   property bool scrobbled: false
   property int tickCount: 0
@@ -165,11 +179,14 @@ Item {
     property string width: "460"
     running: false
     command: ["sh", "-c",
-      "d='" + root.stateDir + "'; mkdir -p \"$d\" && [ ! -L \"$d\" ] && chmod 700 \"$d\" "
-      + "&& umask 077 && t=\"$d/.window.$$.tmp\" && trap 'rm -f \"$t\"' EXIT "
+      "d='" + root.stateDir + "'; d=${d%/}; b=${d##*/}; "
+      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 1; "
+      + "mkdir -p -- \"$p/$b\" && [ ! -L \"$p/$b\" ] && chmod 700 \"$p/$b\" "
+      + "&& cd -P -- \"$p/$b\" && [ \"$(pwd -P)\" = \"$p/$b\" ] "
+      + "&& umask 077 && t=.window.$$.tmp && trap 'rm -f -- \"$t\"' EXIT "
       + "&& printf '{\"right\":%s,\"bottom\":%s,\"width\":%s}' "
       + posSave.right + " " + posSave.bottom + " " + posSave.width
-      + " > \"$t\" && chmod 600 \"$t\" && mv -f -- \"$t\" \"$d/window.json\" && trap - EXIT"]
+      + " > \"$t\" && chmod 600 \"$t\" && mv -f -- \"$t\" window.json && trap - EXIT"]
   }
 
   // Bounded regular-file state read: no symlinks or special files; 1 KiB max.
@@ -177,14 +194,18 @@ Item {
     id: positionRead
     running: false
     command: ["sh", "-c",
-      "d='" + root.stateDir + "'; f=\"$d/window.json\"; "
-      + "[ -d \"$d\" ] && [ ! -L \"$d\" ] && [ -f \"$f\" ] && [ ! -L \"$f\" ] "
-      + "&& sz=$(stat -c %s -- \"$f\") && [ \"$sz\" -le 1024 ] && cat -- \"$f\" || true"]
+      "d='" + root.stateDir + "'; d=${d%/}; b=${d##*/}; "
+      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 0; "
+      + "[ -d \"$p/$b\" ] && [ ! -L \"$p/$b\" ] && cd -P -- \"$p/$b\" "
+      + "&& [ \"$(pwd -P)\" = \"$p/$b\" ] "
+      + "&& dd if=window.json iflag=nofollow,nonblock bs=1025 count=1 status=none 2>/dev/null || true"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var doc = JSON.parse(String(text || ""))
+          var raw = String(text || "")
+          if (raw.length > 1024) return
+          var doc = JSON.parse(raw)
           if (doc.right !== undefined) root.marginRight = Math.max(0, doc.right | 0)
           if (doc.bottom !== undefined) root.marginBottom = Math.max(0, doc.bottom | 0)
           if (doc.width !== undefined) root.videoWidth = Math.max(280, Math.min(900, doc.width | 0))
@@ -345,6 +366,7 @@ Item {
   }
 
   function fail(msg) {
+    pollTimer.stop()
     root.mode = "error"
     root.statusText = msg
   }
@@ -491,8 +513,12 @@ Item {
   }
 
   function seekAbs(fraction) {
-    if (root.backend !== "mpv" || root.dispDuration <= 0) return
-    mpvSend('{"command":["set_property","time-pos",' + (fraction * root.dispDuration).toFixed(1) + ']}')
+    if (root.backend === "mpv") {
+      if (root.dispDuration <= 0) return
+      mpvSend('{"command":["set_property","time-pos",' + (fraction * root.dispDuration).toFixed(1) + ']}')
+    } else if (player.duration > 0) {
+      player.position = Math.max(0, Math.min(player.duration, fraction * player.duration))
+    }
   }
   // ---- keyboard navigation ----
   // Up/Down move a selection through the results, Enter plays it, Space
@@ -596,6 +622,9 @@ Item {
   }
 
   function playbackFailed() {
+    var now = Date.now()
+    if (now - root.lastFailMs < 250) return
+    root.lastFailMs = now
     if (root.triedTranscode || root.currentRatingKey === "") {
       fail("Direct play and transcode both failed")
       return
@@ -739,6 +768,7 @@ Item {
           root.videoWidth = Math.max(280, Math.min(900, startW + (sx - gx)))
           root.saveWidth()
         }
+        onReleased: root.saveWidth()
       }
     Column {
       anchors.fill: parent
@@ -888,11 +918,13 @@ Item {
 
         Text {
           x: 12
-          color: root.foreground
-          opacity: 0.7
+          color: root.statusText !== "" ? root.urgent : root.foreground
+          opacity: root.statusText !== "" ? 1 : 0.7
           font.pixelSize: 11
           font.family: Style.fontFamily
-          text: "Enter saves · stored chmod 600 in ~/.config/plexmini · backend: " + root.backend
+          text: root.statusText !== ""
+            ? root.statusText
+            : "Enter saves · stored chmod 600 in ~/.config/plexmini · backend: " + root.backend
         }
 
         Rectangle {

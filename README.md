@@ -64,7 +64,7 @@ No transcode-quality settings UI, no subtitle selection, no multi-server support
 ## Security and limits
 
 - API token travels in headers; API requests do not follow redirects
-- Config is strict-shape validated, read only from a bounded regular non-symlink file, and atomically written chmod `0600` (destination symlinks are replaced, not followed)
+- Config is strict-shape validated, read only from a bounded no-follow, nonblocking file descriptor, and atomically written chmod `0600` (destination symlinks are replaced, not followed)
 - Remote part paths must remain absolute Plex library paths
 - Remote titles render as `Text.PlainText`
 - mpv runs `--no-config --no-ytdl` with a randomized IPC socket
