@@ -47,9 +47,9 @@ Item {
     root.service.title = root.currentTitle
   }
   onServiceChanged: root.syncPlayerState()
-  onModeChanged: root.syncPlayerState()
-  onIsPausedChanged: root.syncPlayerState()
   onCurrentTitleChanged: root.syncPlayerState()
+  // mode/isPaused sync rides the theater handlers below — a second handler
+  // for the same signal is a QML creation-time error, not an override.
 
   readonly property string pluginId: "io.github.joshuaswarren.plexmini"
   readonly property string configDir: (Quickshell.env("XDG_CONFIG_HOME")
@@ -190,7 +190,10 @@ Item {
   readonly property bool minibarVisible: root.mode === "playing" && !root.theater
 
   // Ending a session can never leave the view stranded on a dead video surface.
-  onModeChanged: if (root.mode !== "playing") root.theater = false
+  onModeChanged: {
+    if (root.mode !== "playing") root.theater = false
+    root.syncPlayerState()
+  }
 
   // Video libraries from /library/sections: [{ id, title, type }].
   property var libraries: []
@@ -981,7 +984,10 @@ Item {
   }
 
   onInTheaterChanged: root.pokeTheaterControls()
-  onIsPausedChanged: if (root.inTheater) root.pokeTheaterControls()
+  onIsPausedChanged: {
+    if (root.inTheater) root.pokeTheaterControls()
+    root.syncPlayerState()
+  }
 
   function finishPlayback() {
     sendTimeline("stopped")
