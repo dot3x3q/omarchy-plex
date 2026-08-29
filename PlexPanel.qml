@@ -787,13 +787,17 @@ Item {
           cursorShape: Qt.SizeAllCursor
           property int sx: 0
           property int sy: 0
-          property int sr: 0
-          property int sb: 0
-          onPressed: function(mouse) { sx = mouse.x; sy = mouse.y; sr = root.marginRight; sb = root.marginBottom }
+          onPressed: function(mouse) { sx = mouse.x; sy = mouse.y }
           onPositionChanged: function(mouse) {
             if (!pressed) return
-            root.marginRight = sr - (mouse.x - sx)
-            root.marginBottom = sb - (mouse.y - sy)
+            // Accumulate against the CURRENT margins, not a press-time
+            // snapshot. mouse.x is in this item's coordinates, and the item
+            // moves under the cursor as the margins change — so each event
+            // already reports only the not-yet-applied remainder. Subtracting
+            // from a fixed snapshot re-counts the applied part and converges
+            // to dragging at half the pointer speed.
+            root.marginRight = root.marginRight - (mouse.x - sx)
+            root.marginBottom = root.marginBottom - (mouse.y - sy)
             root.clampMargins()
           }
           onReleased: root.savePosition()
