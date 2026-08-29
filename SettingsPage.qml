@@ -2,10 +2,9 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 
-// Server/token setup, restyled onto the shared kit. The IO underneath is
-// untouched: this page only edits panel.server / panel.token / panel.backend
-// and calls panel.saveConfig(), which still writes through the stdin-fed,
-// cwd-pinned, atomic-rename Process in the root.
+// Server/token setup. This page only edits panel.server / panel.token /
+// panel.backend and calls panel.saveConfig(); the write itself goes through
+// the stdin-fed, cwd-pinned, atomic-rename Process in the root.
 Item {
   id: page
 
@@ -74,16 +73,15 @@ Item {
 
     TextField {
       id: serverField
-      // QQC2 TextField consumes Tab for its own focus chain (the same bug
-      // the search field was field-tested into fixing) — forward it so
+      // QQC2 TextField consumes Tab for its own focus chain — forward it so
       // region cycling survives a caret in this field.
       Keys.onTabPressed: function(event) { event.accepted = true; panel.cycleRegion(1) }
       Keys.onBacktabPressed: function(event) { event.accepted = true; panel.cycleRegion(-1) }
       width: parent.width
       hasCursor: page.cursorHere && page.cursorRow === page.rowServer
       placeholderText: "Server URL e.g. http://192.168.1.50:32400"
-      // One-way seed only: binding this both ways caused a loop that corrupted
-      // typed URLs mid-keystroke.
+      // One-way seed only: a two-way binding loops and corrupts typed URLs
+      // mid-keystroke.
       text: page.panel.server
       onTextEdited: page.panel.server = text.trim()
       onAccepted: page.commit()
@@ -92,8 +90,7 @@ Item {
 
     TextField {
       id: tokenField
-      // QQC2 TextField consumes Tab for its own focus chain (the same bug
-      // the search field was field-tested into fixing) — forward it so
+      // QQC2 TextField consumes Tab for its own focus chain — forward it so
       // region cycling survives a caret in this field.
       Keys.onTabPressed: function(event) { event.accepted = true; panel.cycleRegion(1) }
       Keys.onBacktabPressed: function(event) { event.accepted = true; panel.cycleRegion(-1) }
@@ -154,8 +151,8 @@ Item {
 
     Button {
       text: "Refresh library"
-      // Rehomed from the browse header (field request): refreshing is rare
-      // enough that it reads as clutter next to the page title. R still works.
+      // Refreshing is rare enough that it reads as clutter in the browse
+      // header, so it lives here. R still works.
       tooltipText: "Re-read libraries and the current page · R"
       bordered: true
       focusable: false
@@ -172,7 +169,7 @@ Item {
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
       textFormat: Text.PlainText
-      text: "Enter saves. The token is written chmod 600 to ~/.config/plexmini/config.json "
+      text: "Enter saves. The token is written chmod 600 to ~/.config/omarchy-plex/config.json "
         + "and only ever travels in request headers."
     }
   }

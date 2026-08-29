@@ -83,13 +83,12 @@ void MpvVideo::loadUrl(const QString &url, double startSeconds)
         return;
     }
 
-    // Field-diagnosed race (2026-08-29): a load issued before this item's
-    // window has rendered it once reaches mpv before the render context
-    // exists, the libmpv VO fails to open, and mpv drops the video track for
-    // the whole file — audio plays over a permanently black picture. Freshly
-    // mapped windows (the PiP) lose that race; long-running ones (the
-    // theater) win it by luck. Defer until one swapped frame proves the
-    // context is up.
+    // A load issued before this item's window has rendered it once reaches mpv
+    // before the render context exists: the libmpv VO fails to open and mpv
+    // drops the video track for the whole file — audio over a permanently
+    // black picture. Freshly mapped windows (the PiP) lose that race;
+    // long-running ones (the theater) win it by luck. Defer until one swapped
+    // frame proves the context is up.
     if (!m_renderSeen) {
         m_pendingUrl = url;
         m_pendingStart = startSeconds;

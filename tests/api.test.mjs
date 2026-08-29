@@ -1,9 +1,8 @@
-// Api.js unit tests. Same loading convention as model.test.mjs: the QML
-// script (plain function declarations, no module syntax) runs under
-// node:vm. Fixtures below are trimmed/sanitized captures from a real Plex
-// Media Server — field names and shapes are real, values (titles, ids,
-// paths) are fine to keep since this is the user's own private repo, but
-// tokens, machine identifiers and file paths were stripped or shortened.
+// Api.js unit tests. Same loading convention as model.test.mjs: the QML script
+// (plain function declarations, no module syntax) runs under node:vm. Fixtures
+// are trimmed, sanitized captures from a real Plex Media Server: field names
+// and shapes are real; tokens, machine identifiers and absolute file paths are
+// stripped or shortened. Keep it that way when adding fixtures.
 
 import { test } from "node:test"
 import assert from "node:assert/strict"
@@ -120,7 +119,7 @@ const episodeItem = {
   thumb: "/library/metadata/65501/thumb/1",
   art: "/library/metadata/65496/art/1",
   grandparentArt: "/library/metadata/65496/art/1"
-  // note: no viewCount field at all — confirmed live on an in-progress episode
+  // note: no viewCount field at all, which is what an in-progress episode sends
 }
 
 test("mapItems maps a movie with viewOffset/duration into progress + durationText", () => {
@@ -281,7 +280,7 @@ test("mapDetail on a show: falls back to audienceRating, tolerates absent Media"
     }
   }
   const d = A.mapDetail(showDetail)
-  assert.equal(d.rating, 5.2) // no top-level `rating` on shows — verified live
+  assert.equal(d.rating, 5.2) // shows carry no top-level `rating`
   assert.equal(d.media, null)
   assert.equal(d.unwatched, 8)
 })
@@ -300,7 +299,7 @@ test("mapDetail on an episode: no Genre field at all, never throws", () => {
           contentRating: "TV-MA",
           duration: 2501600,
           viewOffset: 109599
-          // no Genre, no thumb/art, no rating — all confirmed-plausible live shapes
+          // no Genre, no thumb/art, no rating — all real response shapes
         }
       ]
     }
@@ -507,7 +506,7 @@ test("selectedStreamId returns the flagged id, or empty when nothing is set", ()
 test("partSelectionUrl sends allParts and treats 0 as an explicit 'no subtitles'", () => {
   assert.equal(A.partSelectionUrl("http://s:32400", 524, "1516", "1518"),
     "http://s:32400/library/parts/524?audioStreamID=1516&subtitleStreamID=1518&allParts=1")
-  // Verified live: the two params are independent — an audio-only PUT leaves
+  // The two params are independent: an audio-only PUT leaves
   // the subtitle selection alone rather than clearing it.
   assert.equal(A.partSelectionUrl("http://s:32400", 524, "1517", ""),
     "http://s:32400/library/parts/524?audioStreamID=1517&allParts=1")

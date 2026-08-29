@@ -9,10 +9,10 @@ import qs.Ui
 import "Model.js" as Model
 import "Api.js" as Api
 
-// Plex Mini panel entry point.
+// Omarchy Plex panel entry point.
 // Hosted by omarchy-shell; summoned with:
-//   omarchy-shell shell toggle io.github.joshuaswarren.plexmini
-// Config lives in ~/.config/plexmini/config.json:
+//   omarchy-shell shell toggle dot3x3q.omarchy-plex
+// Config lives in ~/.config/omarchy-plex/config.json:
 //   { "server": "http://host:32400", "token": "...", "backend": "internal" }
 // backend "internal" (default): the video renders INSIDE this window, with the
 //   theater strip over it. Which in-window engine draws it is a capability
@@ -26,9 +26,9 @@ import "Api.js" as Api
 //
 // The window draws no chrome of its own: Hyprland owns the frame, the drag
 // and the resize, so an in-app title bar would only duplicate the compositor
-// and steal 34px from every screen. What the old header did lives on as the
-// status banner, the header row's actions, and the window `title:` property
-// that Hyprland's rules still match on.
+// and steal 34px from every screen. The status banner, the header row's
+// actions and the window `title:` property Hyprland's rules match on carry
+// what a title bar would otherwise have held.
 //
 // Security posture: the X-Plex-Token travels only in HTTP headers for API
 // calls (never URL query — process lists, logs, and redirects leak those).
@@ -56,14 +56,14 @@ Item {
   // mode/isPaused sync rides the theater handlers below — a second handler
   // for the same signal is a QML creation-time error, not an override.
 
-  readonly property string pluginId: "io.github.joshuaswarren.plexmini"
+  readonly property string pluginId: "dot3x3q.omarchy-plex"
   readonly property string configDir: (Quickshell.env("XDG_CONFIG_HOME")
-    || (Quickshell.env("HOME") + "/.config")) + "/plexmini"
+    || (Quickshell.env("HOME") + "/.config")) + "/omarchy-plex"
   // Per-session socket name inside XDG_RUNTIME_DIR (0700); random suffix so a
   // stale socket from a crashed instance is never reused.
   readonly property string sockId: {
     var d = new Date()
-    return "plexmini-" + d.getTime().toString(36) + "-" + Math.floor(Math.random() * 1e6).toString(36)
+    return "omarchy-plex-" + d.getTime().toString(36) + "-" + Math.floor(Math.random() * 1e6).toString(36)
   }
   readonly property string ipcSock: (Quickshell.env("XDG_RUNTIME_DIR")
     || ("/run/user/" + (Quickshell.env("UID") || "1000"))) + "/" + sockId + ".sock"
@@ -93,6 +93,16 @@ Item {
   property string token: ""
   property string backend: "internal"
 
+  function applyConfig(raw) {
+    if (raw.length > 4096) return
+    var doc = JSON.parse(raw)
+    var s = String(doc.server || "")
+    var t = String(doc.token || "")
+    if (Model.validServer(s)) root.server = s
+    if (Model.validToken(t)) root.token = t
+    if (doc.backend === "mpv") root.backend = "mpv"
+  }
+
   // Single bounded open: symlinks fail O_NOFOLLOW, FIFOs/devices cannot
   // block under O_NONBLOCK, and the 4097th byte makes JS reject oversize.
   Process {
@@ -107,16 +117,9 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        try {
-          var raw = String(text || "")
-          if (raw.length > 4096) return
-          var doc = JSON.parse(raw)
-          var s = String(doc.server || "")
-          var t = String(doc.token || "")
-          if (Model.validServer(s)) root.server = s
-          if (Model.validToken(t)) root.token = t
-          if (doc.backend === "mpv") root.backend = "mpv"
-        } catch (e) { /* first run or rejected file */ }
+        try { root.applyConfig(String(text || "")) }
+        catch (e) { /* first run or rejected file */ }
+        if (!root.configured()) legacyConfigRead.running = true
       }
     }
   }
@@ -156,6 +159,30 @@ Item {
       + "&& printf '{\"server\":\"%s\",\"token\":\"%s\",\"backend\":\"%s\"}' "
       + "\"$plex_server\" \"$plex_token\" \"$plex_backend\" > \"$t\" "
       + "&& chmod 600 \"$t\" && mv -f -- \"$t\" config.json && trap - EXIT"]
+  }
+
+  // Adopts a pre-rename install once. Read-only on the old paths — nothing
+  // there is ever rewritten or removed — and adoption goes back out through
+  // the normal save path, so the new location materializes on first run.
+  readonly property string legacyConfigDir: (Quickshell.env("XDG_CONFIG_HOME")
+    || (Quickshell.env("HOME") + "/.config")) + "/plexmini"
+  Process {
+    id: legacyConfigRead
+    running: false
+    command: ["sh", "-c",
+      "d='" + root.legacyConfigDir + "'; d=${d%/}; b=${d##*/}; "
+      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 0; "
+      + "[ -d \"$p/$b\" ] && [ ! -L \"$p/$b\" ] && cd -P -- \"$p/$b\" "
+      + "&& [ \"$(pwd -P)\" = \"$p/$b\" ] "
+      + "&& dd if=config.json iflag=nofollow,nonblock bs=4097 count=1 status=none 2>/dev/null || true"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try { root.applyConfig(String(text || "")) }
+        catch (e) { /* nothing to adopt */ }
+        if (root.configured()) root.saveConfig()
+      }
+    }
   }
 
   Component.onCompleted: {
@@ -204,10 +231,9 @@ Item {
     root.syncPlayerState()
   }
 
-  // Video libraries from /library/sections: [{ id, title, type }].
+  // Video libraries from /library/sections: [{ id, title, type }]. The root
+  // owns this so the debounced search box works from any page.
   property var libraries: []
-  // Wave-2 pages read this; the root fills it so the debounced search box
-  // keeps working before SearchPage is real.
   property var searchResults: []
 
   function setStatus(msg, urgent) {
@@ -332,7 +358,7 @@ Item {
 
   // ---- window position (persisted) ----
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME")
-    || (Quickshell.env("HOME") + "/.local/state")) + "/plexmini"
+    || (Quickshell.env("HOME") + "/.local/state")) + "/omarchy-plex"
   property int marginRight: 14
   property int marginBottom: 14
   // Primary surface: a real toplevel window the compositor tiles like any
@@ -377,11 +403,11 @@ Item {
       root.clampMargins()
     }
     // appWindow.screen is Qt's OPINION of the window's output, and on Wayland
-    // it proved to be a default, not a fact — a window tiled on monitor three
-    // still spawned its PiP on monitor one (field report, twice). The
-    // compositor is the only authority on where a toplevel lives, so ask it;
-    // the answer lands after the PiP maps, and reassigning screen then flows
-    // through onScreenChanged -> bouncePipPlayer like any other move.
+    // that is a default rather than a fact: a window tiled on monitor three
+    // still spawns its PiP on monitor one. The compositor is the only
+    // authority on where a toplevel lives, so ask it; the answer lands after
+    // the PiP maps, and reassigning screen then flows through onScreenChanged
+    // -> bouncePipPlayer like any other move.
     pipHostQuery.running = true
     // The theater's native item dies with this flip (per-surface players —
     // see the crash note at the native block); capture what its successor in
@@ -437,9 +463,8 @@ Item {
   //
   // A layer surface is bound to ONE wl_output for its entire life. There is no
   // "move me to that monitor" request in wlr-layer-shell, and the PiP is a
-  // full-screen surface masked to a card, so the card is trapped on whatever
-  // output the surface spawned on — the field complaint this block exists to
-  // answer, from a desk with a 4K panel next to two 1440p ones.
+  // full-screen surface masked to a card, so without what follows the card is
+  // trapped on whatever output the surface spawned on.
   //
   // Reassigning `PanelWindow.screen` DOES work at runtime. Quickshell
   // implements it as hide → setScreen → show, and because WlrLayershell forces
@@ -524,9 +549,9 @@ Item {
   // Live drag projection, driving the cross-monitor drop preview. The card
   // physically cannot follow the pointer past its surface's output — the
   // surface ends at the monitor border — so without a preview the gesture
-  // reads as stuck and users release back on the origin monitor (field
-  // report). While the drag overshoots onto another output, a click-through
-  // ghost overlay there draws the card outline at the exact drop point.
+  // reads as stuck and the drag gets released back on the origin monitor.
+  // While the drag overshoots onto another output, a click-through ghost
+  // overlay there draws the card outline at the exact drop point.
   property bool pipDragging: false
   property var pipDropScreen: null
   property real pipGhostX: 0
@@ -565,13 +590,13 @@ Item {
   }
 
   // Fixed pipeline, nothing interpolated: which output does the compositor
-  // say the Plex Mini toplevel is on right now. Queried at PiP entry, while
+  // say the Omarchy Plex toplevel is on right now. Queried at PiP entry, while
   // the toplevel is still mapped and matchable by title.
   Process {
     id: pipHostQuery
     running: false
     command: ["sh", "-c",
-      "m=$(hyprctl -j clients | jq -r 'first(.[] | select(.class==\"org.quickshell\" and (.title|endswith(\"Plex Mini\"))) | .monitor)'); "
+      "m=$(hyprctl -j clients | jq -r 'first(.[] | select(.class==\"org.quickshell\" and (.title|endswith(\"Omarchy Plex\"))) | .monitor)'); "
       + "hyprctl -j monitors | jq -r --argjson m \"${m:-null}\" 'first(.[] | select(.id==$m) | .name) // empty'"]
     stdout: StdioCollector {
       waitForEnd: true
@@ -633,22 +658,17 @@ Item {
   onVideoWidthChanged: root.clampMargins()
 
   // window.json is written whole, every time, so EVERY writer has to stage
-  // every staged field — not just the one it thinks it owns.
+  // every staged field — not just the one it thinks it owns. Two ways that
+  // bites otherwise: posSave's staged fields hold construction defaults
+  // (14/14/460/true) until something stages them, because positionRead loads
+  // straight into root's properties, so the session's first writer can put
+  // default geometry over the geometry just read off disk; and both resize
+  // grips move the card's anchored margin as well as its width, so a resize
+  // that staged only the width would pair it with a stale margin.
   //
-  // Two bugs die here. The first: `saveVolume` (and now `saveQuality`) can be
-  // the first writer of the session, and posSave's staged fields still hold
-  // their construction defaults — 14/14/460/true — because positionRead loads
-  // straight into root's properties and never touches posSave. Turning the
-  // volume up before moving the window therefore wrote DEFAULT geometry over
-  // the geometry just loaded from disk. The second: both resize grips move the
-  // card's anchored margin as well as its width (the top-left one indirectly,
-  // when clampMargins pulls the card back inside the screen it just grew past;
-  // the top-right one by design), so a resize was persisting a fresh width
-  // beside a marginRight from whenever savePosition last happened to run.
-  //
-  // volume and quality need no staging — they are bindings, for exactly this
-  // reason. The rest cannot be, because rebuilding the command string on every
-  // drag frame is the cost the staging exists to avoid.
+  // volume and quality are bindings rather than staged fields for the same
+  // reason. The rest cannot be: rebuilding the command string on every drag
+  // frame is the cost the staging exists to avoid.
   function stageWindowState() {
     posSave.right = "" + Math.round(root.marginRight)
     posSave.bottom = "" + Math.round(root.marginBottom)
@@ -664,9 +684,8 @@ Item {
     posSave.running = true
   }
 
-  // Volume moves in 5% key steps and in slider drags, so the write is deferred:
-  // one shell process per keystroke (or per frame) is exactly the mistake the
-  // resize grip already documents.
+  // Volume moves in 5% key steps and in slider drags, so the write is deferred
+  // — one shell process per keystroke, or per frame, is not affordable.
   Timer {
     id: volumeSaveDebounce
     interval: 600
@@ -712,6 +731,27 @@ Item {
       + " > \"$t\" && chmod 600 \"$t\" && mv -f -- \"$t\" window.json && trap - EXIT"]
   }
 
+  function applyWindowState(raw) {
+    if (raw.length > 1024) return
+    var doc = JSON.parse(raw)
+    if (doc.right !== undefined) root.marginRight = Math.max(0, doc.right | 0)
+    if (doc.bottom !== undefined) root.marginBottom = Math.max(0, doc.bottom | 0)
+    if (doc.width !== undefined) root.videoWidth = Math.max(280, Math.min(3800, doc.width | 0))
+    if (doc.volume !== undefined) root.volumePct = Math.max(0, Math.min(200, doc.volume | 0))
+    // Only a value the tier list actually offers is accepted. This one ends up
+    // substituted into a transcode URL, so "clamp it" is not good enough — an
+    // unrecognised number falls back to Original.
+    if (doc.quality !== undefined) {
+      var want = doc.quality | 0
+      root.qualityKbps = root.isQualityTier(want) ? want : 0
+    }
+    // Nothing is playing at load, and a PiP with no session shows no picture
+    // and offers no way to start one — a persisted floaty always comes back as
+    // the real window.
+    if (doc.windowed !== undefined)
+      root.windowed = doc.windowed === true || !root.pipAvailable
+  }
+
   // Bounded regular-file state read: no symlinks or special files; 1 KiB max.
   Process {
     id: positionRead
@@ -725,27 +765,34 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        try {
-          var raw = String(text || "")
-          if (raw.length > 1024) return
-          var doc = JSON.parse(raw)
-          if (doc.right !== undefined) root.marginRight = Math.max(0, doc.right | 0)
-          if (doc.bottom !== undefined) root.marginBottom = Math.max(0, doc.bottom | 0)
-          if (doc.width !== undefined) root.videoWidth = Math.max(280, Math.min(3800, doc.width | 0))
-          if (doc.volume !== undefined) root.volumePct = Math.max(0, Math.min(200, doc.volume | 0))
-          // Only a value the tier list actually offers is accepted. This one
-          // ends up substituted into a transcode URL, so "clamp it" is not
-          // good enough — an unrecognised number falls back to Original.
-          if (doc.quality !== undefined) {
-            var want = doc.quality | 0
-            root.qualityKbps = root.isQualityTier(want) ? want : 0
-          }
-          // Nothing is playing at load, and a PiP with no session shows no
-          // picture and offers no way to start one — a persisted floaty always
-          // comes back as the real window.
-          if (doc.windowed !== undefined)
-            root.windowed = doc.windowed === true || !root.pipAvailable
-        } catch (e) { /* keep defaults */ }
+        var raw = String(text || "")
+        try { root.applyWindowState(raw) } catch (e) { /* keep defaults */ }
+        // Empty output means no readable new state file at all, which is the
+        // only case an old one may speak for.
+        if (raw === "") legacyPositionRead.running = true
+      }
+    }
+  }
+
+  // The state half of the pre-rename adoption; see legacyConfigRead.
+  readonly property string legacyStateDir: (Quickshell.env("XDG_STATE_HOME")
+    || (Quickshell.env("HOME") + "/.local/state")) + "/plexmini"
+  Process {
+    id: legacyPositionRead
+    running: false
+    command: ["sh", "-c",
+      "d='" + root.legacyStateDir + "'; d=${d%/}; b=${d##*/}; "
+      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 0; "
+      + "[ -d \"$p/$b\" ] && [ ! -L \"$p/$b\" ] && cd -P -- \"$p/$b\" "
+      + "&& [ \"$(pwd -P)\" = \"$p/$b\" ] "
+      + "&& dd if=window.json iflag=nofollow,nonblock bs=1025 count=1 status=none 2>/dev/null || true"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var raw = String(text || "")
+        if (raw === "") return
+        try { root.applyWindowState(raw) } catch (e) { return }
+        root.savePosition()
       }
     }
   }
@@ -760,8 +807,7 @@ Item {
   onSessionLockedChanged: {
     if (root.mode !== "playing") return
     if (root.sessionLocked) {
-      // isPaused already knows which of the three engines is live, and says
-      // exactly what the hand-rolled expression here used to.
+      // isPaused already knows which of the three engines is live.
       root.wasPlayingBeforeLock = !root.isPaused
       if (root.backend === "mpv") mpvSend('{"command":["set_property","pause",true]}')
       else if (root.nativeMode) { if (root.nativeVideo) root.nativeVideo.paused = true }
@@ -861,9 +907,9 @@ Item {
   ]
 
   // Four curl slots and a FIFO queue. A home page fans out one request per
-  // library, and an unbounded fan-out would have the server rate-limiting us
-  // and the process table churning; four in flight keeps it civil and still
-  // saturates a LAN Plex.
+  // library, and an unbounded fan-out gets the server rate-limiting and the
+  // process table churning; four in flight stays civil and still saturates a
+  // LAN Plex.
   property var reqQueue: []
   readonly property var reqSlots: [req0, req1, req2, req3]
 
@@ -1038,8 +1084,8 @@ Item {
       root.searchResults = out
       // A slow response can land after the user navigated away; its banner
       // belongs to the search page, not to wherever they are now. And a null
-      // doc is a transport/auth failure, not an empty library — say so
-      // (review finding: a dead server rendered as a normal empty app).
+      // doc is a transport/auth failure, not an empty library — say so, or a
+      // dead server renders as a perfectly normal empty app.
       if (root.currentPage !== "search") return
       if (doc === null) root.setStatus("Plex request failed — check server, token and network", true)
       else root.setStatus(out.length === 0 ? "No results for “" + query + "”" : "", false)
@@ -1378,16 +1424,16 @@ Item {
 
   // ---- the volume popup ----
   //
-  // A vertical slider that hangs above the mute button, replacing the inline
-  // horizontal one that used to cost the theater strip ~120px of width for a
-  // control wanted a second at a time. It stays up while the pointer is on the
-  // button OR on the popup; the grace period is what lets the diagonal traverse
+  // A vertical slider that hangs above the mute button rather than sitting
+  // inline, where it would cost the theater strip ~120px of width for a control
+  // wanted a second at a time. It stays up while the pointer is on the button
+  // OR on the popup; the grace period is what lets the diagonal traverse
   // between the two cross the gap without the popup vanishing underneath it.
   //
   // The keyboard reaches it through volumeAdjusting rather than the panel
   // cursor: ↑/↓ is the only keyboard route to the volume in theater (there is
-  // no cursor walk along the strip), so the reading that already flashed on
-  // every key step now brings the whole popup with it, live.
+  // no cursor walk along the strip), so a key step brings the whole popup up
+  // with the reading.
   //
   // Theater only. The PiP strip has no mute button to hang it off — four
   // controls is the entire budget on a 460px card — so there is nothing to
@@ -1649,10 +1695,10 @@ Item {
   //
   //  - The PUT runs in every case. It records the selection against the part
   //    server-side, so a transcode started later — by this pick or by a codec
-  //    failure an hour from now — is muxed from the right tracks. Verified
-  //    live: 200 with an empty body, no client-identifier header needed, the
-  //    audio and subtitle params independent of one another, and
-  //    subtitleStreamID=0 meaning "none".
+  //    failure an hour from now — is muxed from the right tracks. It answers
+  //    200 with an empty body, needs no client-identifier header, takes the
+  //    audio and subtitle params independently, and reads subtitleStreamID=0
+  //    as "none".
   //  - Direct play on the internal backend then also moves the PLAYER's own
   //    active track, which is what makes the change audible immediately.
   //  - mpv gets an IPC property write, by ordinal.
@@ -1663,9 +1709,8 @@ Item {
   property var subtitleStreams: []
   property string currentPartId: ""
   // The part's media key, kept so a quality switch back to Original can rebuild
-  // the direct-play URL. applyMetadata consumes Model's copy inline and Model's
-  // playback parse is frozen, so this is stashed off the same resolve response
-  // rather than costing a second round trip — the metadataThumb precedent.
+  // the direct-play URL. Stashed off the resolve response the panel already
+  // has, rather than costing a second round trip.
   property string currentPartKey: ""
   // Plex stream ids, as strings. "" on the subtitle side means "none".
   property string selectedAudioId: ""
@@ -1674,10 +1719,9 @@ Item {
   readonly property bool audioPickerAvailable: root.mode === "playing" && root.audioStreams.length > 1
   readonly property bool subtitlePickerAvailable: root.mode === "playing" && root.subtitleStreams.length > 0
 
-  // Same reasoning as metadataThumb: Model.parsePlaybackMetadata is frozen and
-  // knows only about playback, but the resolve body already carries the whole
-  // Stream list, so the tracks are read out of the response we already have
-  // rather than costing a second round trip.
+  // Model.parsePlaybackMetadata knows only about playback, but the resolve body
+  // already carries the whole Stream list, so the tracks are read straight out
+  // of that response.
   function stashStreams(jsonText) {
     var parsed = null
     var partKey = ""
@@ -1718,7 +1762,7 @@ Item {
 
   // Qt plays the container's DEFAULT track, not the one Plex has selected —
   // an anime opens dubbed in Japanese while the picker truthfully shows
-  // English as selected (field report 2026-08-29). Once the demuxer is up and
+  // English as selected. Once the demuxer is up and
   // the lists align, push Plex's selection into the pipeline. Re-fires per
   // source, which is also correct after a user pick: selectedAudioId tracks
   // the latest choice. Skipped for transcodes — the choice is muxed in.
@@ -1834,7 +1878,7 @@ Item {
     // Qt's ffmpeg backend only ever reads a subtitle rect's TEXT payload; the
     // bitmap one is never touched, so a PGS or VOBSUB track cannot be drawn
     // in-window at all and the server has to burn it into the picture. Not a
-    // corner case here — Akira ships three image tracks and one SRT.
+    // corner case: a film often ships several image tracks and one text one.
     if (kind === "subtitle" && row.image === true) return true
     return !root.playerTracksAligned(kind)
   }
@@ -1893,9 +1937,9 @@ Item {
   }
 
   // The native sibling of applyPlexSelectedTracks, and it exists for the same
-  // field report: mpv, like Qt, opens the container's DEFAULT track rather than
-  // the one Plex has selected, so a dubbed film starts in the wrong language
-  // while the picker truthfully shows the right one.
+  // reason: mpv, like Qt, opens the container's DEFAULT track rather than the
+  // one Plex has selected, so a dubbed film starts in the wrong language while
+  // the picker truthfully shows the right one.
   //
   // Simpler than the Qt version in three ways. fileLoaded() IS the readiness
   // signal, so there is no mediaStatus dance. There is no alignment test,
@@ -2026,9 +2070,9 @@ Item {
   // transcode path even when the file would have played directly, which is the
   // whole point over a thin link. Persisted in window.json beside volumePct.
   //
-  // THREE params, not two, and that is the whole subtlety here. Verified
-  // 2026-08-29 against the Plex API spec, the live Plex Web bundle (4.160.0),
-  // plex-for-kodi's plexnet and Tautulli:
+  // THREE params, not two, and that is the whole subtlety here. Cross-checked
+  // against the Plex API spec, the Plex Web bundle, plex-for-kodi's plexnet
+  // and Tautulli:
   //
   //  - maxVideoBitrate is in kbps.
   //  - videoQuality is Plex's own 0–100 encoder-quality knob — NOT a ladder
@@ -2045,7 +2089,7 @@ Item {
   // quality/resolution pairings are Plex's own ladder where the rungs line up
   // (12000→90, 8000→60, 4000→100, 2000→60). The 4K and 480p rungs are ours:
   // Plex's named ladder tops out at 20 Mbps 1080p and has no 480p tier, but
-  // videoResolution is a free-form cap and this library is full of 4K DoVi.
+  // videoResolution is a free-form cap and 4K sources are ordinary now.
   property int qualityKbps: 0
 
   readonly property var qualityTiers: [
@@ -2103,15 +2147,15 @@ Item {
 
   // What transcodeUrl actually emits. A chosen tier wins everywhere — including
   // over a codec-failure fallback that fires an hour later — but with no tier
-  // chosen these stay on 6000/60, exactly the constants the automatic fallback
-  // has always used. Picking Original does NOT soften the fallback: a direct
-  // play that dies still has to land somewhere.
+  // chosen these stay on 6000/60, the automatic fallback's own constants.
+  // Picking Original does NOT soften the fallback: a direct play that dies
+  // still has to land somewhere.
   readonly property int transcodeBitrateKbps: root.qualityKbps > 0 ? root.qualityKbps : 6000
   readonly property int transcodeVideoQuality: root.qualityKbps > 0
     ? root.qualityForKbps(root.qualityKbps) : 60
   // Empty with no tier chosen, and transcodeUrl then omits the param entirely,
-  // so the automatic codec-failure fallback sends exactly the query it always
-  // has. Only a deliberate pick adds a resolution cap.
+  // so the automatic codec-failure fallback sends the unconstrained query.
+  // Only a deliberate pick adds a resolution cap.
   readonly property string transcodeResolution: root.qualityKbps > 0
     ? root.resolutionForKbps(root.qualityKbps) : ""
 
@@ -2293,11 +2337,10 @@ Item {
   // is not. That auto-upgrade is why there is no third config value to pick and
   // no setting to get wrong.
   //
-  // Why prefer it: QtMultimedia's sink does no HDR tone mapping (this library
-  // is full of 4K DoVi, and it plays with crushed blacks and clipped
-  // highlights) and drops to software decode on NVIDIA. It also cannot send an
-  // HTTP header, which is why the internal path has always had to hang the Plex
-  // token off the media URL. libmpv fixes all three.
+  // Why prefer it: QtMultimedia's sink does no HDR tone mapping (4K DoVi plays
+  // with crushed blacks and clipped highlights) and drops to software decode on
+  // NVIDIA. It also cannot send an HTTP header, which is why the QtMultimedia
+  // path has to hang the Plex token off the media URL. libmpv fixes all three.
   //
   // The QtMultimedia path is NOT legacy and must not be removed. MpvQt's item
   // is a QQuickFramebufferObject, which is OpenGL-only by Qt's own
@@ -2307,9 +2350,9 @@ Item {
   // the live player is whichever per-surface Loader is active. ONE MpvVideo
   // must never move between QQuickWindows: the FBO's render context dies with
   // the swap and the next render call locks a freed mutex —
-  // mpv_render_context_render → pthread_mutex_lock, SIGSEGV, the whole shell
-  // (field crash 2026-08-29, coredump-confirmed). So each surface owns its own
-  // item and a surface switch is a deliberate reload-at-position handoff.
+  // mpv_render_context_render → pthread_mutex_lock, SIGSEGV, taking the whole
+  // shell with it. So each surface owns its own item and a surface switch is a
+  // deliberate reload-at-position handoff.
   readonly property bool nativeReady: nativeProbe.status === Loader.Ready
   readonly property var nativeVideo: root.windowed ? theaterNativeLoader.item : pipNativeLoader.item
   readonly property bool nativeMode: root.backend === "internal" && root.nativeReady
@@ -2328,8 +2371,8 @@ Item {
 
   // Reassigning window.screen recreates the SURFACE under the same item
   // (Quickshell hides, moves, shows — and a hidden layer surface is deleted),
-  // which kills the render context exactly like the reparent did: black
-  // picture, audio marching on (field report: monitor cycle in PiP). So any
+  // which kills the render context exactly like a reparent would: black
+  // picture, audio marching on. So any
   // screen change of the PiP while native video is up bounces the player
   // through the same reload-at-position handoff a surface flip uses.
   property bool pipPlayerBounce: false
@@ -2338,10 +2381,10 @@ Item {
     if (root.windowed || !root.nativeMode || root.mode !== "playing") return
     if (root.pipPlayerBounce) return
     // screenChanged also fires when the surface FIRST maps (mapping assigns
-    // the output), which must not stomp the arm the surface flip staged —
-    // that stomp read position 0 off the brand-new player and restarted
-    // films from the beginning (field report). An arm already staged wins,
-    // and a player with no duration yet has no position worth capturing.
+    // the output), and that must not stomp the arm the surface flip staged: it
+    // would capture position 0 off the brand-new player and restart the film
+    // from the beginning. An arm already staged wins, and a player with no
+    // duration yet has no position worth capturing.
     if (root.pendingNativeArm !== null) return
     var v = root.nativeVideo
     if (!v || !(v.duration > 0)) return
@@ -2454,9 +2497,8 @@ Item {
     // Universal transcode HLS: server re-encodes, player plays the playlist.
     // Token stays in the query because HLS players fetch segments themselves;
     // the URL exists only inside this machine's mpv/player process.
-    // Bisected live against PMS 2026-08-29 after every transcode returned a
-    // bare 400 (upstream's fallback had never actually worked here):
-    //  - "path" must be lowercase; the old "Path" is rejected outright.
+    // Get any of these three wrong and the server answers a bare 400:
+    //  - "path" must be lowercase; "Path" is rejected outright.
     //  - X-Plex-Platform is REQUIRED in the query — the server derives its
     //    whole transcode client profile from it. "Chrome" gets the h264/aac
     //    HLS ladder QtMultimedia's ffmpeg handles, and is what python-plexapi
@@ -2476,7 +2518,7 @@ Item {
       + "&session=" + root.sessionId
       + "&X-Plex-Platform=Chrome"
       + "&X-Plex-Token=" + root.token
-      + "&X-Plex-Product=Plex%20Mini"
+      + "&X-Plex-Product=Omarchy%20Plex"
   }
 
   function playbackFailed() {
@@ -2506,7 +2548,7 @@ Item {
         + "&state=" + state
         + "&hasMDE=1&identifier=com.plexapp.plugins.library"
         + "&X-Plex-Client-Identifier=" + root.pluginId
-        + "&X-Plex-Product=Plex%20Mini&X-Plex-Device-Name=PlexMini"])
+        + "&X-Plex-Product=Omarchy%20Plex&X-Plex-Device-Name=OmarchyPlex"])
     timelinePost.running = true
   }
 
@@ -2572,7 +2614,7 @@ Item {
   }
 
   function pageTitle() {
-    if (root.mode === "setup") return "Set up Plex Mini"
+    if (root.mode === "setup") return "Set up Omarchy Plex"
     if (root.currentPage === "settings") return "Settings"
     if (root.currentPage === "search") return "Search"
     if (root.currentPage === "library") return root.libraryTitle(root.pageParams.sectionId)
@@ -2638,9 +2680,8 @@ Item {
 
   function armEscapeClose() {
     root.escapeCloseArmed = true
-    // The close button used to carry this cue; with the header slimmed to
-    // Omarchy-native chrome, the banner is what makes the second Esc not a
-    // guess.
+    // Nothing else on screen announces the arm, so the banner is what makes
+    // the second Esc a decision rather than a guess.
     root.setStatus("Press Esc again to close", false)
     escapeCloseTimer.restart()
   }
@@ -2714,7 +2755,7 @@ Item {
   function cycleRegion(dir) {
     var order = ["search", "page", "sidebar"]
     // The minibar and header join the cycle so every visible control is
-    // keyboard-discoverable (audit finding), minibar only while on screen.
+    // keyboard-discoverable; the minibar only while it is on screen.
     if (root.minibarVisible) order.push("minibar")
     if (root.headerActions.length > 0) order.push("header")
     var at = order.indexOf(root.cursorRegion)
@@ -2777,8 +2818,8 @@ Item {
     }
     if (root.cursorRegion === "minibar") {
       // The bar is one row at the bottom of the window: up leaves it, h/l walk
-      // its actions — except on the seek slot, where horizontal IS the action
-      // (audit: a highlightable-but-inert slider broke "mouse never required").
+      // its actions — except on the seek slot, where horizontal IS the action:
+      // a highlightable but inert slider would break "mouse never required".
       // j steps off the slider instead, down having nowhere else to go.
       if (root.cursorAction === "seek" && dx !== 0) { root.nudgeSeek(dx * 10); return }
       if (root.cursorAction === "seek" && dy > 0) {
@@ -2840,7 +2881,7 @@ Item {
       root.toggleMute()
       return true
     }
-    // Stop was the only transport action without a key (audit finding).
+    // Every other transport action has a key; this one is Stop's.
     if (!ctrl && !alt && key === Qt.Key_X) {
       root.stop()
       return true
@@ -2979,7 +3020,7 @@ Item {
     color: "transparent"
     onWidthChanged: root.clampMargins()
     onHeightChanged: root.clampMargins()
-    WlrLayershell.namespace: "plexmini"
+    WlrLayershell.namespace: "omarchy-plex"
     WlrLayershell.layer: WlrLayer.Top
     // Only the card takes input; a full-screen surface that ate clicks would
     // make the desktop unusable behind it.
@@ -3090,9 +3131,9 @@ Item {
           // A high-rate mouse delivers position events far faster than the
           // display swaps frames, and every margin write re-lays-out the card
           // AND recomputes the input-region mask — a compositor round trip.
-          // Doing that per event is the drag stutter (field report); the
-          // handler only stashes, and the FrameAnimation below applies the
-          // latest position exactly once per rendered frame.
+          // Doing that per event is the drag stutter, so the handler only
+          // stashes and the FrameAnimation below applies the latest position
+          // exactly once per rendered frame.
           property real targetX: 0
           property real targetY: 0
           onPositionChanged: function(mouse) {
@@ -3170,10 +3211,10 @@ Item {
           onPositionChanged: function(mouse) {
             if (!pressed) return
             var gx = mapToItem(null, mouse.x, mouse.y).x
-            // No save here: a write per mouse event spawned a shell process per
+            // No save here: a write per mouse event is a shell process per
             // frame. The release below persists the settled width once.
-            // Cap at the surface, not a constant: 900 was upstream's laptop-scale
-            // limit and read as "not very big" on a 4K monitor (field report).
+            // Cap at the surface, not a constant — any fixed pixel ceiling that
+            // suits a laptop reads as "not very big" on a 4K monitor.
             root.videoWidth = Math.max(280, Math.min(
               (window.screen ? window.screen.width : 3800) - Style.space(28),
               startW + (sx - gx)))
@@ -3330,8 +3371,8 @@ Item {
   // ---- cross-monitor drop preview ----
   // One click-through overlay per OTHER output, mapped only while a drag's
   // pointer is actually over that output. It draws the card outline at the
-  // exact clamped landing spot — the answer to "will it drop where my mouse
-  // is?" being no longer a leap of faith (field request). An empty input
+  // exact clamped landing spot, so "will it drop where my mouse is?" is not a
+  // leap of faith. An empty input
   // Region makes the whole surface transparent to the pointer, so the drag's
   // implicit grab on the origin surface is never disturbed.
   Variants {
@@ -3345,7 +3386,7 @@ Item {
         && root.sameScreen(root.pipDropScreen, modelData)
       anchors { top: true; left: true; right: true; bottom: true }
       color: "transparent"
-      WlrLayershell.namespace: "plexmini-ghost"
+      WlrLayershell.namespace: "omarchy-plex-ghost"
       WlrLayershell.layer: WlrLayer.Overlay
       WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
       exclusionMode: ExclusionMode.Ignore
@@ -3376,7 +3417,7 @@ Item {
     id: appWindow
     visible: root.opened && root.windowed && !root.sessionLocked
     title: root.mode === "playing" && root.currentTitle !== ""
-      ? root.currentTitle + " — Plex Mini" : "Plex Mini"
+      ? root.currentTitle + " — Omarchy Plex" : "Omarchy Plex"
     color: root.background
     implicitWidth: 960
     implicitHeight: 600
@@ -3384,7 +3425,7 @@ Item {
     onVisibleChanged: if (visible) root.focusPrimary()
     // A compositor-initiated close (Super+Q, killactive) bypasses root.close()
     // entirely: playback would keep running with no surface and `opened` would
-    // desync from reality (code-review finding). Our OWN hides flip
+    // desync from reality. Our OWN hides flip
     // opened/windowed/sessionLocked before visibility changes, so those cases
     // fall through the guards and only an external close lands here.
     onClosed: {
@@ -3397,7 +3438,7 @@ Item {
       focus: true
 
       // Below this the sidebar drops to an icon rail. Only the real window is
-      // width-responsive now — the PiP has no sidebar to collapse — so this is
+      // width-responsive — the PiP has no sidebar to collapse — so this is
       // about a narrow TILED window, not about the floaty surface.
       readonly property bool compact: content.width < Style.space(760)
 
@@ -3449,7 +3490,7 @@ Item {
           active: root.nativeMode && root.mode === "playing" && root.windowed
           // Alive while browsing (playback continues behind the minibar),
           // painted only in theater — without this the film renders full-bleed
-          // UNDER the browse UI (field report).
+          // UNDER the browse UI.
           visible: root.inTheater
           source: "NativeVideoHost.qml"
           onLoaded: root.armNativePlayback()
@@ -3503,7 +3544,7 @@ Item {
 
               Text {
                 width: parent.width
-                text: "Plex Mini"
+                text: "Omarchy Plex"
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.subtitle
@@ -3679,14 +3720,14 @@ Item {
           TextField {
             id: searchInput
             // QQC2 TextField consumes Tab for its own focus chain, so region
-            // cycling dies inside the field unless Tab is forwarded by hand
-            // (field-tested: Tab did nothing, then "j" typed into the query).
+            // cycling dies inside the field unless Tab is forwarded by hand:
+            // Tab does nothing, and the next letter types into the query.
             Keys.onTabPressed: function(event) { event.accepted = true; root.cycleRegion(1) }
             Keys.onBacktabPressed: function(event) { event.accepted = true; root.cycleRegion(-1) }
             // Focus and cursor region must never disagree: open() focuses this
             // field directly, and if the region still says "page", the first Tab
-            // walks page->sidebar and the second wraps right back into the field
-            // (field-tested: Tab Tab j searched for "j" instead of navigating).
+            // walks page->sidebar and the second wraps straight back into the
+            // field, so the next letter is typed instead of navigating.
             onActiveFocusChanged: if (activeFocus) root.setPanelCursor("search", "input")
             anchors.left: parent.left
             anchors.right: parent.right
@@ -3787,7 +3828,7 @@ Item {
             Text {
               anchors.centerIn: parent
               // Keyed on load state, not just an empty path: a 404'd fetch
-              // left neither image nor glyph, just the bare well (audit).
+              // leaves neither image nor glyph, just the bare well.
               visible: minibarArtImage.status !== Image.Ready
               text: "󰎁"
               color: root.muted
@@ -3838,12 +3879,11 @@ Item {
             hasCursor: root.cursorOn("minibar", "seek")
             foreground: root.foreground
             accent: root.accent
-            // A scrubber gets no hover box. The panel-cursor plumbing stays
-            // exactly as it was — hover still claims the cursor and the keyboard
-            // "seek" action is still reachable — but the fill and the border are
-            // dropped, because a rectangle snapping up around the timeline reads
-            // as a rendering defect rather than a highlight. The knob below
-            // carries the keyboard indication instead.
+            // A scrubber gets no hover box: hover still claims the panel cursor
+            // and the keyboard "seek" action stays reachable, but a rectangle
+            // snapping up around the timeline reads as a rendering defect
+            // rather than a highlight. The knob below carries the keyboard
+            // indication instead.
             fill: "transparent"
             borderSpec: Border.none()
 
@@ -3957,9 +3997,9 @@ Item {
       }
 
       // ---------- resize bands ----------
-      // startSystemResize turned out to exist alongside startSystemMove on
-      // FloatingWindow (Qt::Edges parameter), so the four edges and four corners
-      // each get a grab band. Declared last, and z-raised, so they win over the
+      // startSystemResize sits alongside startSystemMove on FloatingWindow
+      // (Qt::Edges parameter), so the four edges and four corners each get a
+      // grab band. Declared last, and z-raised, so they win over the
       // content underneath — they only ever cover the outermost few pixels,
       // which the window's Style.space(14) content margin leaves empty anyway.
       // No threshold here: a press on an 8px edge band is unambiguous, and a
@@ -4019,11 +4059,10 @@ Item {
   // Full-bleed in both hosts: no margins, the background showing through the
   // letterbox bars.
   //
-  // Only the QtMultimedia sink lives in here now. The native players are
-  // per-surface (see theaterSlot/pipSlot): the risk note that used to sit
-  // here came true — a reparented FBO's render context died with the window
-  // swap and took the shell down — so the native engine never rides this
-  // reparent again.
+  // Only the QtMultimedia sink lives in here. The native players are
+  // per-surface (see theaterSlot/pipSlot) because a reparented FBO's render
+  // context dies with the window swap and takes the shell down with it, so the
+  // native engine never rides this reparent.
   Item {
     id: videoLayer
     parent: root.windowed ? theaterSlot : pipSlot
@@ -4036,8 +4075,8 @@ Item {
       anchors.fill: parent
       // Hidden, not destroyed, when libmpv has the picture: player.videoOutput
       // is a sink pointer QtMultimedia holds for the life of the session, and
-      // this stays the fallback the panel drops back to if the module ever goes
-      // away between runs.
+      // this is the fallback the panel drops back to if the module goes away
+      // between runs.
       visible: root.backend !== "mpv" && !root.nativeMode
       fillMode: VideoOutput.PreserveAspectFit
     }

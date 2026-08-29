@@ -16,7 +16,7 @@ Item {
 
   property var onDeckItems: []
   // Continue Watching caps at five rows so Recently Added stays above the
-  // fold (field request 2026-08-29); the toggle row below expands in place.
+  // fold; the toggle row below expands in place.
   readonly property int cwCap: 5
   property bool cwExpanded: false
   readonly property var cwShown: cwExpanded ? onDeckItems : onDeckItems.slice(0, cwCap)
@@ -30,10 +30,9 @@ Item {
   property int cursorSection: 0
   property int cursorIndex: 0
 
-  // Single-highlight rule (BUILD-CONTRACT / SettingsPage.qml precedent): the
-  // page's own cursor only actually shows while the panel cursor sits in
-  // the "page" region — otherwise the sidebar/search highlight would show
-  // alongside ours.
+  // Single-highlight rule: the page's own cursor only shows while the panel
+  // cursor sits in the "page" region — otherwise the sidebar/search highlight
+  // would show alongside ours.
   readonly property bool cursorHere: panel.cursorRegion === "page"
 
   readonly property int shelfCardWidth: Style.space(120)
@@ -144,11 +143,10 @@ Item {
       homeFlick.contentY = Math.max(0, pos.y + target.height - homeFlick.height)
   }
 
-  // ---- Image-URL handoff: this page resolves every thumbPath at fetch
-  // time, at the size its own row/card will actually render (contract). CW
-  // rows want landscape 16:9 art; a movie has no landscape thumb of its
-  // own, so its wide backdrop (artPath) stands in — episodes' thumbPath is
-  // already 16:9 (PLEX-API.md "Image path rules").
+  // ---- Image-URL handoff: this page resolves every thumbPath at fetch time,
+  // at the size its own row/card will actually render. CW rows want landscape
+  // 16:9 art; a movie has no landscape thumb of its own, so its wide backdrop
+  // (artPath) stands in — episodes' thumbPath is already 16:9.
   function resolveOnDeck(raw) {
     var h = Style.space(56)
     var w = Math.round(h * 16 / 9)
@@ -254,11 +252,9 @@ Item {
           text: "CONTINUE WATCHING"
         }
 
-        // Field report 2026-08-28: while On Deck loaded, this section was one
-        // line tall, so the shelves painted near the top and then got shoved
-        // off-screen when the rows landed — reading as the page "changing".
-        // The placeholder reserves roughly three rows so sections fill in
-        // place instead of reflowing.
+        // A one-line-tall loading section lets the shelves paint near the top
+        // and then get shoved off-screen when the rows land. The placeholder
+        // reserves roughly three rows so sections fill in place.
         Item {
           width: parent.width
           visible: page.onDeckLoading || page.onDeckItems.length === 0

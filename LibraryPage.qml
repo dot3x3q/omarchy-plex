@@ -22,8 +22,7 @@ Item {
   readonly property string scrollKey: "library:" + root.sectionId + ":" + root.sortKey
 
   // ---- sort ----
-  // Verified live against the server (docs/PLEX-API.md): all three honored
-  // server-side, no client re-sort needed.
+  // All three sort keys are honored server-side; no client re-sort needed.
   readonly property var sortKeys: ["addedAt:desc", "titleSort", "year:desc"]
   property string sortKey: root.sortKeys[0]
 
@@ -66,10 +65,8 @@ Item {
     root.resetAndFetch()
   }
 
-  // Kills in-flight responses from a section/sort we already left — the same
-  // guard DetailPage (loadGen) and HomePage (id compare) carry; without it a
-  // slow Movies page 0 lands under the TV Shows title and corrupts pagination
-  // (review finding).
+  // Kills in-flight responses from a section/sort already left; without it a
+  // slow Movies page 0 lands under the TV Shows title and corrupts pagination.
   property int fetchGen: 0
 
   function resetAndFetch() {
@@ -105,9 +102,9 @@ Item {
       root.loading = false
       var mc = doc && doc.MediaContainer
       var total = mc && mc.totalSize !== undefined ? Number(mc.totalSize) : -1
-      // Image-URL handoff (BUILD-CONTRACT.md): Api.js hands back raw,
-      // unauthenticated paths — this page resolves them at fetch time since
-      // it is the one that knows the display size.
+      // Image-URL handoff: Api.js hands back raw, unauthenticated paths —
+      // this page resolves them at fetch time since it is the one that knows
+      // the display size.
       var batch = Api.mapItems(doc).map(function(it) {
         return Object.assign({}, it, { thumbPath: panel.imageUrl(it.thumbPath, thumbW, thumbH) })
       })
@@ -131,9 +128,9 @@ Item {
   }
 
   // ---- grid geometry ----
-  // Exact formulas from the build contract: columns from available width,
-  // cellHeight mirrors PosterCard's own height formula (poster + text block)
-  // since GridView needs a number before the delegate ever lays out.
+  // Columns come from the available width; cellHeight mirrors PosterCard's own
+  // height formula (poster + text block), because GridView needs a number
+  // before the delegate ever lays out.
   readonly property int columns: gridView.width > 0
     ? Math.max(2, Math.floor(gridView.width / Style.space(132))) : 2
   readonly property int cellW: gridView.width > 0
@@ -150,17 +147,13 @@ Item {
     return Style.space(4) + titleLine + Style.space(2) + captionLine
   }
 
-  // ---- keyboard (page contract) ----
+  // ---- keyboard ----
   // dx/dy arrive pre-resolved by the root (h/l -> dx, j/k -> dy). Horizontal
-  // moves walk the flat item list, which is what makes `l` on the last
-  // column flow into the next row's first item and `h` on a row's first
-  // item flow back into the previous row's last — chosen over a hard
-  // per-row stop because it reads like text-cursor movement, and Spotify's
-  // own list cursor (Api.listIndexAfterMove) is exactly this: a flat index
-  // walk, just one column wide there. Vertical moves clamp instead of
-  // wrapping: a same-column step off the top/bottom edge has no sane target
-  // (there is no row above the first), so it's a no-op rather than a jump
-  // to an unrelated column.
+  // moves walk the FLAT item list, so `l` on the last column flows into the
+  // next row's first item and `h` on a row's first flows back to the previous
+  // row's last — it reads like text-cursor movement. Vertical moves clamp
+  // instead of wrapping: a same-column step off the top or bottom edge has no
+  // sane target, so it is a no-op rather than a jump to an unrelated column.
   function moveCursor(dx, dy) {
     var count = gridView.count
     if (count === 0) return
@@ -232,7 +225,7 @@ Item {
     function onPageParamsChanged() { root.trySync() }
   }
 
-  // ---- tools row (Spotify MediaCollection style) ----
+  // ---- tools row ----
   Item {
     id: toolsRow
     anchors.left: parent.left
@@ -271,7 +264,7 @@ Item {
     anchors.topMargin: Style.space(8)
     anchors.bottom: parent.bottom
     // The paginating footer floats at the page bottom; reserve its strip so
-    // "Loading more…" never overlaps the last poster row (audit finding).
+    // "Loading more…" never overlaps the last poster row.
     anchors.bottomMargin: root.loading && root.items.length > 0 ? Style.space(24) : 0
     clip: true
     visible: root.items.length > 0

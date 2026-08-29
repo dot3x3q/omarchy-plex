@@ -1,4 +1,4 @@
-# Plex Mini — Design Spec (the fork's north star)
+# omarchy-plex — Design Spec (the fork's north star)
 
 Settled with 3x3q on 2026-08-28. This is the authoritative look-and-feel document
 for the fork's divergence from upstream's "nano-Plex". When code and this doc
@@ -216,7 +216,7 @@ step toward it.
   the calibration point), test across several Omarchy themes incl. light.
 - `reuseItems: true` + `cache: false` on row artwork (recycled delegates must
   not hoard pixmaps); `sourceSize` capped per context.
-- Hyprland rules still match `title: Plex Mini` (class is shared
+- Hyprland rules still match `title: Omarchy Plex` (class is shared
   `org.quickshell`) — keep the title stable in browse, retitle in theater.
 
 ## Post-launch field decisions (2026-08-29, from 3x3q's live testing)

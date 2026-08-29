@@ -17,22 +17,18 @@ import PlexMpv 1.0
 // still loading successfully. QtMultimedia has to stay reachable. See
 // native/README.md and native/mpvvideo.h.
 //
-// Linting note: this file reports warnings, not errors, and they are expected.
-// MpvQt is a plain C++ library and ships no .qmltypes, so the linter cannot
-// resolve MpvAbstractItem and therefore cannot see the QQuickItem members
-// (anchors, parent) that MpvVideo inherits through it. The type is real at
-// runtime — qmlcachegen compiles this file cleanly against the installed
-// module — and only the static description of its base class is missing.
+// qmllint warnings here are expected: MpvQt ships no .qmltypes, so the linter
+// cannot resolve MpvAbstractItem or the QQuickItem members MpvVideo inherits
+// through it. The type is real at runtime.
 MpvVideo {
   anchors.fill: parent
 
   // Every destruction path idles the core FIRST. Destroying a PLAYING item
-  // races its window's teardown (both surface flips hide one window and kill
-  // one item on the same trigger, and WlrLayershell deletes its surface on
-  // hide) — when MpvQt loses that race its render-thread cleanup can leave a
-  // zombie core whose audio thread plays on, unpausable because no QML item
-  // points at it any more (field report: pausing the PiP left audio running
-  // over the frozen frame; resuming doubled it). Stopping is a plain core
-  // command with no render-thread dependency, so it wins regardless.
+  // races its window's teardown (a surface flip hides one window and kills one
+  // item on the same trigger, and WlrLayershell deletes its surface on hide);
+  // when MpvQt loses that race its render-thread cleanup can leave a zombie
+  // core whose audio thread plays on, unpausable because no QML item points at
+  // it any more. Stopping is a plain core command with no render-thread
+  // dependency, so it wins regardless.
   Component.onDestruction: stop()
 }

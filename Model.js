@@ -1,4 +1,4 @@
-// Pure data logic for the Plex Mini panel: server/token validation, Plex
+// Pure data logic for the Omarchy Plex panel: server/token validation, Plex
 // API container mapping (Continue Watching and search results), and media
 // time formatting. Plain script, no module syntax: the same file loads as
 // a QML JavaScript resource for the panel and runs under node:vm for unit

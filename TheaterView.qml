@@ -12,9 +12,9 @@ import "Model.js" as Model
 // stop touching the machine.
 //
 // Overlay strip anatomy follows the Spotify plugin's footer (MIT), squeezed
-// into ONE row: title, position, seek, duration, transport, volume. The two-row
-// version was 84px of chrome over the film for the same six things.
-// Cursor region is "playing" for every control on it.
+// into ONE row: title, position, seek, duration, transport, volume — chrome
+// over a film is worth minimizing. Cursor region is "playing" for every
+// control on it.
 Item {
   id: view
 
@@ -85,10 +85,9 @@ Item {
     color: Style.normalFillFor(view.foreground, view.accent)
     borderSpec: Border.controlSpec("normal", view.foreground, view.accent)
 
-    // One row has to give something up in a narrow window, and now only the
-    // title is left to give: the volume slider used to be the second drop, but
-    // it no longer sits in the row at all — it hangs above the mute button on
-    // hover, which costs the strip nothing at any width.
+    // One row has to give something up in a narrow window, and the title is
+    // the only thing on it that can go: the volume slider is not in the row at
+    // all — it hangs above the mute button on hover, costing no width.
     readonly property bool showTitle: strip.width > Style.space(700)
 
     // Hovering the strip holds it open even with the pointer perfectly still —
@@ -200,8 +199,8 @@ Item {
         }
 
         // A WheelHandler rather than a MouseArea: MouseArea has no wheel
-        // handling at all, so wrapping the button in one would have eaten the
-        // click and still not delivered the scroll.
+        // handling at all, so wrapping the button in one eats the click and
+        // still does not deliver the scroll.
         WheelHandler {
           onWheel: function(event) {
             view.panel.holdVolumePopup()
@@ -349,10 +348,9 @@ Item {
               y: Math.max(0, Math.min(volumeTrack.height - height,
                 volumeTrack.height * (1 - volumeVertical.progress) - height / 2))
 
-              // PanelSlider also grows its knob 15% on hover. Dropped rather
-              // than copied: the sanctioned animation set for this plugin is
-              // 140ms slider moves and 120ms popup fades, and an unanimated
-              // scale pop would read worse than no scale at all.
+              // No knob-grow on hover, unlike PanelSlider: this plugin's
+              // animation budget is 140ms slider moves and 120ms popup fades,
+              // and an unanimated scale pop reads worse than no scale at all.
               Behavior on y {
                 enabled: !volumeVertical.dragging
                 NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
@@ -458,9 +456,8 @@ Item {
         id: qualityButton
         visible: view.panel.qualityPickerAvailable
         width: visible ? controlSize : 0
-        // nf-md-quality_high. Verified present in the resolved mono Nerd Font
-        // rather than assumed — a missing glyph renders as a tofu box, and the
-        // strip has no room for one.
+        // nf-md-quality_high — check any replacement against the resolved mono
+        // Nerd Font; a missing glyph renders as a tofu box.
         glyphText: "\u{f07fd}"
         tooltipText: view.panel.qualityKbps === 0
           ? "Quality · Q · direct play"
@@ -539,11 +536,10 @@ Item {
       hasCursor: view.panel.cursorOn("playing", "seek")
       foreground: view.foreground
       accent: view.accent
-      // No hover box on the timeline. The panel-cursor plumbing is untouched —
-      // hover still claims the cursor and the keyboard "seek" action is still
-      // reachable — but the fill and border are dropped, because a rectangle
-      // snapping up around the scrubber reads as a rendering defect rather than
-      // a highlight. The knob carries the keyboard indication instead.
+      // No hover box on the timeline: hover still claims the panel cursor and
+      // the keyboard "seek" action stays reachable, but a rectangle snapping up
+      // around the scrubber reads as a rendering defect rather than a
+      // highlight. The knob carries the keyboard indication instead.
       fill: "transparent"
       borderSpec: Border.none()
 
@@ -577,15 +573,13 @@ Item {
   }
 
   // ---------- picker (audio / subtitles / quality) ----------
-  // One list widget for all three. The rows contract is identical — a label, a
-  // current flag — so a second popup would have been the same forty lines with
-  // a different model, plus a second Esc ordering to keep in step with this one.
-  // Declared after the strip so it paints above it, and click-away first so
-  // the list itself keeps its own clicks. Deliberately NOT a QQC2 Popup: it
-  // wants no focus scope and no Shortcut objects, because the panel's existing
-  // key dispatcher already gives it first refusal (see handleTrackPopupKey) —
-  // one keyboard model instead of two competing ones, and the layered-Esc
-  // chain stays exactly as it was with the popup simply added at the front.
+  // One list widget for all three: the row contract is identical (a label, a
+  // current flag), and a second popup would mean a second Esc ordering to keep
+  // in step with this one. Declared after the strip so it paints above it, and
+  // click-away first so the list itself keeps its own clicks. Deliberately NOT
+  // a QQC2 Popup: it wants no focus scope and no Shortcut objects, because the
+  // panel's key dispatcher already gives it first refusal (see
+  // handleTrackPopupKey) — one keyboard model instead of two competing ones.
   MouseArea {
     id: pickerScrim
     anchors.fill: parent

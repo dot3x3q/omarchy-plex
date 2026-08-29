@@ -10,9 +10,8 @@ import "Api.js" as Api
 // Detail hero for a movie OR a show (DESIGN.md "Detail pages for both").
 // The hero is the one sanctioned divergence from the flat-surface kit norm:
 // the item's wide backdrop art under a heavy flat scrim, calibrated so
-// theme-colored text still reads on light themes (Spotify's watermark
-// treatment is the reference point). Shows get a season picker plus an
-// episode list below; movies get the hero alone.
+// theme-colored text still reads on light themes. Shows get a season picker
+// plus an episode list below; movies get the hero alone.
 Item {
   id: page
 
@@ -46,10 +45,10 @@ Item {
 
   // "Show-shaped": anything whose children resolve to playable episodes. TV
   // libraries hand back SEASON objects from recentlyAdded and search, and a
-  // season routed through the movie path had no episode list and a Play that
-  // always failed — its own ratingKey has no Media/Part (review finding).
-  // A season's children are episodes, which the flat-show branch of
-  // loadSeasons already renders; the season picker simply stays empty.
+  // season has no Media/Part of its own, so routing one through the movie path
+  // gives it no episode list and a Play that always fails. A season's children
+  // are episodes, which the flat-show branch of loadSeasons already renders;
+  // the season picker simply stays empty.
   readonly property bool isShow: {
     var t = page.detail ? String(page.detail.type) : page.paramType
     return t === "show" || t === "season"
@@ -103,8 +102,8 @@ Item {
     var postH = Math.round(page.posterHeight * 2)
 
     // includeOnDeck=1 is what makes "Play" mean something on a show: the
-    // server picks the resume-or-next-unwatched episode itself (verified live
-    // — it is present even on a show nobody has started, pointing at S1E1).
+    // server picks the resume-or-next-unwatched episode itself, and the block
+    // is present even on a show nobody has started, where it points at S1E1.
     // Harmless on a movie, which simply comes back without the block, so this
     // does not need pageParams.type to be trustworthy.
     page.panel.request(Api.metadataUrl("", page.ratingKey) + "?includeOnDeck=1", function(doc) {

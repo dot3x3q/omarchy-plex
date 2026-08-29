@@ -1,4 +1,4 @@
-// Plex Mini Model.js unit tests. Loads the QML-style script (plain function
+// Omarchy Plex Model.js unit tests. Loads the QML-style script (plain function
 // declarations, no module syntax) into a fresh vm context.
 
 import { test } from "node:test"

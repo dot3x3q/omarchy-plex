@@ -15,7 +15,7 @@ function readBounded(dir, file, bytes) {
 }
 
 function sandbox(fn) {
-  const dir = mkdtempSync(join(tmpdir(), "plexmini-io-"))
+  const dir = mkdtempSync(join(tmpdir(), "omarchy-plex-io-"))
   try { fn(dir) } finally { rmSync(dir, { recursive: true, force: true }) }
 }
 

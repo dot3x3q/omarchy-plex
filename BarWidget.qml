@@ -3,7 +3,7 @@ import QtQuick.Effects
 import qs.Commons
 import qs.Ui
 
-// Plex Mini bar widget.
+// Omarchy Plex bar widget.
 //   idle    - the Plex glyph alone
 //   playing - glyph + now-playing title, marquee (render-thread XAnimator,
 //             Spotify-style) if the title overflows maxTitleWidth
@@ -20,7 +20,7 @@ import qs.Ui
 BarWidget {
   id: root
 
-  moduleName: "io.github.joshuaswarren.plexmini"
+  moduleName: "dot3x3q.omarchy-plex"
 
   readonly property var playerState: root.bar && root.bar.shell
     ? root.bar.shell.serviceFor(root.moduleName) : null
@@ -43,8 +43,7 @@ BarWidget {
   implicitWidth: content.implicitWidth + root.horizontalMargin * 2
   implicitHeight: root.bar ? root.bar.barSize : Style.bar.sizeHorizontal
 
-  // Card-recipe hover/press surface (idle/hover/pressed alpha-over-fg, per
-  // DESIGN.md) instead of the old hardcoded accent-fill + text-invert.
+  // Card-recipe hover/press surface: idle/hover/pressed alpha over foreground.
   Rectangle {
     id: surface
     anchors.fill: parent

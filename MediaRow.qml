@@ -2,9 +2,9 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 
-// Video-flavored take on the Spotify app's MediaRow: same panel-cursor
-// fill model (selected/cursorOn only, never containsMouse) but a landscape
-// art well sized for episode/CW thumbs instead of a square cover.
+// List row for episode/Continue-Watching entries: panel-cursor fill model
+// (selected/cursorOn only, never containsMouse) and a landscape art well
+// sized for 16:9 thumbs.
 BorderSurface {
   id: root
 
@@ -143,10 +143,9 @@ BorderSurface {
 
       Button {
         anchors.verticalCenter: parent.verticalCenter
-        // Play is a distinct action from "open" — but only for things the
-        // resolver can actually play. A show/season ratingKey has no
-        // Media/Part, so an always-visible ▶ there was an advertised action
-        // that always landed in error mode (review finding).
+        // Play is a distinct action from "open", but only for things the
+        // resolver can actually play: a show/season ratingKey has no
+        // Media/Part, so a ▶ there would only ever land in error mode.
         visible: root.itemData
           && (root.itemData.type === "movie" || root.itemData.type === "episode")
         iconText: "󰐊"

@@ -15,8 +15,7 @@ import QtQuick
 //     instance carries `.shell` (Bar.qml:25) — exactly how
 //     quickshell.spotify's BarWidget.qml:16 reaches its own Service.qml.
 //
-// This is the plugin-author-facing contract; nothing here is Plex-specific
-// on purpose so the panel rewrite only has to set three properties.
+// Nothing here is Plex-specific on purpose: the contract is three properties.
 Item {
   id: root
 
@@ -25,16 +24,12 @@ Item {
   width: 0
   height: 0
 
-  // Standard properties the shell fills in for every service instance if
-  // present (see shell.qml:305-309). Unused today but declared so a future
-  // need (reading manifest metadata, calling back into the shell) doesn't
-  // require touching the panel-side wiring again.
+  // The shell fills these in for every service instance that declares them
+  // (shell.qml:305-309).
   property var shell: null
   property var manifest: null
 
-  // Published by PlexPanel.qml's existing state handlers; read by
-  // BarWidget.qml. Kept intentionally tiny — exactly the
-  // {playing, title, paused} shape the bar widget needs and nothing else.
+  // Published by PlexPanel.qml's state handlers; read by BarWidget.qml.
   property bool playing: false
   property bool paused: false
   property string title: ""

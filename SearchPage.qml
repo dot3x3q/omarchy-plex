@@ -11,12 +11,10 @@ Item {
 
   readonly property bool cursorHere: panel.cursorRegion === "page"
   readonly property string query: String((panel.pageParams && panel.pageParams.query) || "")
-  // No explicit "request in flight" flag exists on the root, so this page
-  // infers it locally: a new (non-empty) query arms "searching", and it
-  // clears the moment ANY searchResults update lands. A slower stale
-  // request finishing after a faster newer one is a known, accepted race —
-  // pre-existing in root.search(), not something this page can fix without
-  // the root gaining request-generation tracking.
+  // The root carries no "request in flight" flag, so this page infers one: a
+  // new non-empty query arms "searching", and any searchResults update clears
+  // it. A slow stale request landing after a faster newer one is an accepted
+  // race; fixing it needs request-generation tracking in root.search().
   property bool searching: false
   property int cursorIndex: 0
 

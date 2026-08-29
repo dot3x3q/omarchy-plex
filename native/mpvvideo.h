@@ -1,5 +1,5 @@
 /*
- * MpvVideo — a minimal libmpv-backed video item for the Plex Mini panel.
+ * MpvVideo — a minimal libmpv-backed video item for the Omarchy Plex panel.
  *
  * SPDX-License-Identifier: MIT
  *

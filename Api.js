@@ -1,13 +1,12 @@
-// Plex REST layer for the redesigned panel: URL builders + JSON response
-// mappers. No I/O, no QML imports — panel.request() (PlexPanel.qml) owns
-// the curl process pool and hands parsed JSON back here. Plain function
-// declarations, no module syntax, same convention as Model.js: this file
-// loads as a QML script resource and under node:vm for unit tests.
+// Plex REST layer: URL builders + JSON response mappers. No I/O, no QML
+// imports — panel.request() (PlexPanel.qml) owns the curl process pool and
+// hands parsed JSON back here. Plain function declarations, no module syntax,
+// same convention as Model.js: this file loads as a QML script resource and
+// under node:vm for unit tests.
 //
-// Every mapper below was written against LIVE /library responses from a
-// real Plex Media Server (see docs/PLEX-API.md for sanitized samples and
-// the shape surprises found along the way — several assumptions a fresh
-// implementation would reach for turned out wrong).
+// The mappers are written against real Plex Media Server responses; the shapes
+// they cope with are not always the obvious ones. docs/PLEX-API.md carries
+// sanitized samples.
 
 var MAX_ITEMS = 256
 var MAX_FIELD = 256
@@ -22,7 +21,6 @@ function cap(value, limit) {
 // Plex keys are numeric in practice; stripping to alphanumerics at the
 // mapping boundary means every downstream consumer (playItem, timeline,
 // URL builders) inherits the invariant instead of re-implementing it.
-// 2026-08-29 security audit: sanitization existed only in DetailPage.
 function keyOf(value) {
   return cap(value, MAX_KEY).replace(/[^A-Za-z0-9]/g, "")
 }
@@ -43,21 +41,19 @@ function onDeckUrl(server) {
   return server + "/library/onDeck"
 }
 
-// recentlyAdded pagination: both the X-Plex-Container-Start/Size headers
-// AND the same names as query params worked identically live (offset/size
-// echoed back correctly either way). Query params are used here since
-// Api.js builds plain URLs — panel.request() would need extra plumbing to
-// attach per-call headers for a feature headers buy nothing over.
+// recentlyAdded pagination: the X-Plex-Container-Start/Size names work
+// identically as headers or as query params. Query params are used because
+// Api.js builds plain URLs, and per-call headers would need extra plumbing in
+// panel.request() for no gain.
 function recentlyAddedUrl(server, sectionId, size) {
   var url = server + "/library/sections/" + encodeURIComponent(String(sectionId)) + "/recentlyAdded"
   return size ? url + "?X-Plex-Container-Start=0&X-Plex-Container-Size=" + size : url
 }
 
-// opts: { sort, start, size }. Verified live: "addedAt:desc", "titleSort"
-// and "year:desc" all sort correctly server-side — no client-side re-sort
-// needed. titleSort strips leading articles ("The 'Burbs" sorts as
-// "'Burbs"), which is why a plain title-string sort would look "wrong"
-// next to Plex's own ordering.
+// opts: { sort, start, size }. "addedAt:desc", "titleSort" and "year:desc" all
+// sort server-side, so no client-side re-sort is needed. titleSort strips
+// leading articles ("The 'Burbs" sorts as "'Burbs"), which is why a plain
+// title-string sort looks "wrong" next to Plex's own ordering.
 function libraryAllUrl(server, sectionId, opts) {
   opts = opts || {}
   var params = []
@@ -83,20 +79,18 @@ function childrenUrl(server, ratingKey) {
 // Episodes, Tracks, Actors, Genres, ...), several of which (actor,
 // director, genre, tag) carry no Metadata array at all — just tag stubs —
 // so consuming it means special-casing hub types before you even get to
-// an item shape. /search's flat, uniformly-typed array is simpler and is
-// what the existing (pre-redesign) PlexPanel.qml already called, so this
-// keeps behavior stable. Chosen: /search. (Full comparison in PLEX-API.md.)
+// an item shape. /search's flat, uniformly-typed array is simpler, so that is
+// the one used here. Full comparison in docs/PLEX-API.md.
 function searchUrl(server, query) {
   return server + "/search?query=" + encodeURIComponent(String(query || "").trim())
 }
 
 // path is server-relative (as Plex hands back in thumb/art/etc — e.g.
-// "/library/metadata/3291/thumb/..."). Verified live: the transcode
-// endpoint resolves a relative url= against its own host just fine, so
-// there's no need to prefix it with server (and doing so would just mean
-// double-encoding a host QML's Image never needs). Token-in-query here is
-// the one documented exception (DESIGN.md "Known risks") — QML Image can't
-// send headers.
+// "/library/metadata/3291/thumb/..."). The transcode endpoint resolves a
+// relative url= against its own host, so there is no need to prefix it with
+// server — doing so would only double-encode a host QML's Image never needs.
+// Token-in-query is the one exception to the headers-only rule: QML Image
+// cannot send headers.
 function imageUrl(server, token, path, w, h) {
   if (!path) return ""
   var enc = encodeURIComponent(path)
@@ -107,8 +101,8 @@ function imageUrl(server, token, path, w, h) {
 // ---- shared formatting helpers ----
 
 // ms -> "1h 52m" / "52m" / "2h" (whole hours drop the "0m"). Distinct from
-// Model.js's fmtDuration, which formats SECONDS as h:mm:ss for the seek
-// bar readout — a different consumer, deliberately not touched here.
+// Model.js's fmtDuration, which formats SECONDS as h:mm:ss for the seek bar
+// readout — a different consumer.
 function durationText(ms) {
   var totalMin = Math.max(0, Math.round((Number(ms) || 0) / 60000))
   var h = Math.floor(totalMin / 60)
@@ -127,9 +121,8 @@ function progressFor(m) {
   return Math.max(0, Math.min(1, vo / dur))
 }
 
-// bool for movie/episode (viewCount is often absent entirely rather than
-// 0 — confirmed live on an in-progress episode); leafCount-viewedLeafCount
-// count for show/season, per contract.
+// bool for movie/episode (viewCount is often absent entirely rather than 0);
+// leafCount-viewedLeafCount count for show/season.
 function unwatchedFor(m) {
   if (m.type === "show" || m.type === "season") {
     var leaf = Number(m.leafCount) || 0
@@ -157,11 +150,10 @@ function captionFor(m) {
   return cap(m.contentRating, MAX_FIELD)
 }
 
-// Image path choice (DESIGN.md "known risks" + contract): episodes only
-// ever have a landscape (16:9) thumb, so thumbPath is naturally correct
-// there. Movies/shows/seasons have a 2:3 poster thumb; their wide backdrop
-// lives in `art` (episodes fall back to grandparentArt via `art`, which
-// Plex already resolves — confirmed identical live). Callers building a
+// Image path choice: episodes only ever have a landscape (16:9) thumb, so
+// thumbPath is naturally correct there. Movies/shows/seasons have a 2:3 poster
+// thumb; their wide backdrop lives in `art` (episodes fall back to
+// grandparentArt via `art`, which Plex resolves itself). Callers building a
 // Continue Watching row pick thumbPath (episodes) or artPath (movies)
 // themselves — that per-context choice is MediaRow's job, not this file's.
 function thumbPathFor(m) {
@@ -172,7 +164,7 @@ function artPathFor(m) {
   return cap(m.art || m.grandparentArt, 512)
 }
 
-// The one item shape every mapper below builds towards (Api.js contract).
+// The one item shape every mapper below builds towards.
 function itemFromMetadata(m) {
   return {
     ratingKey: keyOf(m.ratingKey),
@@ -191,9 +183,8 @@ function itemFromMetadata(m) {
 
 // Shared walk: collect a MediaContainer's Metadata array (bounded, type-
 // filtered) into item shapes. Every list endpoint (onDeck, recentlyAdded,
-// library/all, search, children) returns this same flat shape live —
-// there is no SearchResults-nesting to handle, unlike Model.js's older
-// mapItems (that shape isn't what this server version's /search sends).
+// library/all, search, children) returns this same flat shape — there is no
+// SearchResults-nesting to handle here, unlike Model.js's mapItems.
 function mapMetadataList(json) {
   var mc = json && json.MediaContainer
   var meta = (mc && mc.Metadata) || []
@@ -218,9 +209,8 @@ function mapChildren(json) {
   return mapMetadataList(json)
 }
 
-// video libraries only (DESIGN.md content scope) — confirmed live the
-// server also carries "artist" sections (Music, Audiobooks) that must
-// never surface here.
+// Video libraries only: a server also carries "artist" sections (Music,
+// Audiobooks) that must never surface here.
 function mapSections(json) {
   var mc = json && json.MediaContainer
   var dirs = (mc && mc.Directory) || []
@@ -295,7 +285,7 @@ function isImageSubCodec(codec) {
 // `ordinal` is the one field the players need and the one Plex does not send:
 // the stream's position among the EMBEDDED streams of its own type. Plex's own
 // `index` is no substitute — it counts across ALL types in container order
-// (verified live on Akira: video 0, audio 1-4, subtitles 5-8), whereas
+// (one video, four audio and four subtitle streams index as 0, 1-4, 5-8), whereas
 // QtMultimedia's audioTracks[] index and mpv's 1-based aid/sid both count
 // within one type. A sidecar file is in no container at all, so it gets
 // ordinal -1: it exists only as a server-side selection.
@@ -320,8 +310,8 @@ function mapStream(s, ordinal, isSubtitle) {
 
 // Returns { partId, video[], audio[], subtitle[] } for the FIRST part of the
 // first Media. Multi-part items (a film split across two files) would want a
-// part picker of their own; none was found live, and `allParts=1` on the
-// selection PUT at least keeps the halves in step. Tolerant by construction:
+// part picker of their own; `allParts=1` on the selection PUT at least keeps
+// the halves in step. Tolerant by construction:
 // a show or season carries no Media at all and must come back as empty lists
 // rather than throwing.
 function mapStreams(json) {
@@ -378,9 +368,9 @@ function partSelectionUrl(server, partId, audioStreamId, subtitleStreamId) {
 
 // Detail page: base item shape plus the extras a hero/season list needs.
 // rating: movies carry a top-level critic `rating`; shows never do (only
-// `audienceRating` + a `Rating[]` array) — fall back so the hero always
-// has a number to show. Genre is entirely absent on episode metadata
-// (confirmed live), so genres is always an array, never undefined.
+// `audienceRating` + a `Rating[]` array) — fall back so the hero always has a
+// number to show. Genre is entirely absent on episode metadata, so genres is
+// always an array, never undefined.
 function mapDetail(json) {
   var mc = json && json.MediaContainer
   var m = mc && mc.Metadata && mc.Metadata[0]

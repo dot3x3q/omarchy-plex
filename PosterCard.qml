@@ -2,9 +2,9 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 
-// Grid cell for poster libraries/shelves. Root stays a plain Item (not
-// BorderSurface) per contract — the hover wash is one surface spanning
-// poster + text so the whole card reads as a single hit target.
+// Grid cell for poster libraries/shelves. Root stays a plain Item so the hover
+// wash can be one surface spanning poster + text, making the whole card read
+// as a single hit target.
 Item {
   id: root
 

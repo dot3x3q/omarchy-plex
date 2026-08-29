@@ -9,12 +9,11 @@ test("panel contract pins integration chokepoints", () => {
   assert.match(qml, /resumeRetry[\s\S]{0,600}player\.position = target/)
   const closeBody = qml.slice(qml.indexOf("function close()"), qml.indexOf("function playSource"))
   assert.match(closeBody, /player\.playbackState === MediaPlayer\.PlayingState\)[\s\S]*player\.pause\(\)/)
-  // Wave 4 turned the floaty surface into a pure PiP: video plus a whisper of
-  // controls, with all browse/search/setup living in the real window. Nothing
-  // on that surface ever needs typing before the first click, so the Exclusive
-  // grab this used to pin — which made every other window on the desktop deaf
-  // while a miniplayer sat in the corner — has no remaining justification.
-  // OnDemand only, and Exclusive must not come back by accident.
+  // The floaty surface is a pure PiP: video plus a whisper of controls, with
+  // all browse/search/setup in the real window. Nothing on it ever needs typing
+  // before the first click, and an Exclusive grab there makes every other
+  // window on the desktop deaf while a miniplayer sits in the corner. OnDemand
+  // only, and Exclusive must not come back by accident.
   assert.match(qml, /WlrKeyboardFocus\.OnDemand/)
   assert.doesNotMatch(qml, /WlrKeyboardFocus\.Exclusive/)
   assert.match(qml, /id: searchDebounce[\s\S]{0,300}root\.search\(searchInput\.text\)/)
@@ -32,7 +31,7 @@ test("config and state IO is single-open bounded and atomic", () => {
   assert.match(qml, /mv -f --/)
   assert.match(qml, /stdinEnabled: true/)
   assert.match(qml, /onStarted: write\(root\.server/)
-  assert.doesNotMatch(qml, /PLEXMINI_TOKEN|root\.token \+ "' '/)
+  assert.doesNotMatch(qml, /OMARCHY_PLEX_TOKEN|PLEX_TOKEN=|root\.token \+ "' '/)
   assert.match(qml, /cd -P --/)
   assert.match(qml, /onReleased: root\.saveWidth\(\)/)
 })
@@ -75,8 +74,7 @@ test("track selection reaches the server before any transcode restart", () => {
   // Token stays in headers — partSelectionUrl must never carry it.
   assert.match(qml, /trackPut\.command = \[[\s\S]{0,300}concat\(root\.plexHeaders\)/)
   assert.doesNotMatch(qml, /partSelectionUrl\([^)]*token/)
-  // The stream stash rides the resolve response we already have, and the
-  // frozen Model call above it is untouched.
+  // The stream stash rides the resolve response the panel already has.
   assert.match(qml, /root\.currentThumbPath = root\.metadataThumb\(jsonText\)\s*\n\s*root\.stashStreams\(jsonText\)/)
 })
 

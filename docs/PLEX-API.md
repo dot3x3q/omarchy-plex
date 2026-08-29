@@ -1,7 +1,7 @@
 # Plex API reference — Api.js
 
 Everything below was verified live against the user's real Plex Media Server
-(`~/.config/plexmini/config.json`) on 2026-08-28, not assembled from memory or
+(`~/.config/omarchy-plex/config.json`) on 2026-08-28, not assembled from memory or
 old Plex docs. Every endpoint returned `200`. Samples are trimmed to the
 fields the mappers read (plus a few extras, to prove tolerance) and
 sanitized: no token, no machine identifiers beyond the local library-section
