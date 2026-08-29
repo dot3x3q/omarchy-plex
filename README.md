@@ -1,19 +1,26 @@
 # omarchy-plex
 
 A Plex media player for [Omarchy](https://omarchy.org). Real window in the
-tiling tree, sidebar browsing, poster grids, a proper theater view, a
-picture-in-picture mode that actually behaves, and playback through libmpv
-when you want it done right.
+tiling tree, library browsing, poster grids, a proper theater view, and a
+picture-in-picture mode that can be resized and plopped on additional monitors.
 
 I wanted a Plex player that was lightweight, performant, and true to the
-Omarchy spirit. I built this out exactly as I wanted it. Feel free to tweak
-it as you like.
+Omarchy theme, so I built this player exactly as I wanted it. Use it, tweak it, and upgrade it as you like!
 
-![omarchy-plex](preview.png)
+![omarchy-plex](screenshots/Home.png)
+
+<p align="center">
+  <img src="screenshots/Player.png" width="49%" alt="Theater playback">
+  <img src="screenshots/PiP.png" width="49%" alt="Picture-in-picture">
+</p>
+<p align="center">
+  <img src="screenshots/Search.png" width="49%" alt="Search">
+  <img src="screenshots/Settings.png" width="49%" alt="Settings">
+</p>
 
 ## What you get
 
-- **Browse like you mean it** — Home page with Continue Watching and
+- **Media Browser** — Home page with Continue Watching and
   Recently Added shelves, a sidebar entry per video library, poster grids,
   and detail pages with backdrop art, synopsis, and season/episode
   drill-down. Movies and TV only; your music stays in your music player.
@@ -63,10 +70,7 @@ steps. But the good stuff (HDR tone mapping, NVDEC/VAAPI hardware decode,
 native image subtitles) comes from a small compiled libmpv module:
 
 ```bash
-omarchy pkg add mpvqt cmake
-cd native
-cmake -B build && cmake --build build
-sudo cmake --install build
+./native/install.sh
 omarchy restart shell
 ```
 
@@ -144,9 +148,9 @@ lists, `Esc` closes.
 
 ## Hacking on it
 
-- `docs/DESIGN.md` — the design spec: every settled decision and why.
+- `docs/DESIGN.md` — the design spec: every decision and why.
 - `docs/PLEX-API.md` — every Plex endpoint used, verified against a live
-  server, with the gotchas that cost real debugging time.
+  server.
 - `AGENTS.md` — dev-loop commands (lint, tests, the compile gate that
   catches what the linter can't).
 - `node --test tests/*.test.mjs` — Api mappers, IO safety, and static

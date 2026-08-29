@@ -137,6 +137,22 @@ Item {
       }
     }
 
+    // Which engine is actually rendering, and how to get the better one —
+    // the closest a pure-QML plugin can get to bundling the native module.
+    Text {
+      width: parent.width
+      wrapMode: Text.WordWrap
+      color: Color.muted
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      textFormat: Text.PlainText
+      text: page.panel.backend === "mpv"
+        ? "Video engine: external mpv window"
+        : (page.panel.nativeReady
+          ? "Video engine: native libmpv — hardware decode, HDR tone mapping"
+          : "Video engine: QtMultimedia. For hardware decode + HDR, build the native module: ./native/install.sh, then restart the shell.")
+    }
+
     Item { width: 1; height: Style.space(4) }
 
     Button {
