@@ -253,6 +253,42 @@ Item {
         }
       }
 
+      // Track pickers. Both are absent rather than disabled when the item has
+      // nothing to pick between — a dead button on a nine-button strip is just
+      // noise, and the tooltip has nothing useful to say about "this film has
+      // one audio track".
+      TransportButton {
+        id: audioTrackButton
+        visible: view.panel.audioPickerAvailable
+        width: visible ? controlSize : 0
+        glyphText: "\u{f05c5}"
+        tooltipText: "Audio track · A"
+        foreground: view.foreground
+        selected: view.panel.trackPopup === "audio"
+        hasCursor: view.panel.cursorOn("playing", "audiotrack")
+        onClicked: view.panel.toggleTrackPopup("audio")
+        onHovered: function(on) {
+          view.panel.pokeTheaterControls()
+          if (on) view.panel.setPanelCursor("playing", "audiotrack")
+        }
+      }
+
+      TransportButton {
+        id: subtitleTrackButton
+        visible: view.panel.subtitlePickerAvailable
+        width: visible ? controlSize : 0
+        glyphText: "\u{f0a16}"
+        tooltipText: "Subtitles · S"
+        foreground: view.foreground
+        selected: view.panel.trackPopup === "subtitle"
+        hasCursor: view.panel.cursorOn("playing", "subtitletrack")
+        onClicked: view.panel.toggleTrackPopup("subtitle")
+        onHovered: function(on) {
+          view.panel.pokeTheaterControls()
+          if (on) view.panel.setPanelCursor("playing", "subtitletrack")
+        }
+      }
+
       TransportButton {
         glyphText: "󰓛"
         tooltipText: "Stop"
@@ -349,6 +385,116 @@ Item {
         PanelToolTip {
           visible: seekSliderHover.hovered
           text: "Seek 10s · ← / → · Shift for 30s"
+        }
+      }
+    }
+  }
+
+  // ---------- track picker ----------
+  // Declared after the strip so it paints above it, and click-away first so
+  // the list itself keeps its own clicks. Deliberately NOT a QQC2 Popup: it
+  // wants no focus scope and no Shortcut objects, because the panel's existing
+  // key dispatcher already gives it first refusal (see handleTrackPopupKey) —
+  // one keyboard model instead of two competing ones, and the layered-Esc
+  // chain stays exactly as it was with the popup simply added at the front.
+  MouseArea {
+    id: pickerScrim
+    anchors.fill: parent
+    visible: view.panel.trackPopup !== ""
+    // Bare click anywhere else dismisses, the same as Esc.
+    onClicked: view.panel.closeTrackPopup()
+  }
+
+  BorderSurface {
+    id: picker
+    visible: view.panel.trackPopup !== ""
+    readonly property var rows: visible ? view.panel.trackRows(view.panel.trackPopup) : []
+    readonly property int rowHeight: Style.space(28)
+
+    anchors.right: strip.right
+    anchors.rightMargin: Style.space(6)
+    anchors.bottom: strip.top
+    anchors.bottomMargin: Style.space(6)
+    width: Style.space(340)
+    // Grows with the list up to a ceiling — a Crunchyroll episode can carry
+    // twenty subtitle tracks, and the picker must not become the whole screen.
+    height: Math.min(Style.space(300),
+      picker.rows.length * picker.rowHeight + Style.space(16))
+    radius: Style.cornerRadius
+    color: Style.selectedFillFor(view.foreground, view.accent)
+    borderSpec: Border.controlSpec("normal", view.foreground, view.accent)
+
+    ListView {
+      id: pickerList
+      anchors.fill: parent
+      anchors.margins: Style.space(8)
+      clip: true
+      model: picker.rows
+      spacing: 0
+      boundsBehavior: Flickable.StopAtBounds
+      // Keep the keyboard cursor on screen when j walks past the fold.
+      currentIndex: view.panel.trackPopupIndex
+      highlightFollowsCurrentItem: true
+      preferredHighlightBegin: 0
+      preferredHighlightEnd: height
+      highlightRangeMode: ListView.ApplyRange
+
+      FastScrollHandler { flickable: pickerList }
+
+      delegate: Button {
+        required property var modelData
+        required property int index
+
+        width: pickerList.width
+        height: picker.rowHeight
+        leftAlign: true
+        focusable: false
+        foreground: view.foreground
+        accent: view.accent
+        // The panel cursor and the mouse share one highlight here exactly as
+        // everywhere else — hovering a row moves the keyboard selection to it.
+        hasCursor: view.panel.trackPopupIndex === index
+        selected: modelData.current === true
+        // Room on the right for the check and the hint, which are anchored
+        // over the top of the label rather than laid out beside it.
+        text: modelData.label
+        rightPadding: Style.space(46)
+
+        onClicked: view.panel.activateTrackRow(view.panel.trackPopup, modelData)
+        onHovered: function(on) {
+          view.panel.pokeTheaterControls()
+          if (on) view.panel.trackPopupIndex = index
+        }
+
+        // Why this row cannot just be flipped in the running pipeline: a
+        // sidecar the player cannot see, or an image subtitle Qt cannot draw.
+        // Both mean the server has to build a new stream, which costs a
+        // restart — worth saying before the click, not after.
+        Text {
+          anchors.right: rowCheck.left
+          anchors.rightMargin: Style.space(4)
+          anchors.verticalCenter: parent.verticalCenter
+          visible: text !== ""
+          text: modelData.external === true
+            ? "server"
+            : (modelData.image === true && !view.panel.mpvMode ? "burn-in" : "")
+          color: view.muted
+          font.family: view.fontFamily
+          font.pixelSize: Style.font.caption
+          textFormat: Text.PlainText
+        }
+
+        Text {
+          id: rowCheck
+          anchors.right: parent.right
+          anchors.rightMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+          visible: modelData.current === true
+          text: "\u{f012c}"
+          color: view.accent
+          font.family: view.fontFamily
+          font.pixelSize: Style.font.icon
+          textFormat: Text.PlainText
         }
       }
     }

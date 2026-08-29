@@ -251,3 +251,131 @@ sensibly without either component needing type-specific logic of its own.
 `genres` (always an array), and `media` (`null` for show/season, `{
 videoResolution, container, videoCodec, audioCodec, width, height, bitrate
 }` for movie/episode).
+
+## Audio and subtitle streams — `Media[].Part[].Stream[]`
+
+Verified live 2026-08-29 against the same server (PMS `1.43.3.10896`), on
+*Akira* (`ratingKey 245`, `Part.id 524`) and a *Jujutsu Kaisen* episode
+(11 audio streams, 20 subtitle streams). `streamType` discriminates:
+**1 = video, 2 = audio, 3 = subtitle.**
+
+```json
+{ "MediaContainer": { "Metadata": [ { "Media": [ { "Part": [ {
+  "id": 524,
+  "key": "/library/parts/524/1718768365/file.mkv",
+  "container": "mkv", "duration": 7486480,
+  "Stream": [
+    { "id": 1513, "streamType": 1, "default": true, "codec": "hevc", "index": 0,
+      "displayTitle": "4K DoVi/HDR10",
+      "extendedDisplayTitle": "4K DoVi/HDR10 (HEVC Main 10)" },
+
+    { "id": 1514, "streamType": 2, "codec": "truehd", "index": 1, "channels": 8,
+      "language": "日本語", "languageTag": "ja", "languageCode": "jpn",
+      "audioChannelLayout": "7.1",
+      "displayTitle": "日本語 (TRUEHD 7.1 + Atmos)",
+      "extendedDisplayTitle": "日本語 (TRUEHD 7.1 + Atmos)" },
+    { "id": 1515, "streamType": 2, "selected": true, "codec": "truehd", "index": 2,
+      "channels": 6, "language": "English",
+      "displayTitle": "English (TRUEHD 5.1)",
+      "extendedDisplayTitle": "English (TRUEHD 5.1)" },
+    { "id": 1516, "streamType": 2, "default": true, "codec": "ac3", "index": 3,
+      "channels": 6, "language": "Italiano", "title": "Nuovo doppiaggio",
+      "displayTitle": "Italiano (AC3 5.1)",
+      "extendedDisplayTitle": "Nuovo doppiaggio (Italiano AC3 5.1)" },
+
+    { "id": 1518, "streamType": 3, "codec": "pgs", "index": 5, "language": "English",
+      "displayTitle": "English", "extendedDisplayTitle": "English (PGS)" },
+    { "id": 1519, "streamType": 3, "selected": true, "forced": true, "codec": "pgs",
+      "index": 6, "language": "English", "title": "(Foreign)",
+      "displayTitle": "English Forced",
+      "extendedDisplayTitle": "(Foreign) (English Forced PGS)" },
+    { "id": 1521, "streamType": 3, "default": true, "codec": "srt", "index": 8,
+      "language": "Italiano", "title": "Forced",
+      "displayTitle": "Italiano", "extendedDisplayTitle": "Forced (Italiano SRT)" }
+  ]
+} ] } ] } ] } }
+```
+
+### Shape surprises
+
+- **`selected`, `default` and `forced` are omitted entirely when false** —
+  never serialized as `false`. Held on every one of ~15 items and 60+
+  streams probed, including the 20-subtitle episode where nineteen of them
+  simply have no `selected` key. The test is `stream.selected === true`;
+  anything that assumes the key exists reads `undefined` and misbehaves.
+  `Api.streamFlag()` is the single place that decides this.
+- **`id`, `index`, `streamType` and `Part.id` are JSON numbers, not strings**
+  (unlike `ratingKey`, which is a string). `mapStreams` normalizes ids to
+  strings on the way out so URL building never has to care.
+- **`index` counts across ALL stream types in container order** — on Akira:
+  video 0, audio 1–4, subtitles 5–8. It is therefore *not* what a player
+  wants. QtMultimedia's `audioTracks[]` index and mpv's `aid`/`sid` both
+  count within one type, so `mapStreams` synthesizes an `ordinal` field for
+  that and leaves `index` alone.
+- **`extendedDisplayTitle` is not a template you can rebuild.** Its
+  composition reorders depending on whether a custom `title` exists, whether
+  the stream is `forced`, and whether `language` is Plex's canonical name for
+  itself. Compare `"English (TRUEHD 5.1)"` (no title) against
+  `"Nuovo doppiaggio (Italiano AC3 5.1)"` (title hoisted to the front,
+  language moved inside the parens) and
+  `"Español (Latin America) [Crunchyroll] (Español (Latinoamérica) AAC Stereo)"`.
+  Take it verbatim. It is also the only field that separates two dubs of the
+  same language, which is exactly what a picker exists for — hence
+  `streamLabel()` preferring it over `displayTitle`.
+- **Two different "Forced" naming patterns exist and are not
+  interchangeable**: `"(Foreign) (English Forced PGS)"` comes from
+  `forced: true`, while `"Forced (Italiano SRT)"` comes from an arbitrary
+  source `title` that happens to read "Forced".
+- **`hearingImpaired`, `dub`, `key` and `format` appear on no stream
+  anywhere** in the sample (~15 items, 60+ streams). Absence is the normal
+  case, not an anomaly.
+- **No sidecar/external subtitle stream was found** — nothing carrying its
+  own `key`. This library is 100% muxed. `mapStreams`'s `external` branch
+  (and `ordinal: -1` for it) is therefore *defensive, not verified*; the
+  behavior is pinned by a unit test rather than by a live capture.
+- **No multi-part item was found** (`Media[0].Part.length > 1`) across 11
+  movies and 5 episodes. `mapStreams` reads `Part[0]` only; `allParts=1` on
+  the selection PUT keeps the halves in step if one ever turns up.
+
+### `PUT /library/parts/{partId}` — server-side track selection
+
+```
+PUT {server}/library/parts/524?audioStreamID=1516&subtitleStreamID=1518&allParts=1
+→ 200, empty body
+```
+
+Verified live, all four cases, then restored to the original selection:
+
+- **No extra headers required.** `X-Plex-Token` alone works; no
+  `X-Plex-Client-Identifier` needed (the panel sends one anyway — it reuses
+  `plexHeaders`, which keeps the token out of the query string).
+- **The two params are independent.** An audio-only PUT left the subtitle
+  selection untouched, and vice versa. Neither clears the other.
+- **`subtitleStreamID=0` means "no subtitles"** — after it, zero subtitle
+  streams came back carrying `selected`.
+- Re-GETting `/library/metadata/{ratingKey}` confirmed the `selected` flags
+  actually moved each time.
+
+This is the mechanism that makes a track choice survive into a **transcode**:
+the server builds the new stream from whatever is selected on the part, so
+the PUT has to land *before* the transcode is requested. `PlexPanel.qml`
+therefore hangs the restart off the PUT process's `onExited` rather than
+racing it.
+
+### Which mechanism applies, per backend
+
+| Situation | How the choice is applied |
+|---|---|
+| Internal backend, direct play, lists aligned | `player.activeAudioTrack` / `activeSubtitleTrack` by `ordinal` — instant, no restart. PUT also sent, so a later transcode inherits it |
+| Internal backend, transcoding already | PUT, then restart the transcode at the current position (`resumeSec`) — a transcode carries one audio track, so there is nothing local to switch |
+| Internal backend, image subtitle (PGS/VOBSUB) | PUT + transcode restart. Qt's ffmpeg backend only ever reads a subtitle rect's **text** payload (`.text`/`.ass`); the bitmap payload is never touched, so these cannot render in-window at all. Not a corner case — Akira ships three image tracks and one SRT |
+| Internal backend, sidecar stream | PUT + transcode restart (nothing in the container to select) |
+| mpv backend | IPC `set_property aid`/`sid` with `ordinal + 1` (mpv numbers from 1, per type), plus the PUT. `sid "no"` for none. Best-effort: matching mpv's mux order to Plex's Stream order is an assumption with no cheap readback to confirm it |
+
+Track lists on the internal player are only readable once the demuxer has
+resolved the streams, and Qt throws *"Cannot set active track without open
+source"* if written before that — `playerTracksReady` gates on
+`LoadedMedia`/`BufferedMedia`/`BufferingMedia` for both reasons. When the
+player's track count and Plex's embedded count disagree
+(`playerTracksAligned` false — the usual cause being a transcode), the
+ordinals are meaningless and every pick is routed back to the server.

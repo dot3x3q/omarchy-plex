@@ -20,7 +20,8 @@ vm.runInNewContext(
   source +
     "\nthis.A = { sectionsUrl, onDeckUrl, recentlyAddedUrl, libraryAllUrl, metadataUrl," +
     " childrenUrl, searchUrl, imageUrl, mapSections, mapItems, mapSearch, mapChildren," +
-    " mapDetail, durationText: durationText, progressFor: progressFor, unwatchedFor: unwatchedFor }",
+    " mapDetail, durationText: durationText, progressFor: progressFor, unwatchedFor: unwatchedFor," +
+    " mapStreams, selectedStreamId, partSelectionUrl, streamLabel }",
   ctx
 )
 const A = ctx.A
@@ -339,4 +340,180 @@ test("unwatchedFor: bool for movie/episode, count for show/season", () => {
   assert.equal(A.unwatchedFor({ type: "episode", viewCount: 0 }), true)
   assert.equal(A.unwatchedFor({ type: "show", leafCount: 8, viewedLeafCount: 3 }), 5)
   assert.equal(A.unwatchedFor({ type: "season", leafCount: 8, viewedLeafCount: 8 }), 0)
+})
+
+// ---- audio / subtitle streams ----
+//
+// Api.js runs inside a node:vm context, so anything it returns is built from
+// THAT realm's Array/Object prototypes and assert's deep comparison rejects it
+// against a literal written out here — identical contents, different
+// prototype. Round-tripping through JSON re-homes the value in this realm.
+// (The mappers above sidestep this by only ever asserting scalars.)
+const plain = v => JSON.parse(JSON.stringify(v))
+//
+// Fixture is a trimmed capture of the real /library/metadata/245 response
+// (Akira, 1988 — 4 audio tracks including two different Italian dubs, and 4
+// subtitle tracks of which exactly one is a text format). Nothing here is
+// invented: the flag-omission pattern, the index numbering across types, and
+// the extendedDisplayTitle shapes are all verbatim from the live server. See
+// docs/PLEX-API.md.
+const akiraStreams = {
+  MediaContainer: {
+    Metadata: [{
+      ratingKey: "245", type: "movie", title: "Akira",
+      Media: [{
+        container: "mkv", videoCodec: "hevc",
+        Part: [{
+          id: 524,
+          key: "/library/parts/524/1718768365/file.mkv",
+          duration: 7486480,
+          container: "mkv",
+          Stream: [
+            { id: 1513, streamType: 1, default: true, codec: "hevc", index: 0,
+              language: "English", languageTag: "en", languageCode: "eng",
+              displayTitle: "4K DoVi/HDR10",
+              extendedDisplayTitle: "4K DoVi/HDR10 (HEVC Main 10)" },
+            { id: 1514, streamType: 2, codec: "truehd", index: 1, channels: 8,
+              language: "日本語", languageTag: "ja", languageCode: "jpn",
+              audioChannelLayout: "7.1",
+              displayTitle: "日本語 (TRUEHD 7.1 + Atmos)",
+              extendedDisplayTitle: "日本語 (TRUEHD 7.1 + Atmos)" },
+            { id: 1515, streamType: 2, selected: true, codec: "truehd", index: 2, channels: 6,
+              language: "English", languageTag: "en", languageCode: "eng",
+              displayTitle: "English (TRUEHD 5.1)",
+              extendedDisplayTitle: "English (TRUEHD 5.1)" },
+            { id: 1516, streamType: 2, default: true, codec: "ac3", index: 3, channels: 6,
+              language: "Italiano", languageTag: "it", languageCode: "ita",
+              title: "Nuovo doppiaggio",
+              displayTitle: "Italiano (AC3 5.1)",
+              extendedDisplayTitle: "Nuovo doppiaggio (Italiano AC3 5.1)" },
+            { id: 1517, streamType: 2, codec: "ac3", index: 4, channels: 2,
+              language: "Italiano", languageTag: "it", languageCode: "ita",
+              title: "Doppiaggio Storico",
+              displayTitle: "Italiano (AC3 Stereo)",
+              extendedDisplayTitle: "Doppiaggio Storico (Italiano AC3 Stereo)" },
+            { id: 1518, streamType: 3, canAutoSync: false, codec: "pgs", index: 5,
+              language: "English", languageTag: "en", languageCode: "eng",
+              displayTitle: "English", extendedDisplayTitle: "English (PGS)" },
+            { id: 1519, streamType: 3, canAutoSync: false, selected: true, forced: true,
+              codec: "pgs", index: 6, language: "English", languageTag: "en", languageCode: "eng",
+              title: "(Foreign)", displayTitle: "English Forced",
+              extendedDisplayTitle: "(Foreign) (English Forced PGS)" },
+            { id: 1520, streamType: 3, canAutoSync: false, codec: "vobsub", index: 7,
+              language: "Italiano", languageTag: "it", languageCode: "ita",
+              displayTitle: "Italiano", extendedDisplayTitle: "Italiano (VOBSUB)" },
+            { id: 1521, streamType: 3, canAutoSync: false, default: true, codec: "srt", index: 8,
+              language: "Italiano", languageTag: "it", languageCode: "ita", title: "Forced",
+              displayTitle: "Italiano", extendedDisplayTitle: "Forced (Italiano SRT)" }
+          ]
+        }]
+      }]
+    }]
+  }
+}
+
+test("mapStreams buckets by streamType and exposes the part id as a string", () => {
+  const s = A.mapStreams(akiraStreams)
+  assert.equal(s.partId, "524") // arrives as a JSON number, leaves as a string
+  assert.equal(s.video.length, 1)
+  assert.equal(s.audio.length, 4)
+  assert.equal(s.subtitle.length, 4)
+  assert.deepEqual(plain(s.audio.map(a => a.id)), ["1514", "1515", "1516", "1517"])
+})
+
+test("mapStreams ordinal counts within a type, unlike Plex's cross-type index", () => {
+  const s = A.mapStreams(akiraStreams)
+  // Plex numbers `index` across the whole container: video 0, audio 1-4,
+  // subtitles 5-8. Players count per type, which is what `ordinal` is for.
+  assert.deepEqual(plain(s.audio.map(a => a.index)), [1, 2, 3, 4])
+  assert.deepEqual(plain(s.audio.map(a => a.ordinal)), [0, 1, 2, 3])
+  assert.deepEqual(plain(s.subtitle.map(a => a.index)), [5, 6, 7, 8])
+  assert.deepEqual(plain(s.subtitle.map(a => a.ordinal)), [0, 1, 2, 3])
+})
+
+test("mapStreams reads absent selected/default/forced as false", () => {
+  const s = A.mapStreams(akiraStreams)
+  // Plex omits these keys entirely rather than sending false.
+  assert.deepEqual(plain(s.audio.map(a => a.selected)), [false, true, false, false])
+  assert.deepEqual(plain(s.audio.map(a => a.isDefault)), [false, false, true, false])
+  assert.deepEqual(plain(s.subtitle.map(a => a.forced)), [false, true, false, false])
+  assert.equal(s.audio.every(a => a.external === false), true)
+})
+
+test("mapStreams flags image-based subtitles the internal player cannot draw", () => {
+  const s = A.mapStreams(akiraStreams)
+  // pgs, pgs, vobsub, srt — only the last one is text, and only text renders
+  // on Qt's ffmpeg backend.
+  assert.deepEqual(plain(s.subtitle.map(a => a.image)), [true, true, true, false])
+  assert.equal(s.video.every(v => v.image === false), true)
+})
+
+test("mapStreams labels a row from extendedDisplayTitle, so two dubs differ", () => {
+  const s = A.mapStreams(akiraStreams)
+  assert.equal(s.audio[2].label, "Nuovo doppiaggio (Italiano AC3 5.1)")
+  assert.equal(s.audio[3].label, "Doppiaggio Storico (Italiano AC3 Stereo)")
+  assert.notEqual(s.audio[2].label, s.audio[3].label)
+})
+
+test("streamLabel falls back through displayTitle to language and codec", () => {
+  assert.equal(A.streamLabel({ extendedDisplayTitle: "", displayTitle: "English" }), "English")
+  assert.equal(A.streamLabel({ language: "Deutsch", codec: "eac3" }), "Deutsch · EAC3")
+  assert.equal(A.streamLabel({ languageTag: "fr" }), "fr")
+  assert.equal(A.streamLabel({ codec: "aac" }), "AAC")
+  assert.equal(A.streamLabel({}), "Track")
+})
+
+test("mapStreams tolerates shows, seasons and junk without throwing", () => {
+  const empty = { partId: "", video: [], audio: [], subtitle: [] }
+  // A show carries no Media at all.
+  assert.deepEqual(plain(A.mapStreams({ MediaContainer: { Metadata: [{ type: "show" }] } })), empty)
+  assert.deepEqual(plain(A.mapStreams({ MediaContainer: {} })), empty)
+  assert.deepEqual(plain(A.mapStreams({})), empty)
+  assert.deepEqual(plain(A.mapStreams(null)), empty)
+  assert.deepEqual(plain(A.mapStreams({ MediaContainer: { Metadata: [{ Media: [{ Part: [{ id: 7 }] }] }] } })),
+    { partId: "7", video: [], audio: [], subtitle: [] })
+  // A null hole in the array, and a streamType nobody has ever heard of.
+  const odd = { MediaContainer: { Metadata: [{ Media: [{ Part: [{ id: 9, Stream: [
+    null, { id: 1, streamType: 4 }, { id: 2, streamType: 2 }
+  ] }] }] }] } }
+  const s = A.mapStreams(odd)
+  assert.equal(s.audio.length, 1)
+  assert.equal(s.audio[0].ordinal, 0)
+})
+
+test("mapStreams gives a sidecar stream ordinal -1 and skips it in the count", () => {
+  // Defensive: no stream carrying a `key` was found on the live server, so
+  // this pins the intent rather than an observed response.
+  const withSidecar = { MediaContainer: { Metadata: [{ Media: [{ Part: [{ id: 3, Stream: [
+    { id: 10, streamType: 3, codec: "srt", displayTitle: "English" },
+    { id: 11, streamType: 3, codec: "srt", displayTitle: "Sidecar",
+      key: "/library/streams/11" },
+    { id: 12, streamType: 3, codec: "ass", displayTitle: "Japanese" }
+  ] }] }] }] } }
+  const s = A.mapStreams(withSidecar)
+  assert.deepEqual(plain(s.subtitle.map(x => x.ordinal)), [0, -1, 1])
+  assert.deepEqual(plain(s.subtitle.map(x => x.external)), [false, true, false])
+})
+
+test("selectedStreamId returns the flagged id, or empty when nothing is set", () => {
+  const s = A.mapStreams(akiraStreams)
+  assert.equal(A.selectedStreamId(s.audio), "1515")
+  assert.equal(A.selectedStreamId(s.subtitle), "1519")
+  assert.equal(A.selectedStreamId(s.video), "")
+  assert.equal(A.selectedStreamId([]), "")
+  assert.equal(A.selectedStreamId(null), "")
+})
+
+test("partSelectionUrl sends allParts and treats 0 as an explicit 'no subtitles'", () => {
+  assert.equal(A.partSelectionUrl("http://s:32400", 524, "1516", "1518"),
+    "http://s:32400/library/parts/524?audioStreamID=1516&subtitleStreamID=1518&allParts=1")
+  // Verified live: the two params are independent — an audio-only PUT leaves
+  // the subtitle selection alone rather than clearing it.
+  assert.equal(A.partSelectionUrl("http://s:32400", 524, "1517", ""),
+    "http://s:32400/library/parts/524?audioStreamID=1517&allParts=1")
+  // ...and 0 must survive as a real value, not be dropped as falsy.
+  assert.equal(A.partSelectionUrl("http://s:32400", 524, "", 0),
+    "http://s:32400/library/parts/524?subtitleStreamID=0&allParts=1")
+  assert.equal(A.partSelectionUrl("http://s:32400", 524, null, null),
+    "http://s:32400/library/parts/524?allParts=1")
 })

@@ -345,6 +345,19 @@ Item {
     // The PiP *is* the theater on the floaty surface, so popping back later
     // lands on the picture rather than the minibar.
     root.theater = true
+    // Bind the surface to the output the REAL WINDOW is on before it maps.
+    // Setting `screen` while the window is unmapped is free — there is no
+    // surface to tear down yet, Quickshell just records it — and it is half
+    // the multi-monitor fix on its own: a layer surface that was never told
+    // which output to use goes wherever the compositor puts it, which is
+    // rarely the screen you were just watching on. FloatingWindow.screen is a
+    // live readback of where the compositor actually has the toplevel, not a
+    // hint we set once, so it stays right after the user drags the window.
+    var host = appWindow.screen
+    if (host && !root.sameScreen(host, root.pipScreen)) {
+      window.screen = host
+      root.clampMargins()
+    }
     root.windowed = false
     root.savePosition()
     root.pokeTheaterControls()
@@ -382,14 +395,49 @@ Item {
     return appWindow.startSystemMove()
   }
 
-  // Margins measure the PiP CARD's distance from the screen edges, not the
-  // surface's — the layer surface itself is full-screen and never moves. Its
-  // own width/height are therefore the usable area, and they are the same
-  // numbers the card's x/y bind to, so the clamp cannot disagree with the
-  // placement by a rounding step the way a separate screen readback could.
+  // ---- which output the PiP lives on ----
+  //
+  // A layer surface is bound to ONE wl_output for its entire life. There is no
+  // "move me to that monitor" request in wlr-layer-shell, and the PiP is a
+  // full-screen surface masked to a card, so the card is trapped on whatever
+  // output the surface spawned on — the field complaint this block exists to
+  // answer, from a desk with a 4K panel next to two 1440p ones.
+  //
+  // Reassigning `PanelWindow.screen` DOES work at runtime. Quickshell
+  // implements it as hide → setScreen → show, and because WlrLayershell forces
+  // `deleteOnInvisible`, that hide DESTROYS the zwlr_layer_surface_v1 and the
+  // show creates a fresh one bound to the new output. One flicker, which is
+  // fine — but the keyboard focus and any pointer grab go down with the old
+  // surface, and that is what decides the drag design below.
+  //
+  // The shell's own multi-monitor idiom (Variants over Quickshell.screens, one
+  // PanelWindow per output) is not open to us: the PiP hosts `videoLayer`, and
+  // player.videoOutput is a single sink pointer QtMultimedia holds for the life
+  // of the session. One surface per screen would mean one video sink per
+  // screen, which is precisely what the videoLayer comment at the bottom of
+  // this file forbids. So: one surface, reassigned.
+
+  // ShellScreen.x/y/width/height are in the compositor's GLOBAL logical
+  // coordinate space — the same numbers `hyprctl monitors` prints — so a
+  // neighbouring output's rectangle can be tested directly against a pointer
+  // position built from this surface's scene coordinates.
+  readonly property var pipScreen: window.screen
+
+  // The clamp measures against the SCREEN rather than the surface. Right after
+  // a handoff the old surface has been destroyed and its replacement has not
+  // been configured yet, so `window.width` still describes the output we just
+  // left; the ShellScreen is correct the instant `screen` is assigned. (The
+  // resize grip already trusted `window.screen.width` for the same reason.)
+  readonly property int pipAreaWidth: root.pipScreen && root.pipScreen.width > 0
+    ? root.pipScreen.width : (window.width > 0 ? window.width : 0)
+  readonly property int pipAreaHeight: root.pipScreen && root.pipScreen.height > 0
+    ? root.pipScreen.height : (window.height > 0 ? window.height : 0)
+
+  // Margins measure the PiP CARD's distance from its screen's edges, not the
+  // surface's — the layer surface is full-screen and never moves.
   function clampMargins() {
-    var w = window ? window.width : 0
-    var h = window ? window.height : 0
+    var w = root.pipAreaWidth
+    var h = root.pipAreaHeight
     if (w > 0) root.marginRight = Math.max(0, Math.min(root.marginRight, w - root.videoWidth))
     if (h > 0) root.marginBottom = Math.max(0, Math.min(root.marginBottom, h - root.videoHeight))
   }
@@ -398,8 +446,8 @@ Item {
   // the standard inset, so releasing anywhere near a corner gives the same
   // resting place every time — and both axes snapping is a corner snap.
   function snapPip() {
-    var w = window ? window.width : 0
-    var h = window ? window.height : 0
+    var w = root.pipAreaWidth
+    var h = root.pipAreaHeight
     if (root.marginRight < root.pipSnap) root.marginRight = root.pipInset
     else if (w > 0 && root.marginRight > w - root.videoWidth - root.pipSnap)
       root.marginRight = Math.max(0, w - root.videoWidth - root.pipInset)
@@ -408,6 +456,80 @@ Item {
       root.marginBottom = Math.max(0, h - root.videoHeight - root.pipInset)
     root.clampMargins()
     root.savePosition()
+  }
+
+  // ShellScreen wrappers are not guaranteed to be the same JS object across
+  // reads, so identity is not a safe test; the connector name is.
+  function sameScreen(a, b) {
+    if (!a || !b) return false
+    var an = String(a.name || "")
+    var bn = String(b.name || "")
+    if (an !== "" && bn !== "") return an === bn
+    return a === b
+  }
+
+  function screenAtGlobal(gx, gy) {
+    var list = Quickshell.screens
+    if (!list) return null
+    for (var i = 0; i < list.length; i++) {
+      var s = list[i]
+      if (!s) continue
+      if (gx >= s.x && gx < s.x + s.width && gy >= s.y && gy < s.y + s.height) return s
+    }
+    return null
+  }
+
+  // Every handoff ends the same way: the new surface is a NEW surface, so the
+  // keyboard focus the old one held is simply gone. Re-claim it once the swap
+  // has actually happened rather than in the same tick, which is still inside
+  // the old surface's teardown.
+  function commitPipScreen(next) {
+    window.screen = next
+    root.snapPip()
+    Qt.callLater(function() { if (!root.windowed) pipKeyHost.forceActiveFocus() })
+  }
+
+  // Drop handler for the card drag, taking the pointer in this surface's scene
+  // coordinates plus where inside the card it grabbed. See the long comment on
+  // pipDrag for why this runs on release rather than during the gesture.
+  function handlePipDrop(sceneX, sceneY, grabX, grabY) {
+    var cur = root.pipScreen
+    var ox = cur ? cur.x : 0
+    var oy = cur ? cur.y : 0
+    var target = root.screenAtGlobal(ox + sceneX, oy + sceneY)
+    if (!target || root.sameScreen(target, cur)) { root.snapPip(); return }
+    // Land the card under the pointer on the new output, holding the same grab
+    // offset the gesture started with — otherwise it jumps by however far the
+    // clamp had pinned it against the edge on the way out.
+    var localX = (ox + sceneX - grabX) - target.x
+    var localY = (oy + sceneY - grabY) - target.y
+    root.marginRight = Math.round(target.width - root.videoWidth - localX)
+    root.marginBottom = Math.round(target.height - root.videoHeight - localY)
+    root.commitPipScreen(target)
+  }
+
+  // Keyboard-first sibling of the drag handoff, and the only way to do this at
+  // all when the PiP is parked on a monitor the pointer is not on. Position
+  // carries across PROPORTIONALLY rather than literally: the same margins on a
+  // 4K panel and a 1440p one are visibly different placements, but "it was
+  // tucked into the bottom-right" survives the trip.
+  function cyclePipScreen(dir) {
+    var list = Quickshell.screens
+    if (!list || list.length < 2) return
+    var cur = root.pipScreen
+    var at = -1
+    for (var i = 0; i < list.length; i++) if (root.sameScreen(list[i], cur)) { at = i; break }
+    if (at < 0) at = 0
+    var next = list[((at + dir) % list.length + list.length) % list.length]
+    if (!next || root.sameScreen(next, cur)) return
+    var spanX = Math.max(1, root.pipAreaWidth - root.videoWidth)
+    var spanY = Math.max(1, root.pipAreaHeight - root.videoHeight)
+    var fracX = Math.max(0, Math.min(1, root.marginRight / spanX))
+    var fracY = Math.max(0, Math.min(1, root.marginBottom / spanY))
+    root.marginRight = Math.round(fracX * Math.max(0, next.width - root.videoWidth))
+    root.marginBottom = Math.round(fracY * Math.max(0, next.height - root.videoHeight))
+    root.commitPipScreen(next)
+    root.pokeTheaterControls()
   }
 
   // Growing the card leftwards can push it off the screen edge it is measured
@@ -801,6 +923,7 @@ Item {
       root.tickCount = 0
       root.resumeSec = parsed.viewOffsetSec
       root.currentThumbPath = root.metadataThumb(jsonText)
+      root.stashStreams(jsonText)
       var mediaUrl = root.server + partKey
       if (root.backend !== "mpv") mediaUrl += "?X-Plex-Token=" + root.token
       playSource(mediaUrl, resolve.title)
@@ -1215,7 +1338,10 @@ Item {
   // A paused theater always shows its controls; while playing, any pointer
   // movement or key press buys another two seconds.
   property bool theaterControlsShown: true
-  readonly property bool theaterControlsVisible: root.theaterControlsShown || root.isPaused
+  // An open track picker pins the strip: the list hangs off it, so fading the
+  // strip out from under a list the user is reading would be absurd.
+  readonly property bool theaterControlsVisible: root.theaterControlsShown
+    || root.isPaused || root.trackPopup !== ""
 
   Timer {
     id: theaterHideTimer
@@ -1226,7 +1352,7 @@ Item {
 
   function pokeTheaterControls() {
     root.theaterControlsShown = true
-    if (root.inTheater && !root.isPaused) theaterHideTimer.restart()
+    if (root.inTheater && !root.isPaused && root.trackPopup === "") theaterHideTimer.restart()
     else theaterHideTimer.stop()
   }
 
@@ -1234,6 +1360,328 @@ Item {
   onIsPausedChanged: {
     if (root.inTheater) root.pokeTheaterControls()
     root.syncPlayerState()
+  }
+
+  // ---- audio and subtitle tracks ----
+  //
+  // Half this library is dubbed, so "which audio" is a real question and
+  // subtitles are only reachable by stream id. The Stream list comes off the
+  // resolve response the panel already fetches; what differs is how a CHOICE
+  // is delivered, and there are three answers depending on what is playing.
+  //
+  //  - The PUT runs in every case. It records the selection against the part
+  //    server-side, so a transcode started later — by this pick or by a codec
+  //    failure an hour from now — is muxed from the right tracks. Verified
+  //    live: 200 with an empty body, no client-identifier header needed, the
+  //    audio and subtitle params independent of one another, and
+  //    subtitleStreamID=0 meaning "none".
+  //  - Direct play on the internal backend then also moves the PLAYER's own
+  //    active track, which is what makes the change audible immediately.
+  //  - mpv gets an IPC property write, by ordinal.
+  //
+  // Anything the live pipeline cannot do itself falls back to asking the
+  // server for a new stream — see rowNeedsServer.
+  property var audioStreams: []
+  property var subtitleStreams: []
+  property string currentPartId: ""
+  // Plex stream ids, as strings. "" on the subtitle side means "none".
+  property string selectedAudioId: ""
+  property string selectedSubtitleId: ""
+
+  readonly property bool audioPickerAvailable: root.mode === "playing" && root.audioStreams.length > 1
+  readonly property bool subtitlePickerAvailable: root.mode === "playing" && root.subtitleStreams.length > 0
+
+  // Same reasoning as metadataThumb: Model.parsePlaybackMetadata is frozen and
+  // knows only about playback, but the resolve body already carries the whole
+  // Stream list, so the tracks are read out of the response we already have
+  // rather than costing a second round trip.
+  function stashStreams(jsonText) {
+    var parsed = null
+    try { parsed = Api.mapStreams(JSON.parse(jsonText)) } catch (e) { parsed = null }
+    root.currentPartId = parsed ? String(parsed.partId || "") : ""
+    root.audioStreams = parsed ? (parsed.audio || []) : []
+    root.subtitleStreams = parsed ? (parsed.subtitle || []) : []
+    root.selectedAudioId = Api.selectedStreamId(root.audioStreams)
+    root.selectedSubtitleId = Api.selectedStreamId(root.subtitleStreams)
+    root.closeTrackPopup()
+  }
+
+  // Qt refuses an active-track write before the media is open ("Cannot set
+  // active track without open source") and does not populate the track lists
+  // until the demuxer has resolved the streams. Waiting for a loaded buffer
+  // covers both.
+  readonly property bool playerTracksReady: root.backend !== "mpv"
+    && (player.mediaStatus === MediaPlayer.LoadedMedia
+      || player.mediaStatus === MediaPlayer.BufferedMedia
+      || player.mediaStatus === MediaPlayer.BufferingMedia)
+
+  // The player's list and Plex's describe the same file, so they should agree.
+  // When they do not, the ordinals are meaningless and every pick has to go
+  // back to the server — the usual cause being a transcode, which muxes
+  // exactly one audio track however many the original had.
+  function playerTracksAligned(kind) {
+    if (root.mpvMode || !root.playerTracksReady) return false
+    var streams = kind === "audio" ? root.audioStreams : root.subtitleStreams
+    var embedded = 0
+    for (var i = 0; i < streams.length; i++) if (streams[i] && !streams[i].external) embedded++
+    var list = kind === "audio" ? player.audioTracks : player.subtitleTracks
+    return embedded > 0 && list && list.length === embedded
+  }
+
+  // What the pipeline itself calls the track. Often nothing at all — ffmpeg
+  // does not always surface a title or a language — in which case the caller
+  // falls back to Plex's much richer label for the stream at that position.
+  function playerTrackLabel(kind, ordinal) {
+    if (!root.playerTracksAligned(kind) || ordinal < 0) return ""
+    var list = kind === "audio" ? player.audioTracks : player.subtitleTracks
+    if (!list || ordinal >= list.length) return ""
+    var md = list[ordinal]
+    if (!md) return ""
+    var title = ""
+    var lang = ""
+    try {
+      title = String(md.stringValue(MediaMetaData.Title) || "")
+      lang = String(md.stringValue(MediaMetaData.Language) || "")
+    } catch (e) { return "" }
+    if (lang !== "" && title !== "") return lang + " · " + title
+    return lang !== "" ? lang : title
+  }
+
+  // Rows are computed live from current state on every read, so a picker left
+  // open across an item change can never activate a stale stream id.
+  function trackRows(kind) {
+    if (kind !== "audio" && kind !== "subtitle") return []
+    var isAudio = kind === "audio"
+    var streams = isAudio ? root.audioStreams : root.subtitleStreams
+    var chosen = isAudio ? root.selectedAudioId : root.selectedSubtitleId
+    var rows = []
+    if (!isAudio) {
+      rows.push({ label: "None", streamId: "", ordinal: -1, current: chosen === "",
+        external: false, image: false, none: true })
+    }
+    for (var i = 0; i < streams.length; i++) {
+      var s = streams[i]
+      if (!s) continue
+      var id = String(s.id || "")
+      var fromPlayer = s.external ? "" : root.playerTrackLabel(kind, s.ordinal)
+      rows.push({
+        label: fromPlayer !== "" ? fromPlayer : String(s.label || ("Track " + (i + 1))),
+        streamId: id,
+        ordinal: Number(s.ordinal),
+        current: chosen !== "" && chosen === id,
+        external: s.external === true,
+        image: s.image === true,
+        none: false
+      })
+    }
+    return rows
+  }
+
+  // Can the live pipeline make this change itself, or does the server have to
+  // build a new stream for it?
+  function rowNeedsServer(kind, row) {
+    if (!row) return false
+    if (row.none === true) return false
+    // A sidecar file is in no container, so neither player can see it.
+    if (row.external === true) return true
+    // mpv draws anything that is muxed, image subtitles included.
+    if (root.mpvMode) return false
+    // Qt's ffmpeg backend only ever reads a subtitle rect's TEXT payload; the
+    // bitmap one is never touched, so a PGS or VOBSUB track cannot be drawn
+    // in-window at all and the server has to burn it into the picture. Not a
+    // corner case here — Akira ships three image tracks and one SRT.
+    if (kind === "subtitle" && row.image === true) return true
+    return !root.playerTracksAligned(kind)
+  }
+
+  function setPlayerAudioTrack(ordinal) {
+    if (!root.playerTracksReady) return false
+    if (ordinal < 0 || ordinal >= player.audioTracks.length) return false
+    player.activeAudioTrack = ordinal
+    return true
+  }
+
+  function setPlayerSubtitleTrack(ordinal) {
+    if (!root.playerTracksReady) return false
+    // -1 is Qt's "no subtitles", and its default.
+    if (ordinal < 0) { player.activeSubtitleTrack = -1; return true }
+    if (ordinal >= player.subtitleTracks.length) return false
+    player.activeSubtitleTrack = ordinal
+    return true
+  }
+
+  function activateTrackRow(kind, row) {
+    if (!row) return
+    var needsServer = root.rowNeedsServer(kind, row)
+    root.closeTrackPopup()
+    if (kind === "audio") root.selectedAudioId = String(row.streamId || "")
+    else root.selectedSubtitleId = String(row.streamId || "")
+
+    if (root.mpvMode) {
+      // mpv numbers tracks from 1 per type, in container order — the same
+      // order Plex lists its streams in, which is what `ordinal` counts.
+      // Best-effort by construction: there is no cheap readback to confirm the
+      // mux order matched, so a file whose container order disagreed with
+      // Plex's would pick the neighbouring track.
+      if (needsServer) { root.putTrackSelection(true); return }
+      if (kind === "audio") root.mpvSend('{"command":["set_property","aid",' + (Number(row.ordinal) + 1) + ']}')
+      else if (row.none === true) root.mpvSend('{"command":["set_property","sid","no"]}')
+      else root.mpvSend('{"command":["set_property","sid",' + (Number(row.ordinal) + 1) + ']}')
+      root.putTrackSelection(false)
+      return
+    }
+
+    // A track change while a transcode is already running is a server change
+    // by definition: that stream has one audio track in it.
+    if (needsServer || root.triedTranscode) { root.putTrackSelection(true); return }
+    var ok = kind === "audio"
+      ? root.setPlayerAudioTrack(Number(row.ordinal))
+      : root.setPlayerSubtitleTrack(Number(row.ordinal))
+    root.putTrackSelection(!ok)
+  }
+
+  // The selection has to REACH the server before a transcode is asked for, or
+  // the new stream is built from the old tracks. So the restart hangs off the
+  // PUT's exit rather than racing it.
+  property bool restartAfterPut: false
+  // Queue of exactly one. Quickshell latches a Process's argv at start and
+  // silently ignores writes to a running one, so a second pick landing while
+  // the first PUT is still in flight would vanish — and the symptom would be
+  // "the subtitle didn't change", with the server quietly holding the older
+  // choice. Only the newest selection is worth sending, so a single slot is
+  // enough; the payload is rebuilt from current state when it runs.
+  property bool trackPutQueued: false
+  property bool trackPutQueuedRestart: false
+
+  function putTrackSelection(thenRestart) {
+    if (trackPut.running) {
+      root.trackPutQueued = true
+      // A queued restart must survive being coalesced with a pick that did not
+      // need one — dropping it would leave the server correct and the picture
+      // still playing the old tracks.
+      root.trackPutQueuedRestart = root.trackPutQueuedRestart || thenRestart === true
+      return
+    }
+    root.restartAfterPut = thenRestart === true
+    if (root.currentPartId === "" || !root.configured()) {
+      if (root.restartAfterPut) { root.restartAfterPut = false; root.beginTrackRestart() }
+      return
+    }
+    if (root.restartAfterPut) root.setStatus("Switching track — restarting the stream…", false)
+    var subId = root.selectedSubtitleId === "" ? "0" : root.selectedSubtitleId
+    trackPut.command = ["curl", "-s", "--fail", "--max-time", "5", "-o", "/dev/null", "-X", "PUT"]
+      .concat(root.plexHeaders)
+      .concat([Api.partSelectionUrl(root.server, root.currentPartId, root.selectedAudioId, subId)])
+    trackPut.running = true
+  }
+
+  Process {
+    id: trackPut
+    running: false
+    onExited: {
+      var restart = root.restartAfterPut
+      root.restartAfterPut = false
+      if (root.trackPutQueued) {
+        root.trackPutQueued = false
+        var queued = root.trackPutQueuedRestart || restart
+        root.trackPutQueuedRestart = false
+        // Deferred so `running` has certainly settled back to false before the
+        // next launch reads it — otherwise the queue could re-queue forever.
+        Qt.callLater(function() { root.putTrackSelection(queued) })
+        return
+      }
+      if (restart) root.beginTrackRestart()
+    }
+  }
+
+  // Rejoin the film where we left it, on a stream the server has just re-muxed
+  // to the chosen tracks. Deliberately the same machinery as the direct-play →
+  // transcode fallback: resumeSec is what onMediaStatusChanged seeks to once
+  // the new source reports LoadedMedia.
+  function beginTrackRestart() {
+    if (root.currentRatingKey === "" || root.mode !== "playing") return
+    root.resumeSec = Math.max(0, Math.round(root.seekDisplayTime))
+    root.triedTranscode = true
+    root.playGen++
+    root.clearSeekPreview()
+    var url = root.transcodeUrl()
+    if (root.backend === "mpv") root.startMpv(url)
+    else root.startInternal(url)
+  }
+
+  // ---- the picker itself ----
+  //
+  // A plain list drawn on the theater overlay rather than a QQC2 Popup. It
+  // needs no focus scope and no Shortcut objects of its own: the existing
+  // dispatcher simply gives it first refusal while it is open, which is what
+  // keeps it out of the layered-Esc chain's way instead of competing with it.
+  property string trackPopup: "" // "" | "audio" | "subtitle"
+  property int trackPopupIndex: 0
+
+  function openTrackPopup(kind) {
+    var rows = root.trackRows(kind)
+    if (rows.length === 0) return
+    root.trackPopup = kind
+    var at = 0
+    for (var i = 0; i < rows.length; i++) if (rows[i].current) { at = i; break }
+    root.trackPopupIndex = at
+    root.pokeTheaterControls()
+  }
+
+  function closeTrackPopup() {
+    if (root.trackPopup === "") return
+    root.trackPopup = ""
+    root.trackPopupIndex = 0
+    // The strip was pinned open while the list was up; hand it back its timer.
+    root.pokeTheaterControls()
+  }
+
+  function toggleTrackPopup(kind) {
+    if (root.trackPopup === kind) root.closeTrackPopup()
+    else root.openTrackPopup(kind)
+  }
+
+  function moveTrackPopup(delta) {
+    var rows = root.trackRows(root.trackPopup)
+    if (rows.length === 0) return
+    var at = root.trackPopupIndex + delta
+    root.trackPopupIndex = ((at % rows.length) + rows.length) % rows.length
+    root.pokeTheaterControls()
+  }
+
+  function activateTrackPopup() {
+    var kind = root.trackPopup
+    var rows = root.trackRows(kind)
+    if (root.trackPopupIndex < 0 || root.trackPopupIndex >= rows.length) {
+      root.closeTrackPopup()
+      return
+    }
+    root.activateTrackRow(kind, rows[root.trackPopupIndex])
+  }
+
+  // First refusal on the keyboard while a picker is open. Returning true is
+  // what keeps Esc from walking the normal layered chain (popup first, THEN
+  // theater, then the back-stack) and stops j/k reaching the transport.
+  function handleTrackPopupKey(event, ctrl, alt) {
+    if (root.trackPopup === "") return false
+    var key = event.key
+    var text = String(event.text || "").toLowerCase()
+    if (key === Qt.Key_Escape) { root.closeTrackPopup(); return true }
+    if (key === Qt.Key_Return || key === Qt.Key_Enter) { root.activateTrackPopup(); return true }
+    if (ctrl || alt) return false
+    if (key === Qt.Key_Up || text === "k") { root.moveTrackPopup(-1); return true }
+    if (key === Qt.Key_Down || text === "j") { root.moveTrackPopup(1); return true }
+    if (key === Qt.Key_Home) { root.trackPopupIndex = 0; return true }
+    if (key === Qt.Key_End) {
+      root.trackPopupIndex = Math.max(0, root.trackRows(root.trackPopup).length - 1)
+      return true
+    }
+    // Swapping straight between the two lists is worth a key of its own;
+    // everything else is swallowed so a stray Space cannot pause the film
+    // behind an open list.
+    if (text === "a" && root.audioPickerAvailable) { root.toggleTrackPopup("audio"); return true }
+    if (text === "s" && root.subtitlePickerAvailable) { root.toggleTrackPopup("subtitle"); return true }
+    return true
   }
 
   function finishPlayback() {
@@ -1634,6 +2082,16 @@ Item {
       root.toggleSurface()
       return true
     }
+    // Theater only: the PiP strip is far too small for a list of eleven audio
+    // tracks, so the pickers do not exist on that surface.
+    if (root.windowed && !ctrl && !alt && key === Qt.Key_A && root.audioPickerAvailable) {
+      root.toggleTrackPopup("audio")
+      return true
+    }
+    if (root.windowed && !ctrl && !alt && key === Qt.Key_S && root.subtitlePickerAvailable) {
+      root.toggleTrackPopup("subtitle")
+      return true
+    }
     return false
   }
 
@@ -1646,6 +2104,13 @@ Item {
     var alt = (event.modifiers & Qt.AltModifier) !== 0
     if (event.key === Qt.Key_Escape) { root.exitPip(); return true }
     root.pokeTheaterControls()
+    // Moving the picture to another monitor is a PiP-only idea: in windowed
+    // mode the compositor already owns that (Super+Shift+arrow), and `m` is
+    // taken by mute. Shift walks the monitor list the other way.
+    if (!ctrl && !alt && event.key === Qt.Key_N) {
+      root.cyclePipScreen(shift ? -1 : 1)
+      return true
+    }
     return root.handlePlayingKey(event, ctrl, shift, alt)
   }
 
@@ -1655,6 +2120,10 @@ Item {
     var shift = (event.modifiers & Qt.ShiftModifier) !== 0
     var alt = (event.modifiers & Qt.AltModifier) !== 0
     var text = String(event.text || "").toLowerCase()
+
+    // An open picker gets first refusal — before Esc's layered walk and before
+    // the transport keys, because it owns j/k and Enter while it is up.
+    if (root.trackPopup !== "" && root.handleTrackPopupKey(event, ctrl, alt)) return true
 
     if (key === Qt.Key_Escape) { root.escapePressed(); return true }
 
@@ -1781,6 +2250,18 @@ Item {
         // own clicks, and reads SCENE coordinates: the scene belongs to the
         // full-screen surface, which never moves, so a press-time snapshot
         // plus an absolute delta tracks the pointer exactly 1:1.
+        //
+        // Crossing to another monitor is settled ON RELEASE, not mid-drag, and
+        // that is a correctness requirement rather than a simplification.
+        // Reassigning `window.screen` destroys this very surface (see the
+        // screen block up top), and the surface is what holds Wayland's
+        // implicit pointer grab — remapping mid-gesture would delete the grab
+        // owner and the rest of the drag would be delivered to nothing, leaving
+        // the card stranded wherever it happened to be. Waiting costs nothing,
+        // because the grab keeps feeding us motion in THIS surface's scene
+        // coordinates even once the pointer is over a different output: the
+        // numbers simply run negative, or past `width`. The card visibly stops
+        // at the edge until you let go, then lands where you dropped it.
         MouseArea {
           id: pipDrag
           anchors.fill: parent
@@ -1789,6 +2270,11 @@ Item {
           property real pressY: 0
           property int pressRight: 0
           property int pressBottom: 0
+          // Where inside the card the pointer took hold. Kept for the whole
+          // gesture so a drop on another output can put the card back under
+          // the pointer instead of at whatever edge the clamp pinned it to.
+          property real grabX: 0
+          property real grabY: 0
           property bool moved: false
 
           onPressed: function(mouse) {
@@ -1797,6 +2283,8 @@ Item {
             pipDrag.pressY = p.y
             pipDrag.pressRight = root.marginRight
             pipDrag.pressBottom = root.marginBottom
+            pipDrag.grabX = p.x - pipCard.x
+            pipDrag.grabY = p.y - pipCard.y
             pipDrag.moved = false
             // OnDemand focus only arrives on a click; claim it for the keys.
             pipKeyHost.forceActiveFocus()
@@ -1810,9 +2298,15 @@ Item {
             root.clampMargins()
             pipDrag.moved = true
           }
-          // A bare click on the picture is a focus grab, not a move: snapping
-          // (and its state write) belongs to gestures that actually moved.
-          onReleased: if (pipDrag.moved) root.snapPip()
+          // A bare click on the picture is a focus grab, not a move: the
+          // handoff (and its state write) belongs to gestures that actually
+          // moved. handlePipDrop falls back to a plain snap when the drop
+          // landed on the screen it started from.
+          onReleased: function(mouse) {
+            if (!pipDrag.moved) return
+            var p = mapToItem(null, mouse.x, mouse.y)
+            root.handlePipDrop(p.x, p.y, pipDrag.grabX, pipDrag.grabY)
+          }
         }
 
         // resize grip — thin strip on the card's top-left corner, inside
@@ -1890,11 +2384,29 @@ Item {
             onHovered: function(on) { if (on) root.setPanelCursor("pip", "window") }
           }
 
+          // Only earns its place on a multi-head desk, and collapses to zero
+          // width on a single one so the seek slider gets the pixels back.
+          Button {
+            id: pipScreenButton
+            visible: Quickshell.screens.length > 1
+            width: visible ? implicitWidth : 0
+            anchors.right: pipPop.left
+            anchors.rightMargin: visible ? Style.space(2) : 0
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: "\u{f037a}"
+            tooltipText: "Move to the next monitor · N"
+            foreground: root.foreground
+            focusable: false
+            hasCursor: root.cursorOn("pip", "screen")
+            onClicked: root.cyclePipScreen(1)
+            onHovered: function(on) { if (on) root.setPanelCursor("pip", "screen") }
+          }
+
           CursorSurface {
             id: pipSeekCursor
             anchors.left: pipPlay.right
             anchors.leftMargin: Style.space(6)
-            anchors.right: pipPop.left
+            anchors.right: pipScreenButton.left
             anchors.rightMargin: Style.space(6)
             anchors.verticalCenter: parent.verticalCenter
             height: pipSeekSlider.implicitHeight

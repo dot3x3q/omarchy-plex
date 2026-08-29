@@ -224,6 +224,149 @@ function mapSections(json) {
   return out
 }
 
+// ---- audio / subtitle streams ----
+//
+// Plex hangs the per-file stream list off Media[].Part[].Stream[], with
+// `streamType` as the discriminator. The panel needs it to offer a track
+// picker: lots of this library is dubbed, so "which audio" is a real
+// question, and subtitles are only reachable by id.
+var STREAM_VIDEO = 1
+var STREAM_AUDIO = 2
+var STREAM_SUBTITLE = 3
+
+// A row has to name itself even when Plex gives it nothing to be named by.
+// extendedDisplayTitle is the one a PICKER wants: it is the only field that
+// separates two dubs of the same language ("Nuovo doppiaggio (Italiano AC3
+// 5.1)" vs "Doppiaggio Storico (Italiano AC3 Stereo)") or two fansubs of the
+// same one ("English [Netflix] (ASS)"). Take it verbatim — its composition
+// rule is not a template you can rebuild from the other fields; it reorders
+// itself depending on whether a custom `title` exists, whether the stream is
+// `forced`, and whether `language` matches Plex's canonical name for it.
+// displayTitle is the short fallback, and a stream with neither gets language
+// and codec assembled by hand rather than rendering as a blank row.
+function streamLabel(s) {
+  var ext = cap(s.extendedDisplayTitle, MAX_FIELD)
+  if (ext !== "") return ext
+  var disp = cap(s.displayTitle, MAX_FIELD)
+  if (disp !== "") return disp
+  var parts = []
+  var lang = cap(s.language || s.languageTag || s.languageCode, MAX_FIELD)
+  if (lang !== "") parts.push(lang)
+  var codec = cap(s.codec, 32)
+  if (codec !== "") parts.push(codec.toUpperCase())
+  return parts.length ? parts.join(" · ") : "Track"
+}
+
+// `selected`, `default` and `forced` are OMITTED ENTIRELY when false — never
+// serialized as `false`. Verified live across ~15 items and 60+ streams,
+// including a 20-subtitle episode where 19 of them simply had no `selected`
+// key. So the test is `=== true`, and every read has to be
+// undefined-safe rather than assuming the field exists.
+function streamFlag(v) {
+  return v === true || v === 1 || v === "1"
+}
+
+// Qt's FFmpeg backend only ever reads a subtitle rect's TEXT payload
+// (AVSubtitleRect.text / .ass); the bitmap payload (.pict) is never touched.
+// So image-based subtitles cannot render in the internal player at all — and
+// this matters here rather than being a footnote: the probed library is full
+// of them (Akira ships PGS, PGS, VOBSUB and exactly one SRT). A picker that
+// offered all four identically would silently do nothing three times out of
+// four, so image subs are flagged and routed through the server instead.
+var IMAGE_SUB_CODECS = {
+  pgs: true, hdmv_pgs_subtitle: true,
+  vobsub: true, dvd_subtitle: true, dvdsub: true,
+  dvb_subtitle: true, dvbsub: true, xsub: true
+}
+
+function isImageSubCodec(codec) {
+  return IMAGE_SUB_CODECS[String(codec || "").toLowerCase()] === true
+}
+
+// `ordinal` is the one field the players need and the one Plex does not send:
+// the stream's position among the EMBEDDED streams of its own type. Plex's own
+// `index` is no substitute — it counts across ALL types in container order
+// (verified live on Akira: video 0, audio 1-4, subtitles 5-8), whereas
+// QtMultimedia's audioTracks[] index and mpv's 1-based aid/sid both count
+// within one type. A sidecar file is in no container at all, so it gets
+// ordinal -1: it exists only as a server-side selection.
+function mapStream(s, ordinal, isSubtitle) {
+  return {
+    id: cap(s.id, MAX_KEY),
+    index: s.index === undefined || s.index === null ? -1 : (Number(s.index) | 0),
+    ordinal: ordinal,
+    label: streamLabel(s),
+    language: cap(s.language || s.languageTag || s.languageCode, MAX_FIELD),
+    codec: cap(s.codec, 32),
+    channels: Number(s.channels) || 0,
+    selected: streamFlag(s.selected),
+    forced: streamFlag(s.forced),
+    isDefault: streamFlag(s["default"]),
+    // No stream carrying a `key` was found anywhere on the live server, so
+    // this branch is defensive rather than verified — see docs/PLEX-API.md.
+    external: String(s.key || "") !== "",
+    image: isSubtitle === true && isImageSubCodec(s.codec)
+  }
+}
+
+// Returns { partId, video[], audio[], subtitle[] } for the FIRST part of the
+// first Media. Multi-part items (a film split across two files) would want a
+// part picker of their own; none was found live, and `allParts=1` on the
+// selection PUT at least keeps the halves in step. Tolerant by construction:
+// a show or season carries no Media at all and must come back as empty lists
+// rather than throwing.
+function mapStreams(json) {
+  var mc = json && json.MediaContainer
+  var m = mc && mc.Metadata && mc.Metadata[0]
+  var media = m && m.Media && m.Media[0]
+  var part = media && media.Part && media.Part[0]
+  var streams = (part && part.Stream) || []
+  var out = {
+    partId: part ? cap(part.id, MAX_KEY) : "",
+    video: [],
+    audio: [],
+    subtitle: []
+  }
+  // Counted per type, and only for muxed streams, because that is what the
+  // ordinal means.
+  var embedded = { 1: 0, 2: 0, 3: 0 }
+  for (var i = 0; i < streams.length && i < MAX_ITEMS; i++) {
+    var s = streams[i]
+    if (!s) continue
+    var t = Number(s.streamType)
+    var bucket = t === STREAM_AUDIO ? out.audio
+      : (t === STREAM_SUBTITLE ? out.subtitle
+        : (t === STREAM_VIDEO ? out.video : null))
+    if (!bucket) continue
+    var sidecar = String(s.key || "") !== ""
+    bucket.push(mapStream(s, sidecar ? -1 : embedded[t]++, t === STREAM_SUBTITLE))
+  }
+  return out
+}
+
+// The id Plex currently has selected, or "" for none. Subtitles legitimately
+// have none selected; audio in practice always has one, but a file Plex has
+// not analyzed can come back with no flag at all, so both callers have to
+// cope with "".
+function selectedStreamId(list) {
+  var streams = list || []
+  for (var i = 0; i < streams.length; i++) if (streams[i] && streams[i].selected) return streams[i].id
+  return ""
+}
+
+// PUT this before a transcode starts and the transcode inherits the choice.
+// `allParts=1` applies it to every part of a multi-part item. Sending "0" for
+// subtitleStreamID is Plex's "no subtitles".
+function partSelectionUrl(server, partId, audioStreamId, subtitleStreamId) {
+  var params = []
+  if (audioStreamId !== undefined && audioStreamId !== null && String(audioStreamId) !== "")
+    params.push("audioStreamID=" + encodeURIComponent(String(audioStreamId)))
+  if (subtitleStreamId !== undefined && subtitleStreamId !== null && String(subtitleStreamId) !== "")
+    params.push("subtitleStreamID=" + encodeURIComponent(String(subtitleStreamId)))
+  params.push("allParts=1")
+  return server + "/library/parts/" + encodeURIComponent(String(partId)) + "?" + params.join("&")
+}
+
 // Detail page: base item shape plus the extras a hero/season list needs.
 // rating: movies carry a top-level critic `rating`; shows never do (only
 // `audienceRating` + a `Rating[]` array) — fall back so the hero always

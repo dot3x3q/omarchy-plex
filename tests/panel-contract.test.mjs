@@ -36,3 +36,59 @@ test("config and state IO is single-open bounded and atomic", () => {
   assert.match(qml, /cd -P --/)
   assert.match(qml, /onReleased: root\.saveWidth\(\)/)
 })
+
+const theater = readFileSync(new URL("../TheaterView.qml", import.meta.url), "utf8")
+
+test("PiP screen handoff happens on RELEASE, never mid-drag", () => {
+  // Reassigning PanelWindow.screen destroys the layer surface (Quickshell
+  // implements it as hide -> setScreen -> show, and WlrLayershell forces
+  // deleteOnInvisible), and that surface is what holds Wayland's implicit
+  // pointer grab. Doing it from onPositionChanged would delete the grab owner
+  // mid-gesture and strand the card. The drag handler may move margins; only
+  // the release handler may move the window.
+  const drag = qml.slice(qml.indexOf("id: pipDrag"), qml.indexOf("id: resizeGrip"))
+  assert.match(drag, /onReleased: function\(mouse\)[\s\S]{0,400}root\.handlePipDrop\(/)
+  const motion = drag.slice(drag.indexOf("onPositionChanged"), drag.indexOf("onReleased"))
+  assert.doesNotMatch(motion, /window\.screen\s*=/)
+  assert.doesNotMatch(motion, /commitPipScreen|cyclePipScreen/)
+  // Entering the PiP adopts the real window's output, which is half the
+  // multi-monitor fix on its own.
+  assert.match(qml, /function enterPip\(\)[\s\S]{0,900}var host = appWindow\.screen/)
+  // Clamp and snap measure the SCREEN, not the surface: right after a handoff
+  // window.width still describes the output we just left.
+  assert.match(qml, /function clampMargins\(\)[\s\S]{0,200}root\.pipAreaWidth/)
+  assert.match(qml, /function snapPip\(\)[\s\S]{0,200}root\.pipAreaWidth/)
+})
+
+test("track selection reaches the server before any transcode restart", () => {
+  // The server builds a transcode from whatever is selected on the part, so a
+  // restart that raced the PUT would re-mux the OLD tracks. The restart hangs
+  // off the PUT process's exit for that reason.
+  // Slice the trackPut Process block rather than budgeting characters, so
+  // adding to it does not break the pin that guards it.
+  const putBlock = qml.slice(qml.indexOf("id: trackPut"), qml.indexOf("function beginTrackRestart"))
+  assert.match(putBlock, /onExited:[\s\S]*root\.beginTrackRestart\(\)/)
+  // ...and the restart must not be reachable any other way from a pick.
+  const pick = qml.slice(qml.indexOf("function activateTrackRow"), qml.indexOf("function putTrackSelection"))
+  assert.doesNotMatch(pick, /beginTrackRestart/)
+  assert.match(qml, /"-X", "PUT"/)
+  // Token stays in headers — partSelectionUrl must never carry it.
+  assert.match(qml, /trackPut\.command = \[[\s\S]{0,300}concat\(root\.plexHeaders\)/)
+  assert.doesNotMatch(qml, /partSelectionUrl\([^)]*token/)
+  // The stream stash rides the resolve response we already have, and the
+  // frozen Model call above it is untouched.
+  assert.match(qml, /root\.currentThumbPath = root\.metadataThumb\(jsonText\)\s*\n\s*root\.stashStreams\(jsonText\)/)
+})
+
+test("an open track picker owns the keyboard before Esc's layered walk", () => {
+  // Popup first, THEN theater, then the back-stack, then arm-close. If this
+  // ordering inverts, Esc leaves theater with the list still on screen.
+  const body = qml.slice(qml.indexOf("function handleKey(event)"), qml.indexOf("// ---- floaty surface"))
+  const popupAt = body.indexOf("root.handleTrackPopupKey")
+  const escAt = body.indexOf("root.escapePressed()")
+  assert.ok(popupAt > 0 && escAt > 0, "both handlers present")
+  assert.ok(popupAt < escAt, "popup key handling must precede escapePressed")
+  // The pickers are theater-only; the PiP strip is far too small for them.
+  assert.match(qml, /root\.windowed && !ctrl && !alt && key === Qt\.Key_A/)
+  assert.doesNotMatch(theater, /audioPickerAvailable[\s\S]{0,80}pipStrip/)
+})
