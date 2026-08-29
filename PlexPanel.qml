@@ -376,6 +376,15 @@ Item {
       window.screen = host
       root.clampMargins()
     }
+    // Verify AFTER the surface maps: the unmapped screen-set is best-effort
+    // (field report: PiP came up on the original monitor after the window had
+    // moved). A late reassign recreates the surface, and onScreenChanged
+    // bounces the player onto it.
+    var intended = host
+    Qt.callLater(function() {
+      if (intended && !root.windowed && !root.sameScreen(intended, root.pipScreen))
+        window.screen = intended
+    })
     // The theater's native item dies with this flip (per-surface players —
     // see the crash note at the native block); capture what its successor in
     // the PiP must resume, and idle the outgoing core NOW — its destruction
@@ -2261,6 +2270,23 @@ Item {
   // surface handoff (position and pause state captured before the flip).
   property var pendingNativeArm: null
 
+  // Reassigning window.screen recreates the SURFACE under the same item
+  // (Quickshell hides, moves, shows — and a hidden layer surface is deleted),
+  // which kills the render context exactly like the reparent did: black
+  // picture, audio marching on (field report: monitor cycle in PiP). So any
+  // screen change of the PiP while native video is up bounces the player
+  // through the same reload-at-position handoff a surface flip uses.
+  property bool pipPlayerBounce: false
+
+  function bouncePipPlayer() {
+    if (root.windowed || !root.nativeMode || root.mode !== "playing") return
+    if (root.pipPlayerBounce) return
+    root.pendingNativeArm = { pos: root.seekDisplayTime, paused: root.isPaused }
+    if (root.nativeVideo) root.nativeVideo.stop()
+    root.pipPlayerBounce = true
+    Qt.callLater(function() { root.pipPlayerBounce = false })
+  }
+
   function armNativePlayback() {
     var v = root.nativeVideo
     var arm = root.pendingNativeArm
@@ -2881,6 +2907,10 @@ Item {
   PanelWindow {
     id: window
     visible: root.opened && !root.windowed && !root.sessionLocked
+    // A moved surface is a NEW surface; the player must be rebuilt on it. This
+    // one hook covers the n-cycle, the cross-monitor drag drop, and any late
+    // correction of the initial output.
+    onScreenChanged: root.bouncePipPlayer()
     anchors { top: true; left: true; right: true; bottom: true }
     color: "transparent"
     onWidthChanged: root.clampMargins()
@@ -2942,6 +2972,7 @@ Item {
             anchors.fill: parent
             asynchronous: false
             active: root.nativeMode && root.mode === "playing" && !root.windowed
+              && !root.pipPlayerBounce
             source: "NativeVideoHost.qml"
             onLoaded: root.armNativePlayback()
           }
