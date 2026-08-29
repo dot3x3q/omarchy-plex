@@ -6,6 +6,7 @@ import QtMultimedia
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
+import "Api.js" as Api
 
 // Plex Mini panel entry point.
 // Hosted by omarchy-shell; summoned with:
@@ -548,30 +549,18 @@ Item {
   // Artwork is the one documented exception to headers-only auth: QML's Image
   // cannot send an X-Plex-Token header, so it has to ride the query string.
   // These URLs must never be logged.
-  // Wave 2: replace with Api.imageUrl once Api.js lands.
   function imageUrl(path, w, h) {
-    var p = String(path || "")
-    if (p === "" || !root.configured()) return ""
-    return root.server + "/photo/:/transcode?width=" + Math.max(1, Math.round(w))
-      + "&height=" + Math.max(1, Math.round(h))
-      + "&minSize=1&upscale=1&url=" + encodeURIComponent(p)
-      + "&X-Plex-Token=" + root.token
+    if (!root.configured()) return ""
+    return Api.imageUrl(root.server, root.token, path, Math.max(1, Math.round(w)), Math.max(1, Math.round(h)))
   }
 
-  // Wave 2: Api.mapSections replaces this inline filter. Movies and TV only —
-  // music is the Spotify app's lane, so artist/photo sections never appear.
+  // Movies + TV only (DESIGN.md content scope) — Api.mapSections filters out
+  // the server's artist-type sections (Music, Audiobooks live in the Spotify
+  // app's lane, not here).
   function loadLibraries() {
-    root.request("/library/sections", function(doc) {
+    root.request(Api.sectionsUrl(""), function(doc) {
       var out = []
-      try {
-        var dirs = doc && doc.MediaContainer && doc.MediaContainer.Directory
-          ? doc.MediaContainer.Directory : []
-        for (var i = 0; i < dirs.length && out.length < 32; i++) {
-          var d = dirs[i]
-          if (!d || (d.type !== "movie" && d.type !== "show")) continue
-          out.push({ id: String(d.key), title: String(d.title || ""), type: String(d.type) })
-        }
-      } catch (e) { /* leave the sidebar at Home + Settings */ }
+      try { out = Api.mapSections(doc) } catch (e) { /* leave the sidebar at Home + Settings */ }
       root.libraries = out
     })
   }
@@ -595,19 +584,25 @@ Item {
     onTriggered: if (root.opened && root.configured()) root.search(searchInput.text)
   }
 
+  // Guards searchResults against out-of-order responses: with four pooled
+  // slots, a slow response for "jo" can land after the fast one for "john
+  // wick" and silently replace the newer results.
+  property int searchGen: 0
+
   function search(q) {
     var query = String(q === undefined || q === null ? "" : q).trim()
+    root.searchGen++
     if (query === "") {
       root.searchResults = []
       if (root.currentPage === "search") root.goBack()
       return
     }
+    var gen = root.searchGen
     root.navigate("search", { query: query })
-    root.request("/search?query=" + encodeURIComponent(query), function(doc) {
-      // Wave 2: Api.mapSearch replaces this; Model.mapItems is the frozen,
-      // unit-tested mapper the old list mode used and it still fits.
+    root.request(Api.searchUrl("", query), function(doc) {
+      if (gen !== root.searchGen) return
       var out = []
-      try { out = Model.mapItems(doc ? doc.MediaContainer : null, "search") } catch (e) { out = [] }
+      try { out = Api.mapSearch(doc) } catch (e) { out = [] }
       root.searchResults = out
       root.setStatus(out.length === 0 ? "No results for “" + query + "”" : "", false)
     })
