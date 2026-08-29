@@ -133,7 +133,9 @@ scroll-position memory per page key. No page transitions.
 - Arrows + `h/j/k/l` move the single cursor; Tab cycles regions; Home/End.
 - `/` focus search · Enter activate/drill · Esc layered: popup → search →
   back-stack → arm-close → close (armed close button goes urgent, 1500ms).
-- Theater: Space pause · ←/→ seek 10s · Shift+←/→ 30s · ↑/↓ volume · m mute ·
+- Theater: Space pause · ←/→ seek 10s · Shift+←/→ 30s · ↑/↓ volume ±5 (0–200%,
+  the >100 zone rides PipeWire per-stream boost on the internal backend, native
+  on mpv; settled 2026-08-29 after "seriously quiet movies") · m mute · p PiP ·
   f fullscreen (compositor) · Esc to browse (playback continues).
 - Single-letter shortcuts gate on `typingInField`.
 
@@ -168,3 +170,19 @@ Then: libmpv render-in-window (existing roadmap item), replacing QtMultimedia.
   not hoard pixmaps); `sourceSize` capped per context.
 - Hyprland rules still match `title: Plex Mini` (class is shared
   `org.quickshell`) — keep the title stable in browse, retitle in theater.
+
+## Post-launch field decisions (2026-08-29, from 3x3q's live testing)
+
+- Volume is one number, `volumePct` 0–200, persisted; slider lives in the
+  theater strip with a tick at 100. Qt caps the player at 100%, so the boost
+  zone sets PipeWire per-stream volume on the quickshell output streams and
+  restores 1.0 on every exit path.
+- The theater strip is ONE row (space(46)): title · time · flexible seek ·
+  time · transport · volume. Responsive drops: title, then volume slider.
+- Scrubbers draw no hover box (CursorSurface fill transparent) — the knob is
+  the affordance; keyboard cursor shows as an accent knob.
+- Drag-anywhere on bare surface moves the real window via startSystemMove;
+  8px edge bands resize via startSystemResize. Lists keep their drags.
+- `p` toggles PiP everywhere; PiP size cap is the surface width, not 900px.
+- PiP verified by 3x3q: drag 1:1, corner snap, click-through desktop, focus
+  handoff — all confirmed perfect.
