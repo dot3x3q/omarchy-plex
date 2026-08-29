@@ -148,9 +148,13 @@ BorderSurface {
         iconText: "󰐊"
         iconSize: Style.font.body
         foreground: Color.foreground
-        tooltipText: "Play"
+        tooltipText: "Play · Enter"
         horizontalPadding: Style.space(7)
         onClicked: root.activated()
+        // Single-highlight rule: hovering the inline button must move the
+        // shared cursor to this row, or the kit Button's own containsMouse
+        // paints a second highlight beside the keyboard's.
+        onHovered: function(on) { if (on) root.hovered(true) }
       }
     }
   }

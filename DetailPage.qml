@@ -546,7 +546,8 @@ Item {
       accent: Color.accent
       selected: page.seasonKey === String(modelData.ratingKey)
       hasCursor: page.cursorHere && page.cursorRow === page.rowSeasons && page.cursorSeason === index
-      tooltipText: String(modelData.caption || "")
+      tooltipText: (String(modelData.caption || "") !== ""
+        ? String(modelData.caption) + " · " : "") + "←/→ switch seasons"
       onClicked: {
         page.cursorSeason = index
         page.claim(page.rowSeasons)

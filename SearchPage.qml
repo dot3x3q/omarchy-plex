@@ -20,7 +20,13 @@ Item {
   property bool searching: false
   property int cursorIndex: 0
 
-  onQueryChanged: if (page.query !== "") page.searching = true
+  onQueryChanged: {
+    if (page.query !== "") page.searching = true
+    // A new query is a new list: stale cursor/scroll positions point at
+    // rows that are about to be replaced.
+    page.cursorIndex = 0
+    if (typeof resultsList !== "undefined" && resultsList !== null) resultsList.contentY = 0
+  }
 
   Connections {
     target: page.panel
@@ -92,6 +98,21 @@ Item {
     text: page.query === ""
       ? "Type to search your whole server."
       : (page.searching ? "Searching…" : "No results.")
+  }
+
+  // While a refinement is in flight over existing results, say so — the
+  // centered empty-state label only covers the zero-results case.
+  Text {
+    anchors.top: parent.top
+    anchors.right: parent.right
+    anchors.margins: Style.space(4)
+    z: 10
+    visible: page.searching && resultsList.count > 0
+    color: Color.muted
+    font.family: Style.font.family
+    font.pixelSize: Style.font.caption
+    textFormat: Text.PlainText
+    text: "Searching…"
   }
 
   ListView {

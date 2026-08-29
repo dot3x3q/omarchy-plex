@@ -260,6 +260,9 @@ Item {
     anchors.top: toolsRow.bottom
     anchors.topMargin: Style.space(8)
     anchors.bottom: parent.bottom
+    // The paginating footer floats at the page bottom; reserve its strip so
+    // "Loading more…" never overlaps the last poster row (audit finding).
+    anchors.bottomMargin: root.loading && root.items.length > 0 ? Style.space(24) : 0
     clip: true
     visible: root.items.length > 0
     reuseItems: true

@@ -109,7 +109,7 @@ Item {
 
       Button {
         text: "In panel"
-        tooltipText: "Render video inside this window (QtMultimedia)"
+        tooltipText: "Render video inside this window (QtMultimedia) · h/l"
         bordered: true
         selected: page.panel.backend !== "mpv"
         hasCursor: page.cursorHere && page.cursorRow === page.rowBackend && page.panel.backend !== "mpv"
@@ -119,7 +119,7 @@ Item {
 
       Button {
         text: "mpv"
-        tooltipText: "Play in a standalone mpv window with hardware decode"
+        tooltipText: "Play in a standalone mpv window with hardware decode · h/l"
         bordered: true
         selected: page.panel.backend === "mpv"
         hasCursor: page.cursorHere && page.cursorRow === page.rowBackend && page.panel.backend === "mpv"
