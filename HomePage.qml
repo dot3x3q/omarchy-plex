@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Ui
 import "Api.js" as Api
 
 // Landing page (DESIGN.md: "Continue Watching + Recently Added"). One
@@ -14,6 +15,14 @@ Item {
   required property var panel
 
   property var onDeckItems: []
+  // Continue Watching caps at five rows so Recently Added stays above the
+  // fold (field request 2026-08-29); the toggle row below expands in place.
+  readonly property int cwCap: 5
+  property bool cwExpanded: false
+  readonly property var cwShown: cwExpanded ? onDeckItems : onDeckItems.slice(0, cwCap)
+  readonly property bool cwHasMore: onDeckItems.length > cwCap
+  // The toggle behaves as one extra cursor slot at the end of section 0.
+  readonly property int cwCursorCount: cwShown.length + (cwHasMore ? 1 : 0)
   property bool onDeckLoading: true
   // libraryShelves[i] = { id, title, items: [], loading: bool }
   property var libraryShelves: []
@@ -37,15 +46,15 @@ Item {
   function sectionCount() { return 1 + page.libraryShelves.length }
 
   function itemsFor(section) {
-    if (section === 0) return page.onDeckItems
+    if (section === 0) return page.cwShown
     var shelf = page.libraryShelves[section - 1]
     return shelf ? shelf.items : []
   }
 
   function clampIndex(section, index) {
-    var items = page.itemsFor(section)
-    if (items.length === 0) return 0
-    return Math.max(0, Math.min(items.length - 1, index))
+    var count = section === 0 ? page.cwCursorCount : page.itemsFor(section).length
+    if (count === 0) return 0
+    return Math.max(0, Math.min(count - 1, index))
   }
 
   function clampCursor() {
@@ -64,9 +73,8 @@ Item {
     if (dy === 0) return
 
     if (page.cursorSection === 0) {
-      var cw = page.itemsFor(0)
       var next = page.cursorIndex + dy
-      if (next >= 0 && next < cw.length) {
+      if (next >= 0 && next < page.cwCursorCount) {
         page.cursorIndex = next
         page.scrollIntoView()
         return
@@ -83,13 +91,18 @@ Item {
     // section — a shelf is one row, there is nothing to step through.
     var target = page.cursorSection + (dy > 0 ? 1 : -1)
     if (target < 0 || target >= page.sectionCount()) return
-    if (target === 0) page.cursorIndex = Math.max(0, page.itemsFor(0).length - 1)
+    if (target === 0) page.cursorIndex = Math.max(0, page.cwCursorCount - 1)
     else page.cursorIndex = page.clampIndex(target, page.cursorIndex)
     page.cursorSection = target
     page.scrollIntoView()
   }
 
   function activateCursor() {
+    if (page.cursorSection === 0 && page.cwHasMore && page.cursorIndex === page.cwShown.length) {
+      page.cwExpanded = !page.cwExpanded
+      page.clampCursor()
+      return
+    }
     var item = page.itemsFor(page.cursorSection)[page.cursorIndex]
     if (!item) return
     if (page.cursorSection === 0) page.panel.playItem(item.ratingKey, item.title)
@@ -102,12 +115,11 @@ Item {
       page.scrollIntoView()
       return
     }
-    var cw = page.itemsFor(0)
     var next = page.cursorIndex + delta
     if (next < 0) { page.cursorIndex = 0 }
-    else if (next >= cw.length) {
+    else if (next >= page.cwCursorCount) {
       if (page.sectionCount() > 1) { page.cursorSection = 1; page.cursorIndex = 0 }
-      else page.cursorIndex = Math.max(0, cw.length - 1)
+      else page.cursorIndex = Math.max(0, page.cwCursorCount - 1)
     } else page.cursorIndex = next
     page.scrollIntoView()
   }
@@ -117,7 +129,7 @@ Item {
   function scrollIntoView() {
     var target = null
     if (page.cursorSection === 0) {
-      target = cwRepeater.itemAt(page.cursorIndex)
+      target = page.cursorIndex === page.cwShown.length ? cwToggle : cwRepeater.itemAt(page.cursorIndex)
     } else {
       var block = shelfRepeater.itemAt(page.cursorSection - 1)
       if (block) {
@@ -271,7 +283,7 @@ Item {
 
           Repeater {
             id: cwRepeater
-            model: page.onDeckItems
+            model: page.cwShown
 
             MediaRow {
               required property var modelData
@@ -285,6 +297,26 @@ Item {
               onActivated: page.panel.playItem(modelData.ratingKey, modelData.title)
               onHovered: function(on) {
                 if (on) { page.cursorSection = 0; page.cursorIndex = index; page.panel.setPanelCursor("page", "") }
+              }
+            }
+          }
+
+          Button {
+            id: cwToggle
+            visible: page.cwHasMore
+            text: page.cwExpanded
+              ? "Show fewer"
+              : "View all " + page.onDeckItems.length + " · Enter"
+            foreground: Color.foreground
+            focusable: false
+            bordered: false
+            hasCursor: page.isCursorAt(0, page.cwShown.length)
+            onClicked: { page.cwExpanded = !page.cwExpanded; page.clampCursor() }
+            onHovered: function(on) {
+              if (on) {
+                page.cursorSection = 0
+                page.cursorIndex = page.cwShown.length
+                page.panel.setPanelCursor("page", "")
               }
             }
           }

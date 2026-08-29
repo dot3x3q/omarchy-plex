@@ -17,6 +17,7 @@ Item {
   readonly property int rowToken: 1
   readonly property int rowBackend: 2
   readonly property int rowConnect: 3
+  readonly property int rowRefresh: 4
   property int cursorRow: 0
 
   // The page cursor is only "the" cursor while the panel cursor is in the
@@ -30,7 +31,7 @@ Item {
       return
     }
     if (dy === 0) return
-    page.cursorRow = Math.max(0, Math.min(page.rowConnect, page.cursorRow + dy))
+    page.cursorRow = Math.max(0, Math.min(page.rowRefresh, page.cursorRow + dy))
     // Landing on a text row should put the caret there; the other rows are
     // activated with Enter instead.
     if (page.cursorRow === page.rowServer) serverField.forceActiveFocus()
@@ -41,6 +42,7 @@ Item {
     if (page.cursorRow === page.rowServer) serverField.forceActiveFocus()
     else if (page.cursorRow === page.rowToken) tokenField.forceActiveFocus()
     else if (page.cursorRow === page.rowBackend) page.panel.backend = page.panel.backend === "mpv" ? "internal" : "mpv"
+    else if (page.cursorRow === page.rowRefresh) page.panel.refresh()
     else page.commit()
   }
 
@@ -148,6 +150,19 @@ Item {
       hasCursor: page.cursorHere && page.cursorRow === page.rowConnect
       onClicked: page.commit()
       onHovered: function(on) { if (on) { page.cursorRow = page.rowConnect; page.panel.setPanelCursor("page", "") } }
+    }
+
+    Button {
+      text: "Refresh library"
+      // Rehomed from the browse header (field request): refreshing is rare
+      // enough that it reads as clutter next to the page title. R still works.
+      tooltipText: "Re-read libraries and the current page · R"
+      bordered: true
+      focusable: false
+      visible: page.panel.configured()
+      hasCursor: page.cursorHere && page.cursorRow === page.rowRefresh
+      onClicked: page.panel.refresh()
+      onHovered: function(on) { if (on) { page.cursorRow = page.rowRefresh; page.panel.setPanelCursor("page", "") } }
     }
 
     Text {

@@ -2275,17 +2275,22 @@ Item {
     id: escapeCloseTimer
     interval: 1500
     repeat: false
-    onTriggered: root.escapeCloseArmed = false
+    onTriggered: { root.escapeCloseArmed = false; if (root.statusText === "Press Esc again to close") root.setStatus("", false) }
   }
 
   function armEscapeClose() {
     root.escapeCloseArmed = true
+    // The close button used to carry this cue; with the header slimmed to
+    // Omarchy-native chrome, the banner is what makes the second Esc not a
+    // guess.
+    root.setStatus("Press Esc again to close", false)
     escapeCloseTimer.restart()
   }
 
   function disarmEscapeClose() {
     escapeCloseTimer.stop()
     root.escapeCloseArmed = false
+    if (root.statusText === "Press Esc again to close") root.setStatus("", false)
   }
 
   function escapePressed() {
@@ -2342,21 +2347,10 @@ Item {
   }
 
   // Header actions, left to right, only the ones currently on screen.
-  readonly property var headerActions: {
-    var a = []
-    if (root.navStack.length > 0) a.push("back")
-    if (root.configured() && root.mode !== "setup") a.push("refresh")
-    a.push("pip")
-    a.push("close")
-    return a
-  }
+  readonly property var headerActions: root.navStack.length > 0 ? ["back"] : []
 
   function activateHeader(action) {
-    var a = String(action || "")
-    if (a === "back") { root.goBack(); return }
-    if (a === "refresh") { root.refresh(); return }
-    if (a === "pip") { if (root.pipAvailable) root.toggleSurface(); return }
-    if (a === "close") { root.close(); return }
+    if (String(action || "") === "back") root.goBack()
   }
 
   function cycleRegion(dir) {
@@ -2364,7 +2358,7 @@ Item {
     // The minibar and header join the cycle so every visible control is
     // keyboard-discoverable (audit finding), minibar only while on screen.
     if (root.minibarVisible) order.push("minibar")
-    order.push("header")
+    if (root.headerActions.length > 0) order.push("header")
     var at = order.indexOf(root.cursorRegion)
     if (at < 0) at = 0
     at = ((at + dir) % order.length + order.length) % order.length
@@ -3163,9 +3157,7 @@ Item {
 
             Column {
               width: Math.max(Style.space(80), parent.width
-                - (backButton.visible ? backButton.width + parent.spacing : 0)
-                - refreshButton.width - pipButton.width - closeButton.width
-                - parent.spacing * 3)
+                - (backButton.visible ? backButton.width + parent.spacing : 0))
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(1)
 
@@ -3190,52 +3182,6 @@ Item {
               }
             }
 
-            Button {
-              id: refreshButton
-              anchors.verticalCenter: parent.verticalCenter
-              visible: root.configured() && root.mode !== "setup"
-              iconText: "󰑐"
-              tooltipText: "Refresh · R"
-              foreground: root.foreground
-              focusable: false
-              hasCursor: root.cursorOn("header", "refresh")
-              onClicked: root.refresh()
-              onHovered: function(on) { if (on) root.setPanelCursor("header", "refresh") }
-            }
-
-            Button {
-              id: pipButton
-              anchors.verticalCenter: parent.verticalCenter
-              iconText: "\u{f0403}"
-              // Deliberately still hoverable while unavailable: `enabled: false`
-              // would kill the tooltip too, and the tooltip is the only place
-              // that can say WHY the button is dead.
-              foreground: root.pipAvailable ? root.foreground : root.muted
-              tooltipText: root.pipAvailable
-                ? "Picture-in-picture · P"
-                : (root.mpvMode
-                  ? "mpv has the picture in its own window"
-                  : "Picture-in-picture · play something first")
-              focusable: false
-              hasCursor: root.cursorOn("header", "pip")
-              // A no-op while unavailable — enterPip() guards on pipAvailable.
-              onClicked: root.toggleSurface()
-              onHovered: function(on) { if (on) root.setPanelCursor("header", "pip") }
-            }
-
-            Button {
-              id: closeButton
-              anchors.verticalCenter: parent.verticalCenter
-              iconText: "󰅖"
-              // The armed state has to be visible or the second Esc is a guess.
-              foreground: root.escapeCloseArmed ? root.urgent : root.foreground
-              bordered: root.escapeCloseArmed
-              tooltipText: root.escapeCloseArmed ? "Press Esc again to close" : "Close · Esc, Esc"
-              focusable: false
-              hasCursor: root.cursorOn("header", "close")
-              onClicked: root.close()
-              onHovered: function(on) { if (on) root.setPanelCursor("header", "close") }
-            }
           }
 
           BorderSurface {
