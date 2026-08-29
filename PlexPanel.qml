@@ -350,7 +350,12 @@ Item {
   // Native mode is deliberately NOT excluded here: mpvMode means the EXTERNAL
   // window, and the native engine draws in this one, so its picture reparents
   // into the card exactly as the VideoOutput does.
-  readonly property bool pipAvailable: root.mode === "playing" && !root.mpvMode
+  // nativeMode excluded FOR NOW: reparenting the MpvQt FBO item between
+  // QQuickWindows drops its render context (black card) and a subsequent
+  // seek crashed the shell (field crash 2026-08-29). The fix in flight is a
+  // per-surface item with a reload-at-position handoff; until it lands, PiP
+  // on the native engine stays gated off.
+  readonly property bool pipAvailable: root.mode === "playing" && !root.mpvMode && !root.nativeMode
 
   function enterPip() {
     if (!root.pipAvailable || !root.windowed) return
