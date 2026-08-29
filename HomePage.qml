@@ -242,15 +242,26 @@ Item {
           text: "CONTINUE WATCHING"
         }
 
-        Text {
+        // Field report 2026-08-28: while On Deck loaded, this section was one
+        // line tall, so the shelves painted near the top and then got shoved
+        // off-screen when the rows landed — reading as the page "changing".
+        // The placeholder reserves roughly three rows so sections fill in
+        // place instead of reflowing.
+        Item {
           width: parent.width
           visible: page.onDeckLoading || page.onDeckItems.length === 0
-          horizontalAlignment: Text.AlignHCenter
-          color: Color.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          textFormat: Text.PlainText
-          text: page.onDeckLoading ? "Loading On Deck…" : "Nothing in progress. Search to start something."
+          height: page.onDeckLoading ? Style.space(180) : Style.space(24)
+
+          Text {
+            anchors.centerIn: parent
+            width: parent.width
+            horizontalAlignment: Text.AlignHCenter
+            color: Color.muted
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            textFormat: Text.PlainText
+            text: page.onDeckLoading ? "Loading On Deck…" : "Nothing in progress. Search to start something."
+          }
         }
 
         Column {
@@ -301,16 +312,25 @@ Item {
             text: "RECENTLY ADDED — " + String(shelfBlock.modelData.title || "").toUpperCase()
           }
 
-          Text {
+          // Same layout-stability rule as the On Deck placeholder above: an
+          // invisible ListView takes no space in a Column, so a loading shelf
+          // would collapse and then pop to full height. Reserve it up front.
+          Item {
             width: parent.width
             visible: shelfBlock.modelData.loading || shelfBlock.modelData.items.length === 0
-            color: Color.muted
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            textFormat: Text.PlainText
-            text: shelfBlock.modelData.loading
-              ? "Loading Recently Added…"
-              : "Nothing added to " + shelfBlock.modelData.title + " yet."
+            height: shelfBlock.modelData.loading ? page.shelfCardHeight : Style.space(24)
+
+            Text {
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              color: Color.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              textFormat: Text.PlainText
+              text: shelfBlock.modelData.loading
+                ? "Loading Recently Added…"
+                : "Nothing added to " + shelfBlock.modelData.title + " yet."
+            }
           }
 
           ListView {
