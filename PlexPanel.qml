@@ -153,6 +153,14 @@ Item {
     || (Quickshell.env("HOME") + "/.local/state")) + "/plexmini"
   property int marginRight: 14
   property int marginBottom: 14
+  // Primary surface: a real toplevel window the compositor tiles like any
+  // app. The layer-shell panel remains as the secondary "floaty" mode.
+  property bool windowed: true
+
+  function toggleSurface() {
+    root.windowed = !root.windowed
+    root.savePosition()
+  }
 
   function clampMargins() {
     var w = window && window.screen ? window.screen.width : 0
@@ -169,6 +177,7 @@ Item {
   function savePosition() {
     posSave.right = "" + Math.round(root.marginRight)
     posSave.bottom = "" + Math.round(root.marginBottom)
+    posSave.windowed = root.windowed ? "true" : "false"
     posSave.running = true
   }
 
@@ -177,6 +186,7 @@ Item {
     property string right: "14"
     property string bottom: "14"
     property string width: "460"
+    property string windowed: "true"
     running: false
     command: ["sh", "-c",
       "d='" + root.stateDir + "'; d=${d%/}; b=${d##*/}; "
@@ -184,8 +194,8 @@ Item {
       + "mkdir -p -- \"$p/$b\" && [ ! -L \"$p/$b\" ] && chmod 700 \"$p/$b\" "
       + "&& cd -P -- \"$p/$b\" && [ \"$(pwd -P)\" = \"$p/$b\" ] "
       + "&& umask 077 && t=.window.$$.tmp && trap 'rm -f -- \"$t\"' EXIT "
-      + "&& printf '{\"right\":%s,\"bottom\":%s,\"width\":%s}' "
-      + posSave.right + " " + posSave.bottom + " " + posSave.width
+      + "&& printf '{\"right\":%s,\"bottom\":%s,\"width\":%s,\"windowed\":%s}' "
+      + posSave.right + " " + posSave.bottom + " " + posSave.width + " " + posSave.windowed
       + " > \"$t\" && chmod 600 \"$t\" && mv -f -- \"$t\" window.json && trap - EXIT"]
   }
 
@@ -209,6 +219,7 @@ Item {
           if (doc.right !== undefined) root.marginRight = Math.max(0, doc.right | 0)
           if (doc.bottom !== undefined) root.marginBottom = Math.max(0, doc.bottom | 0)
           if (doc.width !== undefined) root.videoWidth = Math.max(280, Math.min(900, doc.width | 0))
+          if (doc.windowed !== undefined) root.windowed = doc.windowed === true
         } catch (e) { /* keep defaults */ }
       }
     }
@@ -704,7 +715,7 @@ Item {
   // ---- window ----
   PanelWindow {
     id: window
-    visible: root.opened && !root.sessionLocked
+    visible: root.opened && !root.windowed && !root.sessionLocked
     anchors { top: false; left: false; right: true; bottom: true }
     margins { right: root.marginRight; bottom: root.marginBottom }
     implicitWidth: root.videoWidth
@@ -732,27 +743,6 @@ Item {
     // lives here and this Item owns focus whenever the search field does not.
     //   Space pause · Left/Right seek · Up/Down select · Enter play
     //   PgUp/PgDn page the list · Esc hide · M mute (internal backend)
-    Item {
-      id: keyHost
-      width: 0; height: 0
-      focus: true
-
-      Keys.onSpacePressed: function(event) { event.accepted = true; root.togglePause() }
-      Keys.onLeftPressed: function(event) { event.accepted = true; root.seekRel(-30) }
-      Keys.onRightPressed: function(event) { event.accepted = true; root.seekRel(30) }
-      Keys.onUpPressed: function(event) { event.accepted = true; root.moveSel(-1) }
-      Keys.onDownPressed: function(event) { event.accepted = true; root.moveSel(1) }
-      // PageUp/PageDown/M have no attached-signal form; catch them here.
-      Keys.onPressed: function(event) {
-        if (event.key === Qt.Key_PageUp) { event.accepted = true; root.moveSel(-8) }
-        else if (event.key === Qt.Key_PageDown) { event.accepted = true; root.moveSel(8) }
-        else if (event.key === Qt.Key_M && !root.mpvMode) { event.accepted = true; audio.muted = !audio.muted }
-      }
-      Keys.onReturnPressed: function(event) { event.accepted = true; root.playSel() }
-      Keys.onEnterPressed: function(event) { event.accepted = true; root.playSel() }
-      Keys.onEscapePressed: function(event) { event.accepted = true; root.close() }
-    }
-
     onVisibleChanged: if (visible) root.focusPrimary()
 
       // resize grip — thin strip on the panel's left edge, inside bounds.
@@ -776,6 +766,55 @@ Item {
         }
         onReleased: root.saveWidth()
       }
+
+    Item { id: panelSlot; anchors.fill: parent }
+  }
+
+  // Primary surface: a real xdg-toplevel window. Hyprland tiles, swaps,
+  // fullscreens, and rules it like any application window; the panel above
+  // is the secondary "floaty" mode. One content tree serves both — it
+  // reparents into whichever surface is active, so every id and binding in
+  // this file keeps working regardless of the host.
+  FloatingWindow {
+    id: appWindow
+    visible: root.opened && root.windowed && !root.sessionLocked
+    title: root.mode === "playing" && root.currentTitle !== ""
+      ? root.currentTitle + " — Plex Mini" : "Plex Mini"
+    color: root.background
+    implicitWidth: 960
+    implicitHeight: 600
+    minimumSize: Qt.size(480, 360)
+    onVisibleChanged: if (visible) root.focusPrimary()
+
+    Item { id: winSlot; anchors.fill: parent }
+  }
+
+  Item {
+    id: content
+    parent: root.windowed ? winSlot : panelSlot
+    anchors.fill: parent
+
+    Item {
+      id: keyHost
+      width: 0; height: 0
+      focus: true
+
+      Keys.onSpacePressed: function(event) { event.accepted = true; root.togglePause() }
+      Keys.onLeftPressed: function(event) { event.accepted = true; root.seekRel(-30) }
+      Keys.onRightPressed: function(event) { event.accepted = true; root.seekRel(30) }
+      Keys.onUpPressed: function(event) { event.accepted = true; root.moveSel(-1) }
+      Keys.onDownPressed: function(event) { event.accepted = true; root.moveSel(1) }
+      // PageUp/PageDown/M have no attached-signal form; catch them here.
+      Keys.onPressed: function(event) {
+        if (event.key === Qt.Key_PageUp) { event.accepted = true; root.moveSel(-8) }
+        else if (event.key === Qt.Key_PageDown) { event.accepted = true; root.moveSel(8) }
+        else if (event.key === Qt.Key_M && !root.mpvMode) { event.accepted = true; audio.muted = !audio.muted }
+      }
+      Keys.onReturnPressed: function(event) { event.accepted = true; root.playSel() }
+      Keys.onEnterPressed: function(event) { event.accepted = true; root.playSel() }
+      Keys.onEscapePressed: function(event) { event.accepted = true; root.close() }
+    }
+
     Column {
       anchors.fill: parent
       anchors.margins: 1
@@ -789,8 +828,11 @@ Item {
 
         MouseArea {
           id: headerDrag
+          // The compositor owns movement of the real window (Super+drag);
+          // header-dragging is a floaty-mode affordance only.
+          enabled: !root.windowed
           anchors.fill: parent
-          cursorShape: Qt.SizeAllCursor
+          cursorShape: root.windowed ? Qt.ArrowCursor : Qt.SizeAllCursor
           property int sx: 0
           property int sy: 0
           onPressed: function(mouse) { sx = mouse.x; sy = mouse.y }
@@ -832,6 +874,22 @@ Item {
           anchors.rightMargin: 12
           anchors.verticalCenter: parent.verticalCenter
           spacing: 18
+
+          // surface toggle: real window <-> floaty corner panel
+          Text {
+            color: root.foreground
+            opacity: 0.7
+            // windowed: pin (F0403) sends it to the floaty corner panel;
+            // floaty: dock-window (F0B26) promotes it to a real window.
+            text: root.windowed ? "\u{f0403}" : "\u{f0b26}"
+            font.pixelSize: 15
+            font.family: Style.fontFamily
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.toggleSurface()
+            }
+          }
 
           Text {
             visible: root.mode === "playing" || root.mode === "list"
@@ -1024,7 +1082,7 @@ Item {
         id: resultList
         width: parent.width
         height: root.mode !== "playing"
-          ? Math.max(0, window.height - 34 - 1 - (searchInput.visible ? 30 : 0) - 14)
+          ? Math.max(0, content.height - 34 - 1 - (searchInput.visible ? 30 : 0) - 14)
           : 0
         visible: height > 0
         focus: true
@@ -1089,7 +1147,9 @@ Item {
       // window, so this collapses to zero height in mpv mode.
       Item {
         width: parent.width
-        height: root.mode === "playing" && root.backend === "internal" ? root.videoHeight : 0
+        height: root.mode === "playing" && root.backend === "internal"
+          ? (root.windowed ? Math.max(0, content.height - 34 - 1 - 56) : root.videoHeight)
+          : 0
 
         VideoOutput {
           id: videoOut
