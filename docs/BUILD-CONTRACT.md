@@ -1,5 +1,15 @@
 # Build Contract — redesign branch
 
+> **Historical.** This was the wave-1/wave-2 interface contract for
+> parallelizing the redesign build (file ownership, per-wave scope, the
+> Root/Page/Api.js contracts). All waves it describes have since landed —
+> see `docs/DESIGN.md`'s "Implementation phases" section for current status.
+> Kept as-is rather than deleted: it explains *why* the code is shaped the
+> way it is (why pages are separate flat files, why `Api.js` mappers return
+> raw unauthenticated paths, why the root exposes the specific
+> `panel.*` surface it does). Treat every wave/status reference below as
+> "what was true when this was written," not as a live task list.
+
 Interface contract for the parallel rebuild. `docs/DESIGN.md` says what we're building
 and how it must look/feel; THIS file says who owns which file and what the interfaces
 are. Agents: code exactly to this contract. If the contract is wrong, say so in your

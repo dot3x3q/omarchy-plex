@@ -128,34 +128,76 @@ Navigation: Loader + `pageComponent()` function, sidebar Buttons with
 `selected:` state, `navigationStack` for back (Alt+Left / layered Esc), LRU
 scroll-position memory per page key. No page transitions.
 
-## Keyboard model (adopted from Spotify app)
+## Keyboard model (adopted from Spotify app; reconciled against `PlexPanel.qml`'s
+dispatchers 2026-08-29 — `handleKey`/`handlePlayingKey`/`handlePipKey`/
+`handleTrackPopupKey`)
 
-- Arrows + `h/j/k/l` move the single cursor; Tab cycles regions; Home/End.
-- `/` focus search · Enter activate/drill · Esc layered: popup → search →
+- Arrows + `h/j/k/l` move the single cursor; Tab/Shift+Tab cycles regions
+  (search → page → sidebar → minibar when visible). **Home/End are NOT
+  implemented for browse cursor movement** — only inside the track popup
+  (below). Drop "Home/End" from the browse story until/unless a page grows
+  that behavior.
+- `/` focus search · Enter activate/drill · Esc layered: track popup close →
+  clear non-empty search → leave search field → exit theater to browse →
   back-stack → arm-close → close (armed close button goes urgent, 1500ms).
-- Theater: Space pause · ←/→ seek 10s · Shift+←/→ 30s · ↑/↓ volume ±5 (0–200%,
-  the >100 zone rides PipeWire per-stream boost on the internal backend, native
-  on mpv; settled 2026-08-29 after "seriously quiet movies") · m mute · p PiP ·
-  f fullscreen (compositor) · Esc to browse (playback continues).
-- Single-letter shortcuts gate on `typingInField`.
+- Theater/PiP (shared `handlePlayingKey`): Space or Enter pause/resume ·
+  ←/→ seek 10s · Shift+←/→ 30s · ↑/↓ volume ±5 (0–200%, the >100 zone rides
+  PipeWire per-stream boost on the internal backend, native on mpv; settled
+  2026-08-29 after "seriously quiet movies") · m mute · p toggles PiP ·
+  a/s open the audio/subtitle track popup (window/theater only — gated on
+  `root.windowed`, no room on the PiP strip) · Esc: PiP exits to window,
+  theater exits to browse (playback continues either way).
+  **There is no `f` fullscreen binding in code** — fullscreen is left to the
+  compositor's own keybinding; drop "f fullscreen" from this list, it does
+  not exist in `handlePlayingKey`.
+- PiP-only, on top of the shared theater keys: `n` cycles the PiP to the next
+  monitor, `Shift+n` to the previous (multi-monitor; not meaningful in
+  windowed mode, where the compositor already owns monitor placement).
+- Track popup (audio/subtitle list, once open — `handleTrackPopupKey`
+  intercepts before Esc's layered walk and before transport keys): ↑/↓ or
+  j/k move selection · Home/End jump to first/last · Enter selects · a/s
+  swap between the audio and subtitle lists · Esc closes the popup only.
+- Single-letter shortcuts are effectively gated on text-field focus by
+  ordinary Qt key delivery (a focused `TextField` consumes printable
+  characters before they can reach the root dispatcher) rather than by an
+  explicit `typingInField` flag anywhere in code — worth knowing if a new
+  single-letter shortcut is ever added, since it needs that same implicit
+  protection.
 
 ## Implementation phases (UI first — libmpv comes after)
 
-1. **Shell skeleton + bug kills**: kit imports, chromeless window, sidebar +
-   page loader + header/banner/search scaffold, panel-cursor model,
-   FastScrollHandler, restyled rows (instant hover). Setup form → settings
-   page. Floaty mode temporarily unchanged.
-2. **Browse**: Plex API layer (sections, onDeck, recentlyAdded, children,
-   search), poster grid + shelves, detail pages with dimmed backdrops,
-   season/episode drill-down.
-3. **Theater + minibar**: overlay controls with auto-hide, minibar with
-   ack-pattern seek slider, Esc-to-browse-while-playing.
-4. **PiP floaty rebuild** (video-only layer surface, fixed drag) + **bar
-   widget** now-playing marquee.
-5. Polish: tooltips+shortcut coverage, empty/loading copy pass, track/subtitle
-   pickers (may slip to post-libmpv).
+Status as of 2026-08-29 — phases 1-4 are DONE and field-tested; phase 5 is
+partially done (see below); libmpv has not started.
 
-Then: libmpv render-in-window (existing roadmap item), replacing QtMultimedia.
+1. **DONE — Shell skeleton + bug kills**: kit imports, chromeless window,
+   sidebar + page loader + header/banner/search scaffold, panel-cursor model,
+   FastScrollHandler, restyled rows (instant hover). Setup form → settings
+   page. All three launch bugs (title bar, drag oscillation, laggy hover)
+   confirmed dead in code.
+2. **DONE — Browse**: Plex API layer (sections, onDeck, recentlyAdded,
+   children, search), poster grid + shelves, detail pages with dimmed
+   backdrops, season/episode drill-down.
+3. **DONE — Theater + minibar**: overlay controls with auto-hide, minibar,
+   Esc-to-browse-while-playing. The strip is one row (space(46)); the
+   ack-pattern preview-until-acknowledged slider behavior described above
+   under "Async seek/volume" — verify against `TheaterView.qml` if precision
+   matters, it was not re-checked in this doc pass.
+4. **DONE — PiP floaty rebuild** (video-only layer surface, fixed drag,
+   now verified 1:1 drag / corner snap / click-through / focus handoff by
+   3x3q live, plus multi-monitor `n`/`Shift+n` cycling added post-launch)
+   **and bar widget** now-playing marquee (render-thread XAnimator, freezes
+   while paused).
+5. **PARTIAL — Polish**: audio/subtitle track pickers shipped (pulled forward
+   from "may slip to post-libmpv" — they landed same wave as PiP, gated to
+   window/theater only). Still open: tooltip+shortcut coverage pass,
+   empty/loading copy pass, the queued field-decision items below (volume
+   popup, stream-quality picker, second PiP resize grip).
+
+**Not started: libmpv render-in-window**, replacing QtMultimedia — still the
+next major roadmap item after this UI revamp, per `AGENTS.md`'s roadmap
+section. Nothing in this repo currently does in-window libmpv rendering; the
+existing `mpv` backend is the pre-existing external-process/IPC mode, not a
+step toward it.
 
 ## Known risks / notes
 

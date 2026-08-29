@@ -4,7 +4,7 @@
   "name": "Plex Mini",
   "version": "0.1.0",
   "author": "Joshua Warren",
-  "description": "Resizable Plex miniplayer for Omarchy: Continue Watching, live search, resume, keyboard controls, progress sync, and transcode fallback.",
+  "description": "A full Plex player for Omarchy: sidebar library browsing, detail pages, theater + minibar playback, picture-in-picture floaty mode, audio/subtitle track selection, and keyboard-first navigation throughout.",
   "kinds": [
     "panel",
     "bar-widget",
@@ -18,7 +18,7 @@
   },
   "barWidget": {
     "displayName": "Plex Mini",
-    "description": "Opens the Plex Mini floating player",
+    "description": "Opens the Plex Mini window; shows a now-playing marquee while something plays",
     "category": "Media",
     "defaultSection": "right",
     "allowMultiple": false
