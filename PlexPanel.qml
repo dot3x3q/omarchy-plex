@@ -1539,6 +1539,11 @@ Item {
           // (field-tested: Tab did nothing, then "j" typed into the query).
           Keys.onTabPressed: function(event) { event.accepted = true; root.cycleRegion(1) }
           Keys.onBacktabPressed: function(event) { event.accepted = true; root.cycleRegion(-1) }
+          // Focus and cursor region must never disagree: open() focuses this
+          // field directly, and if the region still says "page", the first Tab
+          // walks page->sidebar and the second wraps right back into the field
+          // (field-tested: Tab Tab j searched for "j" instead of navigating).
+          onActiveFocusChanged: if (activeFocus) root.setPanelCursor("search", "input")
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.top: statusBanner.visible ? statusBanner.bottom : pageHeader.bottom
