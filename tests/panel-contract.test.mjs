@@ -53,7 +53,7 @@ test("PiP screen handoff happens on RELEASE, never mid-drag", () => {
   assert.doesNotMatch(motion, /commitPipScreen|cyclePipScreen/)
   // Entering the PiP adopts the real window's output, which is half the
   // multi-monitor fix on its own.
-  assert.match(qml, /function enterPip\(\)[\s\S]{0,900}var host = appWindow\.screen/)
+  assert.match(qml, /function enterPip\(\)[\s\S]{0,1200}var host = appWindow\.screen/)
   // Clamp and snap measure the SCREEN, not the surface: right after a handoff
   // window.width still describes the output we just left.
   assert.match(qml, /function clampMargins\(\)[\s\S]{0,200}root\.pipAreaWidth/)

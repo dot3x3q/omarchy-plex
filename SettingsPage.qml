@@ -72,6 +72,11 @@ Item {
 
     TextField {
       id: serverField
+      // QQC2 TextField consumes Tab for its own focus chain (the same bug
+      // the search field was field-tested into fixing) — forward it so
+      // region cycling survives a caret in this field.
+      Keys.onTabPressed: function(event) { event.accepted = true; panel.cycleRegion(1) }
+      Keys.onBacktabPressed: function(event) { event.accepted = true; panel.cycleRegion(-1) }
       width: parent.width
       hasCursor: page.cursorHere && page.cursorRow === page.rowServer
       placeholderText: "Server URL e.g. http://192.168.1.50:32400"
@@ -85,6 +90,11 @@ Item {
 
     TextField {
       id: tokenField
+      // QQC2 TextField consumes Tab for its own focus chain (the same bug
+      // the search field was field-tested into fixing) — forward it so
+      // region cycling survives a caret in this field.
+      Keys.onTabPressed: function(event) { event.accepted = true; panel.cycleRegion(1) }
+      Keys.onBacktabPressed: function(event) { event.accepted = true; panel.cycleRegion(-1) }
       width: parent.width
       hasCursor: page.cursorHere && page.cursorRow === page.rowToken
       password: true

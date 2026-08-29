@@ -44,7 +44,16 @@ Item {
   property int seasonGen: 0
   property bool restorePending: false
 
-  readonly property bool isShow: (page.detail ? String(page.detail.type) : page.paramType) === "show"
+  // "Show-shaped": anything whose children resolve to playable episodes. TV
+  // libraries hand back SEASON objects from recentlyAdded and search, and a
+  // season routed through the movie path had no episode list and a Play that
+  // always failed — its own ratingKey has no Media/Part (review finding).
+  // A season's children are episodes, which the flat-show branch of
+  // loadSeasons already renders; the season picker simply stays empty.
+  readonly property bool isShow: {
+    var t = page.detail ? String(page.detail.type) : page.paramType
+    return t === "show" || t === "season"
+  }
   readonly property string scrollKey: "detail:" + page.ratingKey
 
   readonly property real heroHeight: Style.space(150)
@@ -133,7 +142,8 @@ Item {
       ratingKey: String(od.ratingKey).replace(/[^A-Za-z0-9]/g, ""),
       title: String(od.title || ""),
       seasonKey: String(od.parentRatingKey || ""),
-      label: "S" + (od.parentIndex || "?") + "E" + (od.index || "?"),
+      label: "S" + (od.parentIndex === undefined || od.parentIndex === null ? "?" : od.parentIndex)
+        + "E" + (od.index === undefined || od.index === null ? "?" : od.index),
       progress: dur > 0 ? Math.max(0, Math.min(1, off / dur)) : 0,
       remainingMs: Math.max(0, dur - off)
     }

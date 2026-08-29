@@ -44,7 +44,7 @@ Item {
   function syncPlayerState() {
     if (!root.service) return
     root.service.playing = root.mode === "playing"
-    root.service.paused = root.isPaused
+    root.service.paused = root.mode === "playing" && root.isPaused
     root.service.title = root.currentTitle
   }
   onServiceChanged: root.syncPlayerState()
@@ -250,10 +250,14 @@ Item {
     root.navStack = stack
     root.currentPage = next
     root.pageParams = args
+    // A banner describes the page that raised it; carrying "No results for X"
+    // onto Home reads as a stuck error.
+    root.setStatus("", false)
     root.setPanelCursor("page", "")
   }
 
   function goBack() {
+    root.setStatus("", false)
     if (root.navStack.length === 0) {
       if (root.currentPage !== "home") {
         root.currentPage = "home"
@@ -342,6 +346,9 @@ Item {
 
   function enterPip() {
     if (!root.pipAvailable || !root.windowed) return
+    // The PiP cannot host or dismiss the picker popups; one left open would
+    // pin the strip over the video for the rest of the session.
+    root.closeTrackPopup()
     // The PiP *is* the theater on the floaty surface, so popping back later
     // lands on the picture rather than the minibar.
     root.theater = true
@@ -716,6 +723,8 @@ Item {
     if (root.mode !== "playing") {
       root.mode = "list"
       if (root.libraries.length === 0) loadLibraries()
+    } else {
+      pollTimer.restart()
     }
     root.focusPrimary()
   }
@@ -734,6 +743,10 @@ Item {
       player.pause()
     }
     if (root.mode === "playing") sendTimeline("paused")
+    // A closed panel has nothing to poll for: on mpv this timer spawns a
+    // sh+socat every second, and both backends keep posting timeline pings
+    // for a session nobody is watching. open() restarts it.
+    pollTimer.stop()
     root.opened = false
   }
 
@@ -880,6 +893,8 @@ Item {
     root.request(Api.sectionsUrl(""), function(doc) {
       var out = []
       try { out = Api.mapSections(doc) } catch (e) { /* leave the sidebar at Home + Settings */ }
+      if (doc === null && root.configured())
+        root.setStatus("Plex request failed — check server, token and network", true)
       root.libraries = out
     })
   }
@@ -923,7 +938,13 @@ Item {
       var out = []
       try { out = Api.mapSearch(doc) } catch (e) { out = [] }
       root.searchResults = out
-      root.setStatus(out.length === 0 ? "No results for “" + query + "”" : "", false)
+      // A slow response can land after the user navigated away; its banner
+      // belongs to the search page, not to wherever they are now. And a null
+      // doc is a transport/auth failure, not an empty library — say so
+      // (review finding: a dead server rendered as a normal empty app).
+      if (root.currentPage !== "search") return
+      if (doc === null) root.setStatus("Plex request failed — check server, token and network", true)
+      else root.setStatus(out.length === 0 ? "No results for “" + query + "”" : "", false)
     })
   }
 
@@ -2498,6 +2519,12 @@ Item {
     // TextField eats Space — so this cannot fire mid-query.
     if (root.mode === "playing" && !ctrl && !alt && key === Qt.Key_Space) {
       root.togglePause()
+      return true
+    }
+    // Same standing as Space: mute must not require re-entering theater.
+    // A focused text field never lets a bare M reach this line.
+    if (root.mode === "playing" && !ctrl && !alt && key === Qt.Key_M) {
+      root.toggleMute()
       return true
     }
 

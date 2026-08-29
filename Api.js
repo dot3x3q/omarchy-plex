@@ -152,7 +152,7 @@ function subFor(m) {
 }
 
 function captionFor(m) {
-  if (m.type === "episode") return "S" + (m.parentIndex || "?") + "E" + (m.index || "?")
+  if (m.type === "episode") return "S" + ((m.parentIndex === undefined || m.parentIndex === null ? "?" : m.parentIndex)) + "E" + ((m.index === undefined || m.index === null ? "?" : m.index))
   if (m.type === "season") return (Number(m.leafCount) || 0) + " episodes"
   return cap(m.contentRating, MAX_FIELD)
 }

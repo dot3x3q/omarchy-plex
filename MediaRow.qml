@@ -143,8 +143,12 @@ BorderSurface {
 
       Button {
         anchors.verticalCenter: parent.verticalCenter
-        // Always visible, even in browse rows: play is a distinct action
-        // from "open" and must not require drilling into the detail page.
+        // Play is a distinct action from "open" — but only for things the
+        // resolver can actually play. A show/season ratingKey has no
+        // Media/Part, so an always-visible ▶ there was an advertised action
+        // that always landed in error mode (review finding).
+        visible: root.itemData
+          && (root.itemData.type === "movie" || root.itemData.type === "episode")
         iconText: "󰐊"
         iconSize: Style.font.body
         foreground: Color.foreground

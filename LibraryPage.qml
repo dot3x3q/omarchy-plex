@@ -66,7 +66,15 @@ Item {
     root.resetAndFetch()
   }
 
+  // Kills in-flight responses from a section/sort we already left — the same
+  // guard DetailPage (loadGen) and HomePage (id compare) carry; without it a
+  // slow Movies page 0 lands under the TV Shows title and corrupts pagination
+  // (review finding).
+  property int fetchGen: 0
+
   function resetAndFetch() {
+    root.fetchGen++
+    root.loading = false
     root.items = []
     root.nextStart = 0
     root.totalCount = -1
@@ -91,7 +99,9 @@ Item {
       { sort: root.sortKey, start: root.nextStart, size: root.pageSize })
     var thumbW = root.thumbW
     var thumbH = root.thumbH
+    var gen = root.fetchGen
     panel.request(path, function(doc) {
+      if (gen !== root.fetchGen) return
       root.loading = false
       var mc = doc && doc.MediaContainer
       var total = mc && mc.totalSize !== undefined ? Number(mc.totalSize) : -1
