@@ -7,12 +7,14 @@
   "description": "Resizable Plex miniplayer for Omarchy: Continue Watching, live search, resume, keyboard controls, progress sync, and transcode fallback.",
   "kinds": [
     "panel",
-    "bar-widget"
+    "bar-widget",
+    "service"
   ],
   "keepLoaded": true,
   "entryPoints": {
     "panel": "PlexPanel.qml",
-    "barWidget": "BarWidget.qml"
+    "barWidget": "BarWidget.qml",
+    "service": "PlayerState.qml"
   },
   "barWidget": {
     "displayName": "Plex Mini",
