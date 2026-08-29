@@ -36,11 +36,24 @@ pattern. It is ~95% composition of `/usr/share/omarchy/shell/{Commons,Ui}/`.
    Header functions rehome: close → Esc/compositor, pin toggle → PiP button in
    the now-playing bar, title → window `title:` property only (for Hyprland
    rules), status → status banner between header and search (Spotify pattern).
-2. **Floaty drag oscillation**: the drag handler reads `root.marginRight` back
-   every mouse event, but layer-shell margin changes apply asynchronously
-   through the compositor — un-applied deltas get double-counted and the panel
-   orbits the cursor. Dies with the floaty rebuild (PiP keeps a drag, rewritten
-   to not read back in-flight state).
+2. **Floaty drag oscillation** — DEAD in wave 4. The handler read an item-local
+   `mouse.x` while writing `margins`, but `zwlr_layer_surface_v1.set_margin` is
+   double-buffered: the compositor applies it on its own schedule and never
+   tells the client. So the coordinate frame being measured was still being
+   moved by the handler's own un-applied writes, the pending delta was counted
+   twice, and the panel orbited the cursor. There is no API fix —
+   wlr-layer-shell has no move request, Quickshell's `startSystemMove` exists
+   only on `FloatingWindow`, `PanelWindow` has no position readback, and nothing
+   signals "margin applied".
+   **The fix is to stop moving the surface.** The PiP's `PanelWindow` is anchored
+   to all four edges, transparent, and `mask`ed to the card, and the card is an
+   ordinary Item dragged by `x`/`y` in scene coordinates. Item coordinates
+   resolve inside Qt's scene graph, so the position set is the position on the
+   next frame — nothing to oscillate against. `marginRight`/`marginBottom` keep
+   their names and their persisted schema but now place the card. Release does
+   edge magnetism (`Style.space(40)` band → `Style.space(14)` inset), so corners
+   are deterministic without giving up free placement. Same idiom as the shell's
+   bar drag ghost (`plugins/bar/Bar.qml`:1170-1190).
 3. **Laggy hover** (`Behavior on color` 100ms on rows): deleted. Spotify's
    `MediaRow` has **zero** animation on rows — fill snaps instantly. Their
    only animations: button color 120ms, cursor surfaces 60ms, sliders 140ms

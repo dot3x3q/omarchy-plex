@@ -9,7 +9,14 @@ test("panel contract pins integration chokepoints", () => {
   assert.match(qml, /resumeRetry[\s\S]{0,600}player\.position = target/)
   const closeBody = qml.slice(qml.indexOf("function close()"), qml.indexOf("function playSource"))
   assert.match(closeBody, /player\.playbackState === MediaPlayer\.PlayingState\)[\s\S]*player\.pause\(\)/)
-  assert.match(qml, /WlrKeyboardFocus\.Exclusive/)
+  // Wave 4 turned the floaty surface into a pure PiP: video plus a whisper of
+  // controls, with all browse/search/setup living in the real window. Nothing
+  // on that surface ever needs typing before the first click, so the Exclusive
+  // grab this used to pin — which made every other window on the desktop deaf
+  // while a miniplayer sat in the corner — has no remaining justification.
+  // OnDemand only, and Exclusive must not come back by accident.
+  assert.match(qml, /WlrKeyboardFocus\.OnDemand/)
+  assert.doesNotMatch(qml, /WlrKeyboardFocus\.Exclusive/)
   assert.match(qml, /id: searchDebounce[\s\S]{0,300}root\.search\(searchInput\.text\)/)
 })
 

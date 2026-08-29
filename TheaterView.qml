@@ -221,6 +221,21 @@ Item {
         }
       }
 
+      // Theater hides the header, so this is the only reachable way into the
+      // PiP from the state where you most want it: watching, and wanting the
+      // picture out of the tiling tree without stopping it.
+      TransportButton {
+        glyphText: "\u{f0403}"
+        tooltipText: "Picture-in-picture"
+        foreground: view.foreground
+        hasCursor: view.panel.cursorOn("playing", "pip")
+        onClicked: view.panel.toggleSurface()
+        onHovered: function(on) {
+          view.panel.pokeTheaterControls()
+          if (on) view.panel.setPanelCursor("playing", "pip")
+        }
+      }
+
       TransportButton {
         glyphText: "󰅀"
         tooltipText: "Browse · Esc"

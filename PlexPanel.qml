@@ -189,9 +189,13 @@ Item {
   readonly property bool inTheater: root.mode === "playing" && root.theater
   readonly property bool minibarVisible: root.mode === "playing" && !root.theater
 
-  // Ending a session can never leave the view stranded on a dead video surface.
+  // Ending a session can never leave the view stranded on a dead video surface
+  // — nor stranded in the PiP, which has no browse UI to fall back to.
   onModeChanged: {
-    if (root.mode !== "playing") root.theater = false
+    if (root.mode !== "playing") {
+      root.theater = false
+      if (!root.windowed) root.exitPip()
+    }
     root.syncPlayerState()
   }
 
@@ -320,20 +324,76 @@ Item {
   property int marginRight: 14
   property int marginBottom: 14
   // Primary surface: a real toplevel window the compositor tiles like any
-  // app. The layer-shell panel remains as the secondary "floaty" mode.
+  // app. The layer-shell panel remains as the secondary "floaty" mode, now a
+  // pure picture-in-picture: video plus a whisper of controls, nothing else.
   property bool windowed: true
 
+  // The PiP's resting inset, and the band around each screen edge inside which
+  // a release parks on it. Free placement everywhere else; deterministic
+  // corners where you actually want them.
+  readonly property int pipInset: Style.space(14)
+  readonly property int pipSnap: Style.space(40)
+
+  // A PiP is only ever a picture. With no session it is a dead grey rectangle
+  // with no browse UI and no obvious way back, and under the mpv backend the
+  // picture lives in mpv's own window, so there is nothing to put in it.
+  readonly property bool pipAvailable: root.mode === "playing" && !root.mpvMode
+
+  function enterPip() {
+    if (!root.pipAvailable || !root.windowed) return
+    // The PiP *is* the theater on the floaty surface, so popping back later
+    // lands on the picture rather than the minibar.
+    root.theater = true
+    root.windowed = false
+    root.savePosition()
+    root.pokeTheaterControls()
+    root.focusPrimary()
+  }
+
+  function exitPip() {
+    if (root.windowed) return
+    root.windowed = true
+    root.savePosition()
+    root.enterTheater() // no-op unless a session is still live
+    root.focusPrimary()
+  }
+
   function toggleSurface() {
-    root.windowed = !root.windowed
+    if (root.windowed) root.enterPip()
+    else root.exitPip()
+  }
+
+  // Margins measure the PiP CARD's distance from the screen edges, not the
+  // surface's — the layer surface itself is full-screen and never moves. Its
+  // own width/height are therefore the usable area, and they are the same
+  // numbers the card's x/y bind to, so the clamp cannot disagree with the
+  // placement by a rounding step the way a separate screen readback could.
+  function clampMargins() {
+    var w = window ? window.width : 0
+    var h = window ? window.height : 0
+    if (w > 0) root.marginRight = Math.max(0, Math.min(root.marginRight, w - root.videoWidth))
+    if (h > 0) root.marginBottom = Math.max(0, Math.min(root.marginBottom, h - root.videoHeight))
+  }
+
+  // Edge magnetism on release. Landing within the snap band of an edge parks on
+  // the standard inset, so releasing anywhere near a corner gives the same
+  // resting place every time — and both axes snapping is a corner snap.
+  function snapPip() {
+    var w = window ? window.width : 0
+    var h = window ? window.height : 0
+    if (root.marginRight < root.pipSnap) root.marginRight = root.pipInset
+    else if (w > 0 && root.marginRight > w - root.videoWidth - root.pipSnap)
+      root.marginRight = Math.max(0, w - root.videoWidth - root.pipInset)
+    if (root.marginBottom < root.pipSnap) root.marginBottom = root.pipInset
+    else if (h > 0 && root.marginBottom > h - root.videoHeight - root.pipSnap)
+      root.marginBottom = Math.max(0, h - root.videoHeight - root.pipInset)
+    root.clampMargins()
     root.savePosition()
   }
 
-  function clampMargins() {
-    var w = window && window.screen ? window.screen.width : 0
-    var h = window && window.screen ? window.screen.height : 0
-    if (w > 0) root.marginRight = Math.max(0, Math.min(root.marginRight, w - window.width))
-    if (h > 0) root.marginBottom = Math.max(0, Math.min(root.marginBottom, h - window.height))
-  }
+  // Growing the card leftwards can push it off the screen edge it is measured
+  // from; re-clamp whenever the resize grip changes the width.
+  onVideoWidthChanged: root.clampMargins()
 
   function saveWidth() {
     posSave.width = "" + root.videoWidth
@@ -385,7 +445,11 @@ Item {
           if (doc.right !== undefined) root.marginRight = Math.max(0, doc.right | 0)
           if (doc.bottom !== undefined) root.marginBottom = Math.max(0, doc.bottom | 0)
           if (doc.width !== undefined) root.videoWidth = Math.max(280, Math.min(900, doc.width | 0))
-          if (doc.windowed !== undefined) root.windowed = doc.windowed === true
+          // Nothing is playing at load, and a PiP with no session shows no
+          // picture and offers no way to start one — a persisted floaty always
+          // comes back as the real window.
+          if (doc.windowed !== undefined)
+            root.windowed = doc.windowed === true || !root.pipAvailable
         } catch (e) { /* keep defaults */ }
       }
     }
@@ -425,6 +489,14 @@ Item {
   }
 
   // ---- lifecycle ----
+  // The two surfaces have their own key hosts: the browse tree lives only in
+  // the real window now, so nothing inside it can hold the caret while the PiP
+  // is up (its window is not even mapped).
+  function focusKeyHost() {
+    if (root.windowed) keyHost.forceActiveFocus()
+    else pipKeyHost.forceActiveFocus()
+  }
+
   function focusPrimary() {
     // Defer until the mode's UI is visible; typing should search immediately.
     // Theater has no search box and its keys are transport keys, so the caret
@@ -432,8 +504,8 @@ Item {
     // minibar is still browsing, and should land in the search field.
     Qt.callLater(function() {
       if (!root.opened) return
-      if (!root.inTheater && searchInput.visible) searchInput.forceActiveFocus()
-      else keyHost.forceActiveFocus()
+      if (root.windowed && !root.inTheater && searchInput.visible) searchInput.forceActiveFocus()
+      else root.focusKeyHost()
     })
   }
 
@@ -739,14 +811,16 @@ Item {
     if (root.mode !== "playing") return
     root.theater = true
     root.pokeTheaterControls()
-    keyHost.forceActiveFocus()
+    root.focusKeyHost()
     root.setPanelCursor("playing", "play")
   }
 
   function exitTheater() {
     if (!root.theater) return
     root.theater = false
-    keyHost.forceActiveFocus()
+    // Browsing means the real window: the PiP has no list to drop back to.
+    if (!root.windowed) { root.windowed = true; root.savePosition() }
+    root.focusKeyHost()
     // Hand the highlight to the bar that just appeared, so the first Enter
     // goes straight back to theater.
     root.setPanelCursor("minibar", "expand")
@@ -1383,6 +1457,18 @@ Item {
     return false
   }
 
+  // The PiP's own dispatcher. It shares the transport keys with theater and
+  // adds nothing else: there is no search, no page and no back-stack on that
+  // surface, so Esc has exactly one meaning — put me back in the window.
+  function handlePipKey(event) {
+    var ctrl = (event.modifiers & Qt.ControlModifier) !== 0
+    var shift = (event.modifiers & Qt.ShiftModifier) !== 0
+    var alt = (event.modifiers & Qt.AltModifier) !== 0
+    if (event.key === Qt.Key_Escape) { root.exitPip(); return true }
+    root.pokeTheaterControls()
+    return root.handlePlayingKey(event, ctrl, shift, alt)
+  }
+
   function handleKey(event) {
     var key = event.key
     var ctrl = (event.modifiers & Qt.ControlModifier) !== 0
@@ -1428,64 +1514,236 @@ Item {
     return false
   }
 
-  // ---- window ----
+  // ---- floaty surface: the picture-in-picture ----
+  //
+  // The surface is FULL-SCREEN and never moves. That is the whole fix for the
+  // drag oscillation.
+  //
+  // wlr-layer-shell has no move request — a layer surface's position is purely
+  // anchor + margin, and `set_margin` is double-buffered: the compositor
+  // applies it whenever it likes and never tells the client it landed. So a
+  // handler that reads an item-local `mouse.x` and writes `margins` is reading
+  // a coordinate frame that its own un-applied writes are still moving. The
+  // pending delta gets counted again on the next event and the card orbits the
+  // cursor. Quickshell offers no way out: `startSystemMove` exists only on
+  // FloatingWindow (xdg-toplevel), PanelWindow has no position readback, and
+  // nothing signals "margin applied".
+  //
+  // The shell's own answer, used by the bar's drag ghost
+  // (/usr/share/omarchy/shell/plugins/bar/Bar.qml:1170-1190) and the
+  // notification popups (plugins/notifications/Service.qml:974-978): anchor the
+  // surface to all four edges, blank the input region with `mask` so the rest
+  // of the screen stays click-through, and move an ordinary Item inside it.
+  // Item coordinates are resolved entirely inside Qt's scene graph — the
+  // position you set IS the position on the next frame, with no round trip to
+  // oscillate against. marginRight/marginBottom keep their meaning (and their
+  // persisted schema); they now place the CARD, not the surface.
   PanelWindow {
     id: window
     visible: root.opened && !root.windowed && !root.sessionLocked
-    anchors { top: false; left: false; right: true; bottom: true }
-    margins { right: root.marginRight; bottom: root.marginBottom }
-    implicitWidth: root.videoWidth
-    implicitHeight: root.mode === "playing"
-      ? (root.backend === "mpv" ? root.videoHeight * 0.45 : root.videoHeight) + 92
-      : 380
+    anchors { top: true; left: true; right: true; bottom: true }
+    color: "transparent"
     onWidthChanged: root.clampMargins()
     onHeightChanged: root.clampMargins()
-    color: root.background
     WlrLayershell.namespace: "plexmini"
     WlrLayershell.layer: WlrLayer.Top
-    // A launcher-style picker must receive typing immediately on open;
-    // OnDemand does not request Wayland keyboard focus until a mouse click.
-    // But holding Exclusive for the panel's whole lifetime makes every other
-    // window deaf while a miniplayer sits in the corner. Grab exclusively
-    // only in the transient browse/setup modes; during playback drop to
-    // OnDemand so the desktop stays usable — clicking the panel re-arms the
-    // playback keys (Space, arrows), clicking any window gives it back.
-    WlrLayershell.keyboardFocus: !root.opened ? WlrKeyboardFocus.None
-      : (root.mode === "playing" ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.Exclusive)
+    // Only the card takes input; a full-screen surface that ate clicks would
+    // make the desktop unusable behind it.
+    mask: Region { item: pipCard }
+    // OnDemand only. There is no browse or setup on this surface any more, so
+    // nothing here ever needs to receive typing before the first click — and a
+    // miniplayer that held an Exclusive grab would leave every other window on
+    // the desktop deaf for as long as it sat in the corner. Clicking the card
+    // arms the transport keys; clicking any window gives them back.
+    WlrLayershell.keyboardFocus: root.opened
+      ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
     exclusionMode: ExclusionMode.Ignore
 
     onVisibleChanged: if (visible) root.focusPrimary()
 
-      // resize grip — thin strip on the panel's left edge, inside bounds.
-      // Dragging left grows the miniwindow; width persists across restarts.
-      MouseArea {
-        id: resizeGrip
-        anchors.left: parent.left
-        anchors.top: parent.top
-        width: 28
-        height: 28
-        z: 100
-        cursorShape: Qt.SizeFDiagCursor
-        property int sx: 0
-        property int startW: 0
-        onPressed: function(mouse) { sx = mapToItem(null, mouse.x, mouse.y).x; startW = root.videoWidth }
-        onPositionChanged: function(mouse) {
-          if (!pressed) return
-          var gx = mapToItem(null, mouse.x, mouse.y).x
-          root.videoWidth = Math.max(280, Math.min(900, startW + (sx - gx)))
-          root.saveWidth()
-        }
-        onReleased: root.saveWidth()
-      }
+    FocusScope {
+      id: pipScope
+      anchors.fill: parent
+      focus: true
 
-    Item { id: panelSlot; anchors.fill: parent }
+      Keys.priority: Keys.BeforeItem
+      Keys.onPressed: function(event) { if (root.handlePipKey(event)) event.accepted = true }
+
+      // Focus parking spot for the floaty surface — `content`'s keyHost lives
+      // in the other window, which is not even mapped while the PiP is up.
+      Item { id: pipKeyHost; width: 0; height: 0; focus: true }
+
+      BorderSurface {
+        id: pipCard
+        width: root.videoWidth
+        height: root.videoHeight
+        // Measured from the far edges so the card keeps its corner when the
+        // screen resolution or the card's own width changes.
+        x: Math.round(Math.max(0, pipScope.width - width - root.marginRight))
+        y: Math.round(Math.max(0, pipScope.height - height - root.marginBottom))
+        radius: Style.cornerRadius
+        // Opaque: the letterbox bars around a 16:9 picture are the panel
+        // background, exactly as they are in theater.
+        color: root.background
+        borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
+
+        // Passive, so it keeps reporting while the pointer is parked on a
+        // button in the strip — a MouseArea would hand hover to the topmost
+        // item and the controls would fade out from under the cursor.
+        HoverHandler { id: pipHover }
+
+        // The video reparents in here (see videoLayer).
+        Item { id: pipSlot; anchors.fill: parent }
+
+        // Drag surface. Sits under the control strip so the buttons win their
+        // own clicks, and reads SCENE coordinates: the scene belongs to the
+        // full-screen surface, which never moves, so a press-time snapshot
+        // plus an absolute delta tracks the pointer exactly 1:1.
+        MouseArea {
+          id: pipDrag
+          anchors.fill: parent
+          cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+          property real pressX: 0
+          property real pressY: 0
+          property int pressRight: 0
+          property int pressBottom: 0
+          property bool moved: false
+
+          onPressed: function(mouse) {
+            var p = mapToItem(null, mouse.x, mouse.y)
+            pipDrag.pressX = p.x
+            pipDrag.pressY = p.y
+            pipDrag.pressRight = root.marginRight
+            pipDrag.pressBottom = root.marginBottom
+            pipDrag.moved = false
+            // OnDemand focus only arrives on a click; claim it for the keys.
+            pipKeyHost.forceActiveFocus()
+            root.pokeTheaterControls()
+          }
+          onPositionChanged: function(mouse) {
+            if (!pressed) return
+            var p = mapToItem(null, mouse.x, mouse.y)
+            root.marginRight = pipDrag.pressRight - (p.x - pipDrag.pressX)
+            root.marginBottom = pipDrag.pressBottom - (p.y - pipDrag.pressY)
+            root.clampMargins()
+            pipDrag.moved = true
+          }
+          // A bare click on the picture is a focus grab, not a move: snapping
+          // (and its state write) belongs to gestures that actually moved.
+          onReleased: if (pipDrag.moved) root.snapPip()
+        }
+
+        // resize grip — thin strip on the card's top-left corner, inside
+        // bounds. Dragging left grows the miniwindow; width persists across
+        // restarts. Above the drag surface so the corner resizes, not moves.
+        MouseArea {
+          id: resizeGrip
+          anchors.left: parent.left
+          anchors.top: parent.top
+          width: Style.space(28)
+          height: Style.space(28)
+          z: 100
+          cursorShape: Qt.SizeFDiagCursor
+          property real sx: 0
+          property int startW: 0
+          onPressed: function(mouse) { sx = mapToItem(null, mouse.x, mouse.y).x; startW = root.videoWidth }
+          onPositionChanged: function(mouse) {
+            if (!pressed) return
+            var gx = mapToItem(null, mouse.x, mouse.y).x
+            // No save here: a write per mouse event spawned a shell process per
+            // frame. The release below persists the settled width once.
+            root.videoWidth = Math.max(280, Math.min(900, startW + (sx - gx)))
+          }
+          onReleased: root.saveWidth()
+        }
+
+        // ---------- the whisper of controls ----------
+        // Everything the PiP offers: scrub, play/pause, and the way back to the
+        // real window. Fades like the theater strip and on the same timer, so
+        // a key press wakes it even with the pointer parked elsewhere.
+        BorderSurface {
+          id: pipStrip
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+          anchors.margins: Style.space(8)
+          height: Style.space(40)
+          radius: Style.cornerRadius
+          color: Style.normalFillFor(root.foreground, root.accent)
+          borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
+
+          opacity: pipHover.hovered || root.theaterControlsVisible ? 1 : 0
+          visible: opacity > 0.01
+          Behavior on opacity { NumberAnimation { duration: 120 } }
+
+          TransportButton {
+            id: pipPlay
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(4)
+            anchors.verticalCenter: parent.verticalCenter
+            glyphText: root.isPaused ? "󰐊" : "󰏤"
+            glyphSize: Style.font.iconLarge
+            tooltipText: root.isPaused ? "Play · Space" : "Pause · Space"
+            foreground: root.foreground
+            hasCursor: root.cursorOn("pip", "play")
+            onClicked: root.togglePause()
+            onHovered: function(on) { if (on) root.setPanelCursor("pip", "play") }
+          }
+
+          Button {
+            id: pipPop
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(4)
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: "\u{f0b26}"
+            tooltipText: "Back to the window · Esc"
+            foreground: root.foreground
+            focusable: false
+            hasCursor: root.cursorOn("pip", "window")
+            onClicked: root.toggleSurface()
+            onHovered: function(on) { if (on) root.setPanelCursor("pip", "window") }
+          }
+
+          CursorSurface {
+            id: pipSeekCursor
+            anchors.left: pipPlay.right
+            anchors.leftMargin: Style.space(6)
+            anchors.right: pipPop.left
+            anchors.rightMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+            height: pipSeekSlider.implicitHeight
+            hasCursor: root.cursorOn("pip", "seek")
+            foreground: root.foreground
+            accent: root.accent
+
+            HoverHandler {
+              onHoveredChanged: if (hovered) root.setPanelCursor("pip", "seek")
+            }
+
+            PanelSlider {
+              id: pipSeekSlider
+              anchors.fill: parent
+              bar: root.panelBar
+              minimum: 0
+              maximum: Math.max(1, root.dispDuration)
+              step: 10
+              // The previewed position, not the reported one — see the
+              // seek-ack block above for why the knob has to hold its ground.
+              value: root.seekDisplayTime
+              onMoved: function(seconds) { root.previewSeek(seconds) }
+              onReleased: function(seconds) { root.commitSeek(seconds) }
+            }
+          }
+        }
+      }
+    }
   }
 
   // Primary surface: a real xdg-toplevel window. Hyprland tiles, swaps,
-  // fullscreens, and rules it like any application window; the panel above
-  // is the secondary "floaty" mode. One content tree serves both — it
-  // reparents into whichever surface is active, so every id and binding in
-  // this file keeps working regardless of the host.
+  // fullscreens, and rules it like any application window. The whole browse
+  // tree — sidebar, pages, search, setup, minibar — lives here and ONLY here,
+  // so it never reparents; the one thing that still moves between surfaces is
+  // the video (see videoLayer).
   FloatingWindow {
     id: appWindow
     visible: root.opened && root.windowed && !root.sessionLocked
@@ -1497,230 +1755,431 @@ Item {
     minimumSize: Qt.size(480, 360)
     onVisibleChanged: if (visible) root.focusPrimary()
 
-    Item { id: winSlot; anchors.fill: parent }
-  }
-
-  FocusScope {
-    id: content
-    parent: root.windowed ? winSlot : panelSlot
-    anchors.fill: parent
-    focus: true
-
-    // Below this the sidebar drops to an icon rail; the floaty surface is
-    // always narrower than this, so it gets the rail for free.
-    readonly property bool compact: content.width < Style.space(760)
-
-    Keys.priority: Keys.BeforeItem
-    Keys.onPressed: function(event) { if (root.handleKey(event)) event.accepted = true }
-
-    // Focus parking spot for when no text field should hold the caret.
-    Item { id: keyHost; width: 0; height: 0 }
-
-    // ================= video surface =================
-    // Video is the one full-bleed surface in the app: no content margins, the
-    // window background showing through the letterbox bars.
-    //
-    // It deliberately does NOT live inside TheaterView. player.videoOutput is a
-    // sink pointer QtMultimedia keeps for the life of the session, so putting
-    // the VideoOutput behind the theater Loader would destroy the sink out from
-    // under a running player every time you pressed Esc to browse. Kept
-    // instantiated and merely invisible, the item stops painting while the
-    // player keeps decoding — audio continues behind the minibar, and returning
-    // to theater picks the picture back up with no reload.
-    Item {
-      id: videoLayer
+    FocusScope {
+      id: content
       anchors.fill: parent
-      visible: root.inTheater
+      focus: true
 
-      VideoOutput {
-        id: videoOut
+      // Below this the sidebar drops to an icon rail. Only the real window is
+      // width-responsive now — the PiP has no sidebar to collapse — so this is
+      // about a narrow TILED window, not about the floaty surface.
+      readonly property bool compact: content.width < Style.space(760)
+
+      Keys.priority: Keys.BeforeItem
+      Keys.onPressed: function(event) { if (root.handleKey(event)) event.accepted = true }
+
+      // Focus parking spot for when no text field should hold the caret.
+      Item { id: keyHost; width: 0; height: 0 }
+
+      // The video parks here while the real window owns the picture.
+      Item { id: theaterSlot; anchors.fill: parent }
+
+      // ================= browse =================
+      Item {
+        id: browse
         anchors.fill: parent
-        visible: root.backend !== "mpv"
-        fillMode: VideoOutput.PreserveAspectFit
-      }
-    }
+        anchors.margins: Style.space(14)
+        visible: !root.inTheater
 
-    // ================= browse =================
-    Item {
-      id: browse
-      anchors.fill: parent
-      anchors.margins: Style.space(14)
-      visible: !root.inTheater
-
-      BorderSurface {
-        id: sidebar
-        anchors.left: parent.left
-        anchors.top: parent.top
-        // Everything above the minibar shrinks to make room for it, so a live
-        // session never sits on top of the list it came from.
-        anchors.bottom: minibarSeparator.visible ? minibarSeparator.top : parent.bottom
-        anchors.bottomMargin: minibarSeparator.visible ? Style.space(10) : 0
-        width: content.compact
-          ? Style.space(54)
-          : Math.min(Style.space(214), Math.max(Style.space(176), browse.width * 0.225))
-        radius: Style.cornerRadius
-        color: Style.normalFillFor(root.foreground, root.accent)
-        borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
-
-        Row {
-          id: brandRow
+        BorderSurface {
+          id: sidebar
           anchors.left: parent.left
-          anchors.right: parent.right
           anchors.top: parent.top
-          anchors.margins: Style.space(11)
-          height: Style.space(42)
-          spacing: Style.space(9)
+          // Everything above the minibar shrinks to make room for it, so a live
+          // session never sits on top of the list it came from.
+          anchors.bottom: minibarSeparator.visible ? minibarSeparator.top : parent.bottom
+          anchors.bottomMargin: minibarSeparator.visible ? Style.space(10) : 0
+          width: content.compact
+            ? Style.space(54)
+            : Math.min(Style.space(214), Math.max(Style.space(176), browse.width * 0.225))
+          radius: Style.cornerRadius
+          color: Style.normalFillFor(root.foreground, root.accent)
+          borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
 
-          Text {
-            anchors.verticalCenter: parent.verticalCenter
-            text: "󰚺"
-            color: root.accent
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.iconLarge
+          Row {
+            id: brandRow
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Style.space(11)
+            height: Style.space(42)
+            spacing: Style.space(9)
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: "󰚺"
+              color: root.accent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.iconLarge
+            }
+
+            Column {
+              visible: !content.compact
+              width: Math.max(Style.space(40), parent.width - Style.space(38))
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: 0
+
+              Text {
+                width: parent.width
+                text: "Plex Mini"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.subtitle
+                font.bold: true
+                elide: Text.ElideRight
+              }
+              Text {
+                width: parent.width
+                text: root.configured() ? "Movies and TV" : "Not connected"
+                color: root.muted
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+              }
+            }
           }
 
           Column {
-            visible: !content.compact
-            width: Math.max(Style.space(40), parent.width - Style.space(38))
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: 0
+            id: navColumn
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: brandRow.bottom
+            anchors.margins: Style.space(8)
+            spacing: Style.space(2)
 
-            Text {
-              width: parent.width
-              text: "Plex Mini"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.subtitle
-              font.bold: true
-              elide: Text.ElideRight
-            }
-            Text {
-              width: parent.width
-              text: root.configured() ? "Movies and TV" : "Not connected"
-              color: root.muted
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
-            }
-          }
-        }
-
-        Column {
-          id: navColumn
-          anchors.left: parent.left
-          anchors.right: parent.right
-          anchors.top: brandRow.bottom
-          anchors.margins: Style.space(8)
-          spacing: Style.space(2)
-
-          PanelSeparator { width: parent.width; foreground: root.foreground }
-
-          Button {
-            width: parent.width
-            text: content.compact ? "" : "Home"
-            iconText: "󰋜"
-            tooltipText: "Continue Watching"
-            foreground: root.foreground
-            leftAlign: !content.compact
-            focusable: false
-            selected: root.currentPage === "home" && root.mode !== "setup"
-            hasCursor: root.cursorOn("sidebar", "home")
-            onClicked: root.activateSidebar("home")
-            onHovered: function(on) { if (on) root.setPanelCursor("sidebar", "home") }
-          }
-
-          Repeater {
-            model: root.libraries
+            PanelSeparator { width: parent.width; foreground: root.foreground }
 
             Button {
-              required property var modelData
-              width: navColumn.width
-              text: content.compact ? "" : String(modelData.title)
-              iconText: modelData.type === "show" ? "󰦔" : "󰎁"
-              tooltipText: String(modelData.title)
+              width: parent.width
+              text: content.compact ? "" : "Home"
+              iconText: "󰋜"
+              tooltipText: "Continue Watching"
               foreground: root.foreground
               leftAlign: !content.compact
               focusable: false
-              selected: root.currentPage === "library"
-                && String(root.pageParams.sectionId) === String(modelData.id)
-              hasCursor: root.cursorOn("sidebar", "lib:" + modelData.id)
-              onClicked: root.activateSidebar("lib:" + modelData.id)
-              onHovered: function(on) { if (on) root.setPanelCursor("sidebar", "lib:" + modelData.id) }
+              selected: root.currentPage === "home" && root.mode !== "setup"
+              hasCursor: root.cursorOn("sidebar", "home")
+              onClicked: root.activateSidebar("home")
+              onHovered: function(on) { if (on) root.setPanelCursor("sidebar", "home") }
+            }
+
+            Repeater {
+              model: root.libraries
+
+              Button {
+                required property var modelData
+                width: navColumn.width
+                text: content.compact ? "" : String(modelData.title)
+                iconText: modelData.type === "show" ? "󰦔" : "󰎁"
+                tooltipText: String(modelData.title)
+                foreground: root.foreground
+                leftAlign: !content.compact
+                focusable: false
+                selected: root.currentPage === "library"
+                  && String(root.pageParams.sectionId) === String(modelData.id)
+                hasCursor: root.cursorOn("sidebar", "lib:" + modelData.id)
+                onClicked: root.activateSidebar("lib:" + modelData.id)
+                onHovered: function(on) { if (on) root.setPanelCursor("sidebar", "lib:" + modelData.id) }
+              }
+            }
+
+            PanelSeparator { width: parent.width; foreground: root.foreground }
+          }
+
+          Button {
+            id: settingsNavButton
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.margins: Style.space(8)
+            text: content.compact ? "" : "Settings"
+            iconText: "󰒓"
+            tooltipText: "Server, token and playback backend"
+            foreground: root.foreground
+            leftAlign: !content.compact
+            focusable: false
+            selected: root.mode === "setup" || root.currentPage === "settings"
+            hasCursor: root.cursorOn("sidebar", "settings")
+            onClicked: root.activateSidebar("settings")
+            onHovered: function(on) { if (on) root.setPanelCursor("sidebar", "settings") }
+          }
+        }
+
+        Item {
+          id: pane
+          anchors.left: sidebar.right
+          anchors.leftMargin: Style.space(10)
+          anchors.right: parent.right
+          anchors.top: parent.top
+          anchors.bottom: sidebar.bottom
+
+          Row {
+            id: pageHeader
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            height: Style.space(52)
+            spacing: Style.space(5)
+
+            Button {
+              id: backButton
+              visible: root.navStack.length > 0
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "󰁍"
+              tooltipText: "Back · Alt+Left"
+              foreground: root.foreground
+              focusable: false
+              hasCursor: root.cursorOn("header", "back")
+              onClicked: root.goBack()
+              onHovered: function(on) { if (on) root.setPanelCursor("header", "back") }
+            }
+
+            Column {
+              width: Math.max(Style.space(80), parent.width
+                - (backButton.visible ? backButton.width + parent.spacing : 0)
+                - refreshButton.width - pipButton.width - closeButton.width
+                - parent.spacing * 3)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(1)
+
+              Text {
+                width: parent.width
+                text: root.pageTitle()
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+                textFormat: Text.PlainText
+                elide: Text.ElideRight
+              }
+              Text {
+                width: parent.width
+                text: root.pageSubtitle()
+                color: root.muted
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                textFormat: Text.PlainText
+                elide: Text.ElideRight
+              }
+            }
+
+            Button {
+              id: refreshButton
+              anchors.verticalCenter: parent.verticalCenter
+              visible: root.configured() && root.mode !== "setup"
+              iconText: "󰑐"
+              tooltipText: "Refresh · R"
+              foreground: root.foreground
+              focusable: false
+              hasCursor: root.cursorOn("header", "refresh")
+              onClicked: root.refresh()
+              onHovered: function(on) { if (on) root.setPanelCursor("header", "refresh") }
+            }
+
+            Button {
+              id: pipButton
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "\u{f0403}"
+              // Deliberately still hoverable while unavailable: `enabled: false`
+              // would kill the tooltip too, and the tooltip is the only place
+              // that can say WHY the button is dead.
+              foreground: root.pipAvailable ? root.foreground : root.muted
+              tooltipText: root.pipAvailable
+                ? "Picture-in-picture"
+                : (root.mpvMode
+                  ? "mpv has the picture in its own window"
+                  : "Picture-in-picture · play something first")
+              focusable: false
+              hasCursor: root.cursorOn("header", "pip")
+              // A no-op while unavailable — enterPip() guards on pipAvailable.
+              onClicked: root.toggleSurface()
+              onHovered: function(on) { if (on) root.setPanelCursor("header", "pip") }
+            }
+
+            Button {
+              id: closeButton
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "󰅖"
+              // The armed state has to be visible or the second Esc is a guess.
+              foreground: root.escapeCloseArmed ? root.urgent : root.foreground
+              bordered: root.escapeCloseArmed
+              tooltipText: root.escapeCloseArmed ? "Press Esc again to close" : "Close · Esc, Esc"
+              focusable: false
+              hasCursor: root.cursorOn("header", "close")
+              onClicked: root.close()
+              onHovered: function(on) { if (on) root.setPanelCursor("header", "close") }
             }
           }
 
-          PanelSeparator { width: parent.width; foreground: root.foreground }
+          BorderSurface {
+            id: statusBanner
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: pageHeader.bottom
+            anchors.topMargin: visible ? Style.space(6) : 0
+            visible: root.statusText !== ""
+            // Both the height and the margin collapse so an empty banner costs
+            // exactly zero and nothing below it shifts.
+            implicitHeight: visible ? bannerText.implicitHeight + Style.space(12) : 0
+            height: implicitHeight
+            radius: Style.cornerRadius
+            color: root.statusUrgent
+              ? Style.selectedFillFor(root.foreground, root.urgent)
+              : Style.normalFillFor(root.foreground, root.accent)
+            borderSpec: Border.controlSpec("normal", root.foreground,
+              root.statusUrgent ? root.urgent : root.accent)
+
+            Text {
+              id: bannerText
+              anchors.fill: parent
+              anchors.margins: Style.space(6)
+              text: root.statusText
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+            }
+          }
+
+          TextField {
+            id: searchInput
+            // QQC2 TextField consumes Tab for its own focus chain, so region
+            // cycling dies inside the field unless Tab is forwarded by hand
+            // (field-tested: Tab did nothing, then "j" typed into the query).
+            Keys.onTabPressed: function(event) { event.accepted = true; root.cycleRegion(1) }
+            Keys.onBacktabPressed: function(event) { event.accepted = true; root.cycleRegion(-1) }
+            // Focus and cursor region must never disagree: open() focuses this
+            // field directly, and if the region still says "page", the first Tab
+            // walks page->sidebar and the second wraps right back into the field
+            // (field-tested: Tab Tab j searched for "j" instead of navigating).
+            onActiveFocusChanged: if (activeFocus) root.setPanelCursor("search", "input")
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: statusBanner.visible ? statusBanner.bottom : pageHeader.bottom
+            anchors.topMargin: visible ? Style.space(8) : 0
+            height: visible ? Style.space(38) : 0
+            visible: root.configured() && root.mode !== "setup"
+            foreground: root.foreground
+            accent: root.accent
+            placeholderText: "Search movies and TV · /"
+            hasCursor: root.cursorOn("search", "input")
+            onTextEdited: {
+              searchDebounce.restart()
+              root.setPanelCursor("search", "input")
+            }
+            onAccepted: root.searchAccepted()
+            onHoveredChanged: if (hovered) root.setPanelCursor("search", "input")
+          }
+
+          Loader {
+            id: pageLoader
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: searchInput.visible
+              ? searchInput.bottom
+              : (statusBanner.visible ? statusBanner.bottom : pageHeader.bottom)
+            anchors.topMargin: Style.space(8)
+            anchors.bottom: parent.bottom
+            // Re-evaluates because pageComponent() reads mode/currentPage.
+            sourceComponent: root.pageComponent()
+          }
         }
 
-        Button {
-          id: settingsNavButton
+        // ---------- now-playing minibar ----------
+        // Spans the full browse width under both sidebar and pane, Spotify-footer
+        // style: artwork well, title + clock, transport, thin seek slider, and
+        // the way back into theater. Only on screen while a session is live and
+        // the video is not.
+        PanelSeparator {
+          id: minibarSeparator
+          visible: root.minibarVisible
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.bottom: minibar.top
+          anchors.bottomMargin: Style.space(10)
+          foreground: root.foreground
+        }
+
+        BorderSurface {
+          id: minibar
+          visible: root.minibarVisible
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.bottom: parent.bottom
-          anchors.margins: Style.space(8)
-          text: content.compact ? "" : "Settings"
-          iconText: "󰒓"
-          tooltipText: "Server, token and playback backend"
-          foreground: root.foreground
-          leftAlign: !content.compact
-          focusable: false
-          selected: root.mode === "setup" || root.currentPage === "settings"
-          hasCursor: root.cursorOn("sidebar", "settings")
-          onClicked: root.activateSidebar("settings")
-          onHovered: function(on) { if (on) root.setPanelCursor("sidebar", "settings") }
-        }
-      }
+          height: visible ? Style.space(64) : 0
+          radius: Style.cornerRadius
+          color: Style.normalFillFor(root.foreground, root.accent)
+          borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
 
-      Item {
-        id: pane
-        anchors.left: sidebar.right
-        anchors.leftMargin: Style.space(10)
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.bottom: sidebar.bottom
+          // Anything on the bar that is not itself a control takes you back to
+          // theater. Declared first so the real controls sit above it and win
+          // their own clicks. Hovering bare bar lights the expand button, which
+          // both names what a click does and keeps one highlight on screen.
+          MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.enterTheater()
+            onEntered: root.setPanelCursor("minibar", "expand")
+          }
 
-        Row {
-          id: pageHeader
-          anchors.left: parent.left
-          anchors.right: parent.right
-          anchors.top: parent.top
-          height: Style.space(52)
-          spacing: Style.space(5)
-
-          Button {
-            id: backButton
-            visible: root.navStack.length > 0
+          BorderSurface {
+            id: minibarArt
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(8)
             anchors.verticalCenter: parent.verticalCenter
-            iconText: "󰁍"
-            tooltipText: "Back · Alt+Left"
-            foreground: root.foreground
-            focusable: false
-            hasCursor: root.cursorOn("header", "back")
-            onClicked: root.goBack()
-            onHovered: function(on) { if (on) root.setPanelCursor("header", "back") }
+            height: Math.max(Style.space(24), parent.height - Style.space(16))
+            width: height
+            radius: Style.cornerRadius
+            color: Style.selectedFillFor(root.foreground, root.accent)
+            borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
+
+            Image {
+              anchors.fill: parent
+              anchors.margins: Style.space(2)
+              // Fit, not crop: episode stills are 16:9 and movie thumbs are 2:3,
+              // and the well shows through either way.
+              source: root.currentThumbPath === "" ? "" : root.imageUrl(root.currentThumbPath, 120, 120)
+              sourceSize.width: 120
+              sourceSize.height: 120
+              fillMode: Image.PreserveAspectFit
+              asynchronous: true
+              cache: false
+              visible: status === Image.Ready
+            }
+
+            Text {
+              anchors.centerIn: parent
+              visible: root.currentThumbPath === ""
+              text: "󰎁"
+              color: root.muted
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.iconLarge
+            }
           }
 
           Column {
-            width: Math.max(Style.space(80), parent.width
-              - (backButton.visible ? backButton.width + parent.spacing : 0)
-              - refreshButton.width - pipButton.width - closeButton.width
-              - parent.spacing * 3)
+            anchors.left: minibarArt.right
+            anchors.leftMargin: Style.space(9)
+            anchors.right: minibarSeek.left
+            anchors.rightMargin: Style.space(8)
             anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(1)
+            spacing: Style.space(2)
 
             Text {
               width: parent.width
-              text: root.pageTitle()
+              text: root.currentTitle
               color: root.foreground
               font.family: root.fontFamily
-              font.pixelSize: Style.font.title
+              font.pixelSize: Style.font.body
               font.bold: true
               textFormat: Text.PlainText
               elide: Text.ElideRight
             }
             Text {
               width: parent.width
-              text: root.pageSubtitle()
+              text: Model.fmtDuration(root.seekDisplayTime) + " / " + Model.fmtDuration(root.dispDuration)
               color: root.muted
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1729,322 +2188,135 @@ Item {
             }
           }
 
-          Button {
-            id: refreshButton
+          CursorSurface {
+            id: minibarSeek
+            // A narrow tiled window is narrower than the slider is useful at;
+            // the bar keeps its transport and drops the scrubber there.
+            visible: !content.compact
+            width: visible ? Math.max(Style.space(90), minibar.width * 0.22) : 0
+            height: minibarSlider.implicitHeight
+            anchors.right: minibarTransport.left
+            anchors.rightMargin: visible ? Style.space(8) : 0
             anchors.verticalCenter: parent.verticalCenter
-            visible: root.configured() && root.mode !== "setup"
-            iconText: "󰑐"
-            tooltipText: "Refresh · R"
+            hasCursor: root.cursorOn("minibar", "seek")
             foreground: root.foreground
-            focusable: false
-            hasCursor: root.cursorOn("header", "refresh")
-            onClicked: root.refresh()
-            onHovered: function(on) { if (on) root.setPanelCursor("header", "refresh") }
-          }
+            accent: root.accent
 
-          Button {
-            id: pipButton
-            anchors.verticalCenter: parent.verticalCenter
-            // Until the now-playing bar exists (wave 3) this is the only way
-            // back out of the floaty surface, so it stays in the header.
-            iconText: root.windowed ? "\u{f0403}" : "\u{f0b26}"
-            tooltipText: root.windowed ? "Send to corner panel" : "Back to a real window"
-            foreground: root.foreground
-            focusable: false
-            hasCursor: root.cursorOn("header", "pip")
-            onClicked: root.toggleSurface()
-            onHovered: function(on) { if (on) root.setPanelCursor("header", "pip") }
-          }
+            HoverHandler {
+              onHoveredChanged: if (hovered) root.setPanelCursor("minibar", "seek")
+            }
 
-          Button {
-            id: closeButton
-            anchors.verticalCenter: parent.verticalCenter
-            iconText: "󰅖"
-            // The armed state has to be visible or the second Esc is a guess.
-            foreground: root.escapeCloseArmed ? root.urgent : root.foreground
-            bordered: root.escapeCloseArmed
-            tooltipText: root.escapeCloseArmed ? "Press Esc again to close" : "Close · Esc, Esc"
-            focusable: false
-            hasCursor: root.cursorOn("header", "close")
-            onClicked: root.close()
-            onHovered: function(on) { if (on) root.setPanelCursor("header", "close") }
-          }
-        }
+            PanelSlider {
+              id: minibarSlider
+              anchors.fill: parent
+              bar: root.panelBar
+              minimum: 0
+              maximum: Math.max(1, root.dispDuration)
+              step: 10
+              value: root.seekDisplayTime
+              onMoved: function(seconds) { root.previewSeek(seconds) }
+              onReleased: function(seconds) { root.commitSeek(seconds) }
 
-        BorderSurface {
-          id: statusBanner
-          anchors.left: parent.left
-          anchors.right: parent.right
-          anchors.top: pageHeader.bottom
-          anchors.topMargin: visible ? Style.space(6) : 0
-          visible: root.statusText !== ""
-          // Both the height and the margin collapse so an empty banner costs
-          // exactly zero and nothing below it shifts.
-          implicitHeight: visible ? bannerText.implicitHeight + Style.space(12) : 0
-          height: implicitHeight
-          radius: Style.cornerRadius
-          color: root.statusUrgent
-            ? Style.selectedFillFor(root.foreground, root.urgent)
-            : Style.normalFillFor(root.foreground, root.accent)
-          borderSpec: Border.controlSpec("normal", root.foreground,
-            root.statusUrgent ? root.urgent : root.accent)
-
-          Text {
-            id: bannerText
-            anchors.fill: parent
-            anchors.margins: Style.space(6)
-            text: root.statusText
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            textFormat: Text.PlainText
-            wrapMode: Text.WordWrap
-          }
-        }
-
-        TextField {
-          id: searchInput
-          // QQC2 TextField consumes Tab for its own focus chain, so region
-          // cycling dies inside the field unless Tab is forwarded by hand
-          // (field-tested: Tab did nothing, then "j" typed into the query).
-          Keys.onTabPressed: function(event) { event.accepted = true; root.cycleRegion(1) }
-          Keys.onBacktabPressed: function(event) { event.accepted = true; root.cycleRegion(-1) }
-          // Focus and cursor region must never disagree: open() focuses this
-          // field directly, and if the region still says "page", the first Tab
-          // walks page->sidebar and the second wraps right back into the field
-          // (field-tested: Tab Tab j searched for "j" instead of navigating).
-          onActiveFocusChanged: if (activeFocus) root.setPanelCursor("search", "input")
-          anchors.left: parent.left
-          anchors.right: parent.right
-          anchors.top: statusBanner.visible ? statusBanner.bottom : pageHeader.bottom
-          anchors.topMargin: visible ? Style.space(8) : 0
-          height: visible ? Style.space(38) : 0
-          visible: root.configured() && root.mode !== "setup"
-          foreground: root.foreground
-          accent: root.accent
-          placeholderText: "Search movies and TV · /"
-          hasCursor: root.cursorOn("search", "input")
-          onTextEdited: {
-            searchDebounce.restart()
-            root.setPanelCursor("search", "input")
-          }
-          onAccepted: root.searchAccepted()
-          onHoveredChanged: if (hovered) root.setPanelCursor("search", "input")
-        }
-
-        Loader {
-          id: pageLoader
-          anchors.left: parent.left
-          anchors.right: parent.right
-          anchors.top: searchInput.visible
-            ? searchInput.bottom
-            : (statusBanner.visible ? statusBanner.bottom : pageHeader.bottom)
-          anchors.topMargin: Style.space(8)
-          anchors.bottom: parent.bottom
-          // Re-evaluates because pageComponent() reads mode/currentPage.
-          sourceComponent: root.pageComponent()
-        }
-      }
-
-      // ---------- now-playing minibar ----------
-      // Spans the full browse width under both sidebar and pane, Spotify-footer
-      // style: artwork well, title + clock, transport, thin seek slider, and
-      // the way back into theater. Only on screen while a session is live and
-      // the video is not.
-      PanelSeparator {
-        id: minibarSeparator
-        visible: root.minibarVisible
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottom: minibar.top
-        anchors.bottomMargin: Style.space(10)
-        foreground: root.foreground
-      }
-
-      BorderSurface {
-        id: minibar
-        visible: root.minibarVisible
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        height: visible ? Style.space(64) : 0
-        radius: Style.cornerRadius
-        color: Style.normalFillFor(root.foreground, root.accent)
-        borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
-
-        // Anything on the bar that is not itself a control takes you back to
-        // theater. Declared first so the real controls sit above it and win
-        // their own clicks. Hovering bare bar lights the expand button, which
-        // both names what a click does and keeps one highlight on screen.
-        MouseArea {
-          anchors.fill: parent
-          hoverEnabled: true
-          cursorShape: Qt.PointingHandCursor
-          onClicked: root.enterTheater()
-          onEntered: root.setPanelCursor("minibar", "expand")
-        }
-
-        BorderSurface {
-          id: minibarArt
-          anchors.left: parent.left
-          anchors.leftMargin: Style.space(8)
-          anchors.verticalCenter: parent.verticalCenter
-          height: Math.max(Style.space(24), parent.height - Style.space(16))
-          width: height
-          radius: Style.cornerRadius
-          color: Style.selectedFillFor(root.foreground, root.accent)
-          borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
-
-          Image {
-            anchors.fill: parent
-            anchors.margins: Style.space(2)
-            // Fit, not crop: episode stills are 16:9 and movie thumbs are 2:3,
-            // and the well shows through either way.
-            source: root.currentThumbPath === "" ? "" : root.imageUrl(root.currentThumbPath, 120, 120)
-            sourceSize.width: 120
-            sourceSize.height: 120
-            fillMode: Image.PreserveAspectFit
-            asynchronous: true
-            cache: false
-            visible: status === Image.Ready
-          }
-
-          Text {
-            anchors.centerIn: parent
-            visible: root.currentThumbPath === ""
-            text: "󰎁"
-            color: root.muted
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.iconLarge
-          }
-        }
-
-        Column {
-          anchors.left: minibarArt.right
-          anchors.leftMargin: Style.space(9)
-          anchors.right: minibarSeek.left
-          anchors.rightMargin: Style.space(8)
-          anchors.verticalCenter: parent.verticalCenter
-          spacing: Style.space(2)
-
-          Text {
-            width: parent.width
-            text: root.currentTitle
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            font.bold: true
-            textFormat: Text.PlainText
-            elide: Text.ElideRight
-          }
-          Text {
-            width: parent.width
-            text: Model.fmtDuration(root.seekDisplayTime) + " / " + Model.fmtDuration(root.dispDuration)
-            color: root.muted
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            textFormat: Text.PlainText
-            elide: Text.ElideRight
-          }
-        }
-
-        CursorSurface {
-          id: minibarSeek
-          // The floaty surface is narrower than the slider is useful at; the
-          // bar keeps its transport and drops the scrubber there.
-          visible: !content.compact
-          width: visible ? Math.max(Style.space(90), minibar.width * 0.22) : 0
-          height: minibarSlider.implicitHeight
-          anchors.right: minibarTransport.left
-          anchors.rightMargin: visible ? Style.space(8) : 0
-          anchors.verticalCenter: parent.verticalCenter
-          hasCursor: root.cursorOn("minibar", "seek")
-          foreground: root.foreground
-          accent: root.accent
-
-          HoverHandler {
-            onHoveredChanged: if (hovered) root.setPanelCursor("minibar", "seek")
-          }
-
-          PanelSlider {
-            id: minibarSlider
-            anchors.fill: parent
-            bar: root.panelBar
-            minimum: 0
-            maximum: Math.max(1, root.dispDuration)
-            step: 10
-            value: root.seekDisplayTime
-            onMoved: function(seconds) { root.previewSeek(seconds) }
-            onReleased: function(seconds) { root.commitSeek(seconds) }
-
-            HoverHandler { id: minibarSliderHover }
-            PanelToolTip {
-              visible: minibarSliderHover.hovered
-              text: "Seek · ← / →"
+              HoverHandler { id: minibarSliderHover }
+              PanelToolTip {
+                visible: minibarSliderHover.hovered
+                text: "Seek · ← / →"
+              }
             }
           }
-        }
 
-        Row {
-          id: minibarTransport
-          anchors.right: minibarExpand.left
-          anchors.rightMargin: Style.space(4)
-          anchors.verticalCenter: parent.verticalCenter
-          spacing: Style.space(2)
+          Row {
+            id: minibarTransport
+            anchors.right: minibarExpand.left
+            anchors.rightMargin: Style.space(4)
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(2)
 
-          TransportButton {
-            glyphText: "󰒮"
-            tooltipText: "Back 10s"
-            foreground: root.foreground
-            hasCursor: root.cursorOn("minibar", "rewind")
-            onClicked: root.nudgeSeek(-10)
-            onHovered: function(on) { if (on) root.setPanelCursor("minibar", "rewind") }
+            TransportButton {
+              glyphText: "󰒮"
+              tooltipText: "Back 10s"
+              foreground: root.foreground
+              hasCursor: root.cursorOn("minibar", "rewind")
+              onClicked: root.nudgeSeek(-10)
+              onHovered: function(on) { if (on) root.setPanelCursor("minibar", "rewind") }
+            }
+
+            TransportButton {
+              glyphText: root.isPaused ? "󰐊" : "󰏤"
+              glyphSize: Style.font.iconLarge
+              tooltipText: root.isPaused ? "Play · Space" : "Pause · Space"
+              foreground: root.foreground
+              hasCursor: root.cursorOn("minibar", "play")
+              onClicked: root.togglePause()
+              onHovered: function(on) { if (on) root.setPanelCursor("minibar", "play") }
+            }
+
+            TransportButton {
+              glyphText: "󰒭"
+              tooltipText: "Forward 10s"
+              foreground: root.foreground
+              hasCursor: root.cursorOn("minibar", "forward")
+              onClicked: root.nudgeSeek(10)
+              onHovered: function(on) { if (on) root.setPanelCursor("minibar", "forward") }
+            }
           }
 
-          TransportButton {
-            glyphText: root.isPaused ? "󰐊" : "󰏤"
-            glyphSize: Style.font.iconLarge
-            tooltipText: root.isPaused ? "Play · Space" : "Pause · Space"
+          Button {
+            id: minibarExpand
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: "󰅃"
+            tooltipText: "Theater · Enter"
             foreground: root.foreground
-            hasCursor: root.cursorOn("minibar", "play")
-            onClicked: root.togglePause()
-            onHovered: function(on) { if (on) root.setPanelCursor("minibar", "play") }
+            focusable: false
+            hasCursor: root.cursorOn("minibar", "expand")
+            onClicked: root.enterTheater()
+            onHovered: function(on) { if (on) root.setPanelCursor("minibar", "expand") }
           }
-
-          TransportButton {
-            glyphText: "󰒭"
-            tooltipText: "Forward 10s"
-            foreground: root.foreground
-            hasCursor: root.cursorOn("minibar", "forward")
-            onClicked: root.nudgeSeek(10)
-            onHovered: function(on) { if (on) root.setPanelCursor("minibar", "forward") }
-          }
-        }
-
-        Button {
-          id: minibarExpand
-          anchors.right: parent.right
-          anchors.rightMargin: Style.space(8)
-          anchors.verticalCenter: parent.verticalCenter
-          iconText: "󰅃"
-          tooltipText: "Theater · Enter"
-          foreground: root.foreground
-          focusable: false
-          hasCursor: root.cursorOn("minibar", "expand")
-          onClicked: root.enterTheater()
-          onHovered: function(on) { if (on) root.setPanelCursor("minibar", "expand") }
         }
       }
-    }
 
-    // ================= theater =================
-    // Controls only — the video surface is `videoLayer` above, which has to
-    // outlive this Loader for the sink to survive an Esc to browse.
-    Loader {
-      id: theaterLoader
+      // ================= theater =================
+      // Controls only — the video surface is `videoLayer`, which has to outlive
+      // this Loader for the sink to survive an Esc to browse. Gated on
+      // `windowed` too: while the PiP owns the picture this window is not even
+      // mapped, and the PiP draws its own whisper of a strip.
+      Loader {
+        id: theaterLoader
+        anchors.fill: parent
+        active: root.inTheater && root.windowed
+        sourceComponent: theaterViewComponent
+      }
+    }
+  }
+
+  // ================= video surface =================
+  // The ONE thing that reparents. Everything else now belongs to exactly one
+  // host: browse to the window, the PiP strip to the floaty surface.
+  //
+  // It deliberately does NOT live inside TheaterView, and it is deliberately
+  // not built twice. player.videoOutput is a sink pointer QtMultimedia keeps
+  // for the life of the session, so destroying this item — by putting it behind
+  // the theater Loader, or by giving each surface its own copy — would pull the
+  // sink out from under a running player every time you pressed Esc or hit the
+  // PiP button. Moving a QQuickItem between QQuickWindows keeps the object (and
+  // the sink) alive; only its scene-graph node is rebuilt.
+  //
+  // Full-bleed in both hosts: no margins, the background showing through the
+  // letterbox bars.
+  Item {
+    id: videoLayer
+    parent: root.windowed ? theaterSlot : pipSlot
+    anchors.fill: parent
+    // In the PiP the picture is the entire point, so it is never hidden there.
+    visible: !root.windowed || root.inTheater
+
+    VideoOutput {
+      id: videoOut
       anchors.fill: parent
-      active: root.inTheater
-      sourceComponent: theaterViewComponent
+      visible: root.backend !== "mpv"
+      fillMode: VideoOutput.PreserveAspectFit
     }
   }
 }
