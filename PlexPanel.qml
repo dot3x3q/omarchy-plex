@@ -523,6 +523,32 @@ Item {
   // keyboard focus the old one held is simply gone. Re-claim it once the swap
   // has actually happened rather than in the same tick, which is still inside
   // the old surface's teardown.
+  // Live drag projection, driving the cross-monitor drop preview. The card
+  // physically cannot follow the pointer past its surface's output — the
+  // surface ends at the monitor border — so without a preview the gesture
+  // reads as stuck and users release back on the origin monitor (field
+  // report). While the drag overshoots onto another output, a click-through
+  // ghost overlay there draws the card outline at the exact drop point.
+  property bool pipDragging: false
+  property var pipDropScreen: null
+  property real pipGhostX: 0
+  property real pipGhostY: 0
+
+  function updatePipDropPreview(sceneX, sceneY, grabX, grabY) {
+    var cur = root.pipScreen
+    var ox = cur ? cur.x : 0
+    var oy = cur ? cur.y : 0
+    var target = root.screenAtGlobal(ox + sceneX, oy + sceneY)
+    if (!target || root.sameScreen(target, cur)) { root.pipDropScreen = null; return }
+    // Same placement math as handlePipDrop, clamped into the target so the
+    // preview shows where the card will actually LAND, not just the pointer.
+    var localX = (ox + sceneX - grabX) - target.x
+    var localY = (oy + sceneY - grabY) - target.y
+    root.pipGhostX = Math.max(0, Math.min(target.width - root.videoWidth, localX))
+    root.pipGhostY = Math.max(0, Math.min(target.height - root.videoHeight, localY))
+    root.pipDropScreen = target
+  }
+
   function commitPipScreen(next) {
     window.screen = next
     root.snapPip()
@@ -3019,6 +3045,7 @@ Item {
 
           onPressed: function(mouse) {
             var p = mapToItem(null, mouse.x, mouse.y)
+            root.pipDragging = true
             pipDrag.pressX = p.x
             pipDrag.pressY = p.y
             pipDrag.pressRight = root.marginRight
@@ -3052,6 +3079,8 @@ Item {
               root.marginRight = pipDrag.pressRight - (pipDrag.targetX - pipDrag.pressX)
               root.marginBottom = pipDrag.pressBottom - (pipDrag.targetY - pipDrag.pressY)
               root.clampMargins()
+              root.updatePipDropPreview(pipDrag.targetX, pipDrag.targetY,
+                pipDrag.grabX, pipDrag.grabY)
             }
           }
           // A bare click on the picture is a focus grab, not a move: the
@@ -3059,6 +3088,8 @@ Item {
           // moved. handlePipDrop falls back to a plain snap when the drop
           // landed on the screen it started from.
           onReleased: function(mouse) {
+            root.pipDragging = false
+            root.pipDropScreen = null
             if (!pipDrag.moved) return
             var p = mapToItem(null, mouse.x, mouse.y)
             root.handlePipDrop(p.x, p.y, pipDrag.grabX, pipDrag.grabY)
@@ -3266,6 +3297,51 @@ Item {
   // tree — sidebar, pages, search, setup, minibar — lives here and ONLY here,
   // so it never reparents; the one thing that still moves between surfaces is
   // the video (see videoLayer).
+  // ---- cross-monitor drop preview ----
+  // One click-through overlay per OTHER output, mapped only while a drag's
+  // pointer is actually over that output. It draws the card outline at the
+  // exact clamped landing spot — the answer to "will it drop where my mouse
+  // is?" being no longer a leap of faith (field request). An empty input
+  // Region makes the whole surface transparent to the pointer, so the drag's
+  // implicit grab on the origin surface is never disturbed.
+  Variants {
+    model: Quickshell.screens
+
+    PanelWindow {
+      id: ghostWindow
+      required property var modelData
+      screen: modelData
+      visible: root.pipDragging && root.pipDropScreen !== null
+        && root.sameScreen(root.pipDropScreen, modelData)
+      anchors { top: true; left: true; right: true; bottom: true }
+      color: "transparent"
+      WlrLayershell.namespace: "plexmini-ghost"
+      WlrLayershell.layer: WlrLayer.Overlay
+      WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+      exclusionMode: ExclusionMode.Ignore
+      mask: Region {}
+
+      Rectangle {
+        x: Math.round(root.pipGhostX)
+        y: Math.round(root.pipGhostY)
+        width: root.videoWidth
+        height: root.videoHeight
+        radius: Style.cornerRadius
+        color: Style.hoverFillFor(root.foreground, root.accent)
+        border.color: root.accent
+        border.width: Style.space(2)
+
+        Text {
+          anchors.centerIn: parent
+          text: "󰐃"
+          color: root.accent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.iconLarge
+        }
+      }
+    }
+  }
+
   FloatingWindow {
     id: appWindow
     visible: root.opened && root.windowed && !root.sessionLocked
