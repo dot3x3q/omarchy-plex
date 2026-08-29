@@ -2281,8 +2281,16 @@ Item {
   function bouncePipPlayer() {
     if (root.windowed || !root.nativeMode || root.mode !== "playing") return
     if (root.pipPlayerBounce) return
+    // screenChanged also fires when the surface FIRST maps (mapping assigns
+    // the output), which must not stomp the arm the surface flip staged —
+    // that stomp read position 0 off the brand-new player and restarted
+    // films from the beginning (field report). An arm already staged wins,
+    // and a player with no duration yet has no position worth capturing.
+    if (root.pendingNativeArm !== null) return
+    var v = root.nativeVideo
+    if (!v || !(v.duration > 0)) return
     root.pendingNativeArm = { pos: root.seekDisplayTime, paused: root.isPaused }
-    if (root.nativeVideo) root.nativeVideo.stop()
+    v.stop()
     root.pipPlayerBounce = true
     Qt.callLater(function() { root.pipPlayerBounce = false })
   }
