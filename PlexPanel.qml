@@ -1534,6 +1534,11 @@ Item {
 
         TextField {
           id: searchInput
+          // QQC2 TextField consumes Tab for its own focus chain, so region
+          // cycling dies inside the field unless Tab is forwarded by hand
+          // (field-tested: Tab did nothing, then "j" typed into the query).
+          Keys.onTabPressed: function(event) { event.accepted = true; root.cycleRegion(1) }
+          Keys.onBacktabPressed: function(event) { event.accepted = true; root.cycleRegion(-1) }
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.top: statusBanner.visible ? statusBanner.bottom : pageHeader.bottom
