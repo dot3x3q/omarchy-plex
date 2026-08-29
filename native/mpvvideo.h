@@ -88,6 +88,19 @@ Q_SIGNALS:
 private:
     void onPropertyChanged(const QString &name, const QVariant &value);
     void onEndFile(const QString &reason);
+    void watchWindowForFirstFrame(QQuickWindow *win);
+    void issueLoad(const QString &url, double startSeconds);
+
+    // vo=libmpv can only initialize once the render context exists, and the
+    // context is created lazily on the window's first render pass of this
+    // item. A loadfile that beats that pass fails the VO permanently for that
+    // file (mpv plays audio-only, black picture) — so loads are deferred until
+    // one frame has been swapped with this item in the scene.
+    bool m_renderSeen{false};
+    bool m_hasPendingLoad{false};
+    QString m_pendingUrl;
+    double m_pendingStart{0.0};
+    QMetaObject::Connection m_frameConn;
 
     bool m_paused{false};
     double m_timePos{0.0};

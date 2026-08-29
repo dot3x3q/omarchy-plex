@@ -5,6 +5,8 @@
 
 #include "mpvvideo.h"
 
+#include <QQuickWindow>
+
 #include <MpvController>
 
 #include <QVariant>
@@ -80,6 +82,51 @@ void MpvVideo::loadUrl(const QString &url, double startSeconds)
         Q_EMIT playbackFailed(QStringLiteral("empty url"));
         return;
     }
+
+    // Field-diagnosed race (2026-08-29): a load issued before this item's
+    // window has rendered it once reaches mpv before the render context
+    // exists, the libmpv VO fails to open, and mpv drops the video track for
+    // the whole file — audio plays over a permanently black picture. Freshly
+    // mapped windows (the PiP) lose that race; long-running ones (the
+    // theater) win it by luck. Defer until one swapped frame proves the
+    // context is up.
+    if (!m_renderSeen) {
+        m_pendingUrl = url;
+        m_pendingStart = startSeconds;
+        m_hasPendingLoad = true;
+        watchWindowForFirstFrame(window());
+        return;
+    }
+    issueLoad(url, startSeconds);
+}
+
+void MpvVideo::watchWindowForFirstFrame(QQuickWindow *win)
+{
+    QObject::disconnect(m_frameConn);
+    if (win == nullptr) {
+        // Not in a scene yet; try again when we are.
+        m_frameConn = QObject::connect(this, &QQuickItem::windowChanged, this,
+                                       &MpvVideo::watchWindowForFirstFrame);
+        return;
+    }
+    // frameSwapped is emitted from the render thread; queue back to the GUI
+    // thread where the controller queue lives.
+    m_frameConn = QObject::connect(win, &QQuickWindow::frameSwapped, this, [this]() {
+        QObject::disconnect(m_frameConn);
+        m_renderSeen = true;
+        if (m_hasPendingLoad) {
+            m_hasPendingLoad = false;
+            issueLoad(m_pendingUrl, m_pendingStart);
+            m_pendingUrl.clear();
+        }
+    }, Qt::QueuedConnection);
+    // A swap only happens if something schedules a frame; creating this item
+    // dirtied the scene, but be explicit rather than lucky.
+    win->update();
+}
+
+void MpvVideo::issueLoad(const QString &url, double startSeconds)
+{
 
     // The resume point goes in as a property rather than as a loadfile option.
     // Why: mpv 0.38 inserted an <index> argument into loadfile
