@@ -85,11 +85,11 @@ Item {
     color: Style.normalFillFor(view.foreground, view.accent)
     borderSpec: Border.controlSpec("normal", view.foreground, view.accent)
 
-    // One row has to give something up in a narrow window. The title goes
-    // first — the window is already titled and the picture is right there — and
-    // the volume slider second, since ↑/↓ and the mute button still cover it.
+    // One row has to give something up in a narrow window, and now only the
+    // title is left to give: the volume slider used to be the second drop, but
+    // it no longer sits in the row at all — it hangs above the mute button on
+    // hover, which costs the strip nothing at any width.
     readonly property bool showTitle: strip.width > Style.space(700)
-    readonly property bool showVolume: !view.panel.mpvMode && strip.width > Style.space(520)
 
     // Hovering the strip holds it open even with the pointer perfectly still —
     // the timeout is there to get the chrome out of the way of the film, not to
@@ -132,72 +132,9 @@ Item {
 
     // ---------- right-hand cluster, anchored right to left ----------
 
-    CursorSurface {
-      id: volumeCursor
-      visible: strip.showVolume
-      anchors.right: parent.right
-      anchors.rightMargin: Style.space(12)
-      anchors.verticalCenter: parent.verticalCenter
-      width: visible ? Style.space(84) : 0
-      height: volumeSlider.implicitHeight
-      hasCursor: view.panel.cursorOn("playing", "volume")
-      foreground: view.foreground
-      accent: view.accent
-      // Same no-box treatment as the scrubbers: two adjacent sliders where only
-      // one grew a rectangle on hover would read as a bug.
-      fill: "transparent"
-      borderSpec: Border.none()
-
-      HoverHandler {
-        id: volumeHover
-        onHoveredChanged: if (hovered) view.panel.setPanelCursor("playing", "volume")
-      }
-
-      PanelSlider {
-        id: volumeSlider
-        anchors.fill: parent
-        bar: view.panel.panelBar
-        minimum: 0
-        maximum: 200
-        step: 5
-        integer: true
-        // Five evenly-spaced notches over 0–200 land on 0/50/100/150/200, so
-        // one of them sits exactly on 100 — the line where Qt's own ceiling
-        // stops and the PipeWire boost starts. That is the mark that matters.
-        tickCount: 5
-        value: view.panel.volumePct
-        knobColor: view.panel.cursorOn("playing", "volume") ? view.accent : view.foreground
-        onMoved: function(pct) { view.panel.setVolumePct(pct) }
-        onReleased: function(pct) { view.panel.setVolumePct(pct) }
-
-        PanelToolTip {
-          visible: volumeHover.hovered
-          text: "Volume · ↑ / ↓ · boosts to 200%"
-        }
-      }
-    }
-
-    // Fixed-width slot whose TEXT comes and goes, so the row never reflows when
-    // the reading appears. Shows for any adjustment, keyboard included.
-    Text {
-      id: volumeCaption
-      visible: strip.showVolume
-      anchors.right: volumeCursor.left
-      anchors.rightMargin: Style.space(6)
-      anchors.verticalCenter: parent.verticalCenter
-      width: visible ? Style.space(34) : 0
-      horizontalAlignment: Text.AlignRight
-      color: view.panel.volumePct > 100 ? view.accent : view.muted
-      font.family: view.fontFamily
-      font.pixelSize: Style.font.caption
-      textFormat: Text.PlainText
-      text: (view.panel.volumeAdjusting || volumeHover.hovered || volumeSlider.dragging)
-        ? view.panel.volumePct + "%" : ""
-    }
-
     Row {
       id: transportRow
-      anchors.right: strip.showVolume ? volumeCaption.left : parent.right
+      anchors.right: parent.right
       anchors.rightMargin: Style.space(10)
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(3)
@@ -240,16 +177,241 @@ Item {
       }
 
       // Volume lives in the internal player's AudioOutput; mpv owns its own.
+      // This button is also the volume popup's anchor: click mutes, hover
+      // reveals the vertical slider above it, wheel adjusts without ever
+      // needing the popup on screen first.
       TransportButton {
+        id: muteButton
         visible: !view.panel.mpvMode
         glyphText: view.panel.audioMuted ? "󰖁" : "󰕾"
-        tooltipText: view.panel.audioMuted ? "Unmute · M" : "Mute · M"
+        tooltipText: view.panel.audioMuted
+          ? "Unmute · M" : "Mute · M · scroll or hover for volume"
         foreground: view.panel.audioMuted ? view.urgent : view.foreground
         hasCursor: view.panel.cursorOn("playing", "mute")
         onClicked: view.panel.toggleMute()
         onHovered: function(on) {
           view.panel.pokeTheaterControls()
-          if (on) view.panel.setPanelCursor("playing", "mute")
+          if (on) {
+            view.panel.setPanelCursor("playing", "mute")
+            view.panel.holdVolumePopup()
+          } else {
+            view.panel.releaseVolumePopup()
+          }
+        }
+
+        // A WheelHandler rather than a MouseArea: MouseArea has no wheel
+        // handling at all, so wrapping the button in one would have eaten the
+        // click and still not delivered the scroll.
+        WheelHandler {
+          onWheel: function(event) {
+            view.panel.holdVolumePopup()
+            view.panel.nudgeVolumeWheel(event.angleDelta.y > 0)
+          }
+        }
+
+        // ---------- vertical volume popup ----------
+        //
+        // Declared as a CHILD of the button so it tracks it through every
+        // reflow of a right-anchored Row for free — mapToItem arithmetic
+        // against the strip would go stale the moment the window resized.
+        // Nothing in the chain sets `clip`, and Qt Quick does not clip input
+        // to parent bounds either, so a popup overhanging the strip still
+        // hovers, drags and scrolls normally.
+        //
+        // Opaque body, unlike the translucent track picker. PanelSlider's
+        // visual language assumes an opaque panel behind it — the knob's ring
+        // is painted IN the background color to cut the knob out of the track —
+        // and over moving video a translucent version of that reads as a
+        // rendering fault. Same choice, and the same reason, as pipCard.
+        BorderSurface {
+          id: volumePopup
+          anchors.bottom: parent.top
+          anchors.bottomMargin: Style.space(8)
+          anchors.horizontalCenter: parent.horizontalCenter
+          width: Style.space(46)
+          height: Style.space(160)
+          radius: Style.cornerRadius
+          color: view.panel.background
+          borderSpec: Border.controlSpec("normal", view.foreground, view.accent)
+
+          opacity: view.panel.volumePopupVisible ? 1 : 0
+          visible: opacity > 0.01
+          Behavior on opacity { NumberAnimation { duration: 120 } }
+
+          // Holding the popup open while the pointer is on IT, not just on the
+          // button, is what makes the diagonal traverse survivable — together
+          // with the grace period on the release side.
+          HoverHandler {
+            onHoveredChanged: {
+              if (hovered) view.panel.holdVolumePopup()
+              else view.panel.releaseVolumePopup()
+            }
+          }
+
+          Text {
+            id: volumeReadout
+            anchors.top: parent.top
+            anchors.topMargin: Style.space(7)
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: view.panel.volumePct + "%"
+            color: view.panel.volumePct > 100 ? view.accent : view.muted
+            font.family: view.fontFamily
+            font.pixelSize: Style.font.caption
+            textFormat: Text.PlainText
+          }
+
+          // The vertical slider. PanelSlider is horizontal-only — its track
+          // anchors left/right, its fill grows by width and its hit test reads
+          // mouse.x — and rotating it would keep all three wrong: rotation
+          // moves the painted output without moving the input geometry, so the
+          // hit area and the tooltip would stay on the horizontal axis. So the
+          // dimensions are transposed by hand and the ROLES are copied exactly:
+          // track = selectedFill, fill = foreground, knob = a foreground circle
+          // ringed in the panel background, ticks cut in the background color.
+          Item {
+            id: volumeVertical
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: volumeReadout.bottom
+            anchors.topMargin: Style.space(8)
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: Style.space(12)
+            width: Style.space(28)
+
+            // Same formulas as PanelSlider, with height and width swapped.
+            readonly property real trackThickness: Math.max(4,
+              Math.round(Style.spacing.controlHeight * 0.11))
+            readonly property real knobSize: Math.max(14,
+              Math.round(Style.spacing.controlHeight * 0.38))
+            property bool dragging: false
+
+            // No separate liveValue. PanelSlider needs one because its knob has
+            // to lead a value the caller may not have accepted yet; here every
+            // drag frame writes a SNAPPED value straight through, and the knob
+            // following that is exactly the magnetic feel we want — it visibly
+            // sticks as it crosses a notch.
+            readonly property real progress: Math.max(0, Math.min(1,
+              view.panel.volumePct / 200))
+
+            Rectangle {
+              id: volumeTrack
+              anchors.horizontalCenter: parent.horizontalCenter
+              anchors.top: parent.top
+              anchors.bottom: parent.bottom
+              width: volumeVertical.trackThickness
+              radius: width / 2
+              color: Style.selectedFillFor(view.foreground, view.accent)
+            }
+
+            Rectangle {
+              id: volumeFill
+              anchors.horizontalCenter: volumeTrack.horizontalCenter
+              // Grows upward from the bottom: louder is higher.
+              anchors.bottom: volumeTrack.bottom
+              width: volumeTrack.width
+              radius: volumeTrack.radius
+              color: view.foreground
+              height: volumeTrack.height * volumeVertical.progress
+
+              Behavior on height {
+                enabled: !volumeVertical.dragging
+                NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+              }
+            }
+
+            // Five marks at 0/50/100/150/200 — index 0 is 0% and sits at the
+            // BOTTOM, hence the 1 - fraction. Drawn in the panel background so
+            // only the part crossing the track shows, exactly as PanelSlider
+            // cuts its own notches.
+            Repeater {
+              model: 5
+              Rectangle {
+                required property int index
+                width: volumeVertical.trackThickness + Style.space(4)
+                height: Math.max(1, Style.space(2))
+                radius: 1
+                color: view.panel.background
+                anchors.horizontalCenter: volumeTrack.horizontalCenter
+                y: Math.max(0, Math.min(volumeTrack.height - height,
+                  volumeTrack.height * (1 - index / 4) - height / 2))
+              }
+            }
+
+            BorderSurface {
+              id: volumeKnob
+              width: volumeVertical.knobSize
+              height: volumeVertical.knobSize
+              radius: width / 2
+              // The panel cursor speaks through the knob's color here for the
+              // same reason it does on every other slider in this plugin.
+              color: view.panel.cursorOn("playing", "mute") ? view.accent : view.foreground
+              borderSpec: Border.flat(view.panel.background, Math.max(1, Style.space(2)))
+              anchors.horizontalCenter: volumeTrack.horizontalCenter
+              y: Math.max(0, Math.min(volumeTrack.height - height,
+                volumeTrack.height * (1 - volumeVertical.progress) - height / 2))
+
+              // PanelSlider also grows its knob 15% on hover. Dropped rather
+              // than copied: the sanctioned animation set for this plugin is
+              // 140ms slider moves and 120ms popup fades, and an unanimated
+              // scale pop would read worse than no scale at all.
+              Behavior on y {
+                enabled: !volumeVertical.dragging
+                NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+              }
+            }
+
+            MouseArea {
+              id: volumeArea
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+
+              // Inverted against the track, not the MouseArea: the track is
+              // what the knob and fill are measured against, and the two must
+              // not disagree about where 100% is.
+              function valueFromY(y) {
+                var span = Math.max(1, volumeTrack.height)
+                var clamped = Math.max(0, Math.min(span, y - volumeTrack.y))
+                return (1 - clamped / span) * 200
+              }
+
+              // Belt and braces over the popup's own HoverHandler. A MouseArea
+              // with hoverEnabled can consume the hover the handler above was
+              // relying on, and the failure mode is the popup closing under a
+              // pointer that is sitting right on it. The `dragging` guard is
+              // the important half: a drag legitimately leaves these 28px of
+              // width, and the grab keeps feeding us positions after it does,
+              // so leaving the bounds mid-gesture must NOT start the close.
+              onContainsMouseChanged: {
+                if (containsMouse) view.panel.holdVolumePopup()
+                else if (!volumeVertical.dragging) view.panel.releaseVolumePopup()
+              }
+
+              onPressed: function(mouse) {
+                volumeVertical.dragging = true
+                view.panel.holdVolumePopup()
+                view.panel.setVolumeSnapped(valueFromY(mouse.y))
+              }
+              onPositionChanged: function(mouse) {
+                if (!volumeVertical.dragging) return
+                view.panel.setVolumeSnapped(valueFromY(mouse.y))
+              }
+              // Releasing outside the slider is the one moment the guard above
+              // deliberately skipped, so settle it here.
+              onReleased: {
+                volumeVertical.dragging = false
+                if (!containsMouse) view.panel.releaseVolumePopup()
+              }
+              onWheel: function(wheel) {
+                view.panel.holdVolumePopup()
+                view.panel.nudgeVolumeWheel(wheel.angleDelta.y > 0)
+              }
+
+              PanelToolTip {
+                visible: volumeArea.containsMouse && !volumeVertical.dragging
+                text: "Volume · ↑ / ↓ · snaps at 50/100/150/200 · boosts to 200%"
+              }
+            }
+          }
         }
       }
 
@@ -286,6 +448,30 @@ Item {
         onHovered: function(on) {
           view.panel.pokeTheaterControls()
           if (on) view.panel.setPanelCursor("playing", "subtitletrack")
+        }
+      }
+
+      // Stream quality. Unlike the two track buttons this is never absent while
+      // a session is live: "Original" is always a valid answer, so there is
+      // always something to pick between and the button always has a job.
+      TransportButton {
+        id: qualityButton
+        visible: view.panel.qualityPickerAvailable
+        width: visible ? controlSize : 0
+        // nf-md-quality_high. Verified present in the resolved mono Nerd Font
+        // rather than assumed — a missing glyph renders as a tofu box, and the
+        // strip has no room for one.
+        glyphText: "\u{f07fd}"
+        tooltipText: view.panel.qualityKbps === 0
+          ? "Quality · Q · direct play"
+          : "Quality · Q · " + Math.round(view.panel.qualityKbps / 1000) + " Mbps"
+        foreground: view.foreground
+        selected: view.panel.trackPopup === "quality"
+        hasCursor: view.panel.cursorOn("playing", "quality")
+        onClicked: view.panel.toggleTrackPopup("quality")
+        onHovered: function(on) {
+          view.panel.pokeTheaterControls()
+          if (on) view.panel.setPanelCursor("playing", "quality")
         }
       }
 
@@ -390,7 +576,10 @@ Item {
     }
   }
 
-  // ---------- track picker ----------
+  // ---------- picker (audio / subtitles / quality) ----------
+  // One list widget for all three. The rows contract is identical — a label, a
+  // current flag — so a second popup would have been the same forty lines with
+  // a different model, plus a second Esc ordering to keep in step with this one.
   // Declared after the strip so it paints above it, and click-away first so
   // the list itself keeps its own clicks. Deliberately NOT a QQC2 Popup: it
   // wants no focus scope and no Shortcut objects, because the panel's existing
@@ -460,7 +649,7 @@ Item {
         text: modelData.label
         rightPadding: Style.space(46)
 
-        onClicked: view.panel.activateTrackRow(view.panel.trackPopup, modelData)
+        onClicked: view.panel.activatePickerRow(view.panel.trackPopup, modelData)
         onHovered: function(on) {
           view.panel.pokeTheaterControls()
           if (on) view.panel.trackPopupIndex = index

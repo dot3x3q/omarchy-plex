@@ -536,8 +536,35 @@ Item {
   // from; re-clamp whenever the resize grip changes the width.
   onVideoWidthChanged: root.clampMargins()
 
-  function saveWidth() {
+  // window.json is written whole, every time, so EVERY writer has to stage
+  // every staged field — not just the one it thinks it owns.
+  //
+  // Two bugs die here. The first: `saveVolume` (and now `saveQuality`) can be
+  // the first writer of the session, and posSave's staged fields still hold
+  // their construction defaults — 14/14/460/true — because positionRead loads
+  // straight into root's properties and never touches posSave. Turning the
+  // volume up before moving the window therefore wrote DEFAULT geometry over
+  // the geometry just loaded from disk. The second: both resize grips move the
+  // card's anchored margin as well as its width (the top-left one indirectly,
+  // when clampMargins pulls the card back inside the screen it just grew past;
+  // the top-right one by design), so a resize was persisting a fresh width
+  // beside a marginRight from whenever savePosition last happened to run.
+  //
+  // volume and quality need no staging — they are bindings, for exactly this
+  // reason. The rest cannot be, because rebuilding the command string on every
+  // drag frame is the cost the staging exists to avoid.
+  function stageWindowState() {
+    posSave.right = "" + Math.round(root.marginRight)
+    posSave.bottom = "" + Math.round(root.marginBottom)
     posSave.width = "" + root.videoWidth
+    posSave.windowed = root.windowed ? "true" : "false"
+  }
+
+  // One posSave run per save, never two: Quickshell latches a Process's argv at
+  // start and silently ignores writes to a running one, so a second
+  // running=true chasing the first would simply be dropped.
+  function saveWidth() {
+    root.stageWindowState()
     posSave.running = true
   }
 
@@ -548,15 +575,16 @@ Item {
     id: volumeSaveDebounce
     interval: 600
     repeat: false
-    onTriggered: posSave.running = true
+    onTriggered: {
+      root.stageWindowState()
+      posSave.running = true
+    }
   }
 
   function saveVolume() { volumeSaveDebounce.restart() }
 
   function savePosition() {
-    posSave.right = "" + Math.round(root.marginRight)
-    posSave.bottom = "" + Math.round(root.marginBottom)
-    posSave.windowed = root.windowed ? "true" : "false"
+    root.stageWindowState()
     posSave.running = true
   }
 
@@ -572,6 +600,9 @@ Item {
     // Rebuilding the command string is free here — volume moves on release and
     // key steps, not on every drag frame.
     property string volume: "" + root.volumePct
+    // Bound for the same reason as volume, and it moves even less often: a
+    // quality pick is a deliberate act, not a drag.
+    property string quality: "" + root.qualityKbps
     running: false
     command: ["sh", "-c",
       "d='" + root.stateDir + "'; d=${d%/}; b=${d##*/}; "
@@ -579,9 +610,9 @@ Item {
       + "mkdir -p -- \"$p/$b\" && [ ! -L \"$p/$b\" ] && chmod 700 \"$p/$b\" "
       + "&& cd -P -- \"$p/$b\" && [ \"$(pwd -P)\" = \"$p/$b\" ] "
       + "&& umask 077 && t=.window.$$.tmp && trap 'rm -f -- \"$t\"' EXIT "
-      + "&& printf '{\"right\":%s,\"bottom\":%s,\"width\":%s,\"windowed\":%s,\"volume\":%s}' "
+      + "&& printf '{\"right\":%s,\"bottom\":%s,\"width\":%s,\"windowed\":%s,\"volume\":%s,\"quality\":%s}' "
       + posSave.right + " " + posSave.bottom + " " + posSave.width + " " + posSave.windowed
-      + " " + posSave.volume
+      + " " + posSave.volume + " " + posSave.quality
       + " > \"$t\" && chmod 600 \"$t\" && mv -f -- \"$t\" window.json && trap - EXIT"]
   }
 
@@ -606,6 +637,13 @@ Item {
           if (doc.bottom !== undefined) root.marginBottom = Math.max(0, doc.bottom | 0)
           if (doc.width !== undefined) root.videoWidth = Math.max(280, Math.min(3800, doc.width | 0))
           if (doc.volume !== undefined) root.volumePct = Math.max(0, Math.min(200, doc.volume | 0))
+          // Only a value the tier list actually offers is accepted. This one
+          // ends up substituted into a transcode URL, so "clamp it" is not
+          // good enough — an unrecognised number falls back to Original.
+          if (doc.quality !== undefined) {
+            var want = doc.quality | 0
+            root.qualityKbps = root.isQualityTier(want) ? want : 0
+          }
           // Nothing is playing at load, and a PiP with no session shows no
           // picture and offers no way to start one — a persisted floaty always
           // comes back as the real window.
@@ -950,6 +988,7 @@ Item {
 
   function fail(msg) {
     pollTimer.stop()
+    root.closeTrackPopup()
     root.mode = "error"
     root.setStatus(msg, true)
   }
@@ -1166,6 +1205,81 @@ Item {
 
   function nudgeVolume(delta) { root.setVolumePct(root.volumePct + delta) }
 
+  // ---- magnetic detents ----
+  //
+  // Free movement everywhere, but a value landing within volumeDetentPull of a
+  // notch is pulled onto it. 100 is the one that actually matters — it is the
+  // line where Qt's own ceiling stops and the PipeWire boost starts — and
+  // hitting it by aim on a 150px vertical track is a 1-in-13 shot.
+  readonly property var volumeDetents: [0, 50, 100, 150, 200]
+  readonly property int volumeDetentPull: 8
+  // Deliberately LARGER than the pull. A relative step smaller than the pull
+  // can never escape a detent — 100 - 5 snaps straight back to 100 — so the
+  // notch would become a trap the wheel could not leave. Drags set an absolute
+  // value from the pointer, so they need no such allowance and keep the pull.
+  readonly property int volumeWheelStep: 10
+
+  function snapVolumePct(pct) {
+    var v = Math.max(0, Math.min(200, Math.round(Number(pct) || 0)))
+    for (var i = 0; i < root.volumeDetents.length; i++)
+      if (Math.abs(v - root.volumeDetents[i]) <= root.volumeDetentPull)
+        return root.volumeDetents[i]
+    return v
+  }
+
+  // Every pointer-driven volume write goes through here; the keyboard's ±5
+  // steps deliberately do not, because that grid already lands on every notch
+  // exactly and snapping it would only make 95 and 105 unreachable.
+  function setVolumeSnapped(pct) { root.setVolumePct(root.snapVolumePct(pct)) }
+
+  function nudgeVolumeWheel(up) {
+    root.setVolumeSnapped(root.volumePct + (up ? root.volumeWheelStep : -root.volumeWheelStep))
+  }
+
+  // ---- the volume popup ----
+  //
+  // A vertical slider that hangs above the mute button, replacing the inline
+  // horizontal one that used to cost the theater strip ~120px of width for a
+  // control wanted a second at a time. It stays up while the pointer is on the
+  // button OR on the popup; the grace period is what lets the diagonal traverse
+  // between the two cross the gap without the popup vanishing underneath it.
+  //
+  // The keyboard reaches it through volumeAdjusting rather than the panel
+  // cursor: ↑/↓ is the only keyboard route to the volume in theater (there is
+  // no cursor walk along the strip), so the reading that already flashed on
+  // every key step now brings the whole popup with it, live.
+  //
+  // Theater only. The PiP strip has no mute button to hang it off — four
+  // controls is the entire budget on a 460px card — so there is nothing to
+  // anchor to on that surface.
+  property bool volumePopupHeld: false
+
+  readonly property bool volumePopupVisible: root.inTheater && root.windowed
+    && !root.mpvMode && (root.volumePopupHeld || root.volumeAdjusting)
+
+  Timer {
+    id: volumePopupGrace
+    interval: 300
+    repeat: false
+    onTriggered: root.volumePopupHeld = false
+  }
+
+  // Both edges matter. Opening pins the strip (pokeTheaterControls STOPS the
+  // hide timer while the popup is up, so the slider cannot fade out from under
+  // a drag); closing has to hand that timer back, or the chrome sits over the
+  // film indefinitely. Hanging this off the derived property rather than off
+  // the grace timer covers every route out — the hold expiring, volumeAdjusting
+  // expiring 1500ms after the last key step, or leaving theater entirely.
+  onVolumePopupVisibleChanged: root.pokeTheaterControls()
+
+  function holdVolumePopup() {
+    volumePopupGrace.stop()
+    root.volumePopupHeld = true
+    root.pokeTheaterControls()
+  }
+
+  function releaseVolumePopup() { volumePopupGrace.restart() }
+
   // ---- the 100–200 zone: PipeWire per-stream boost ----
   //
   // The quickshell PROCESS publishes several identical-looking output streams —
@@ -1339,9 +1453,11 @@ Item {
   // movement or key press buys another two seconds.
   property bool theaterControlsShown: true
   // An open track picker pins the strip: the list hangs off it, so fading the
-  // strip out from under a list the user is reading would be absurd.
+  // strip out from under a list the user is reading would be absurd. The volume
+  // popup hangs off the mute button the same way and pins it for the same
+  // reason — it would otherwise fade out from under an active drag.
   readonly property bool theaterControlsVisible: root.theaterControlsShown
-    || root.isPaused || root.trackPopup !== ""
+    || root.isPaused || root.trackPopup !== "" || root.volumePopupVisible
 
   Timer {
     id: theaterHideTimer
@@ -1352,7 +1468,8 @@ Item {
 
   function pokeTheaterControls() {
     root.theaterControlsShown = true
-    if (root.inTheater && !root.isPaused && root.trackPopup === "") theaterHideTimer.restart()
+    if (root.inTheater && !root.isPaused && root.trackPopup === "" && !root.volumePopupVisible)
+      theaterHideTimer.restart()
     else theaterHideTimer.stop()
   }
 
@@ -1384,6 +1501,11 @@ Item {
   property var audioStreams: []
   property var subtitleStreams: []
   property string currentPartId: ""
+  // The part's media key, kept so a quality switch back to Original can rebuild
+  // the direct-play URL. applyMetadata consumes Model's copy inline and Model's
+  // playback parse is frozen, so this is stashed off the same resolve response
+  // rather than costing a second round trip — the metadataThumb precedent.
+  property string currentPartKey: ""
   // Plex stream ids, as strings. "" on the subtitle side means "none".
   property string selectedAudioId: ""
   property string selectedSubtitleId: ""
@@ -1397,7 +1519,20 @@ Item {
   // rather than costing a second round trip.
   function stashStreams(jsonText) {
     var parsed = null
-    try { parsed = Api.mapStreams(JSON.parse(jsonText)) } catch (e) { parsed = null }
+    var partKey = ""
+    try {
+      var doc = JSON.parse(jsonText)
+      parsed = Api.mapStreams(doc)
+      // Api.mapStreams reports the part's ID (what the selection PUT addresses)
+      // but not its key (what a direct play fetches), and both come off this
+      // one response.
+      var mc = doc && doc.MediaContainer
+      var meta = mc && mc.Metadata && mc.Metadata.length > 0 ? mc.Metadata[0] : null
+      var media = meta && meta.Media && meta.Media.length > 0 ? meta.Media[0] : null
+      var part = media && media.Part && media.Part.length > 0 ? media.Part[0] : null
+      partKey = part ? String(part.key || "") : ""
+    } catch (e) { parsed = null; partKey = "" }
+    root.currentPartKey = partKey
     root.currentPartId = parsed ? String(parsed.partId || "") : ""
     root.audioStreams = parsed ? (parsed.audio || []) : []
     root.subtitleStreams = parsed ? (parsed.subtitle || []) : []
@@ -1450,6 +1585,11 @@ Item {
   // Rows are computed live from current state on every read, so a picker left
   // open across an item change can never activate a stale stream id.
   function trackRows(kind) {
+    // "quality" rides this same popup rather than growing a second one: the row
+    // contract the list widget reads (label + current) is identical, and so are
+    // the key dispatcher, the scrim and the Esc ordering. Only what a pick DOES
+    // differs, which is one branch in activatePickerRow.
+    if (kind === "quality") return root.qualityRows()
     if (kind !== "audio" && kind !== "subtitle") return []
     var isAudio = kind === "audio"
     var streams = isAudio ? root.audioStreams : root.subtitleStreams
@@ -1609,14 +1749,168 @@ Item {
     else root.startInternal(url)
   }
 
+  // ---- stream quality ----
+  //
+  // 0 means "Original" — direct play, the server hands over the file and
+  // nothing is re-encoded. Anything else is a kbps cap that FORCES the
+  // transcode path even when the file would have played directly, which is the
+  // whole point over a thin link. Persisted in window.json beside volumePct.
+  //
+  // THREE params, not two, and that is the whole subtlety here. Verified
+  // 2026-08-29 against the Plex API spec, the live Plex Web bundle (4.160.0),
+  // plex-for-kodi's plexnet and Tautulli:
+  //
+  //  - maxVideoBitrate is in kbps.
+  //  - videoQuality is Plex's own 0–100 encoder-quality knob — NOT a ladder
+  //    index. (The server root's transcoderVideoQualities="0,1,…,12" is a slot
+  //    list and is the source of that confusion; python-plexapi overloads the
+  //    name too, taking the index in optimize() and the wire value elsewhere.)
+  //  - videoResolution is an INDEPENDENT cap. A bitrate cap on its own does not
+  //    downscale anything — it squeezes the source resolution into fewer bits.
+  //    Every official client sends all three, and plexnet computes the
+  //    resolution client-side and sends it explicitly, which would be dead
+  //    weight if the server inferred it. So a tier that says 720p has to SAY
+  //    720p, or the label is a lie and the picture is just a mushier 4K frame.
+  //
+  // quality/resolution pairings are Plex's own ladder where the rungs line up
+  // (12000→90, 8000→60, 4000→100, 2000→60). The 4K and 480p rungs are ours:
+  // Plex's named ladder tops out at 20 Mbps 1080p and has no 480p tier, but
+  // videoResolution is a free-form cap and this library is full of 4K DoVi.
+  property int qualityKbps: 0
+
+  readonly property var qualityTiers: [
+    { kbps: 0,     quality: 0,   resolution: "",          label: "Original (direct play)" },
+    { kbps: 20000, quality: 100, resolution: "3840x2160", label: "20 Mbps · 4K" },
+    { kbps: 12000, quality: 90,  resolution: "1920x1080", label: "12 Mbps · 1080p" },
+    { kbps: 8000,  quality: 60,  resolution: "1920x1080", label: "8 Mbps · 1080p" },
+    { kbps: 4000,  quality: 100, resolution: "1280x720",  label: "4 Mbps · 720p" },
+    { kbps: 2000,  quality: 60,  resolution: "720x480",   label: "2 Mbps · 480p" }
+  ]
+
+  readonly property bool qualityPickerAvailable: root.mode === "playing"
+
+  function qualityRows() {
+    var rows = []
+    for (var i = 0; i < root.qualityTiers.length; i++) {
+      var t = root.qualityTiers[i]
+      rows.push({
+        label: String(t.label),
+        kbps: Number(t.kbps),
+        current: Number(t.kbps) === root.qualityKbps,
+        // The picker delegate reads these to decide whether to draw its
+        // "server"/"burn-in" hint. Quality rows always restart, so neither
+        // caption would tell the user anything they did not just ask for.
+        external: false,
+        image: false,
+        none: false
+      })
+    }
+    return rows
+  }
+
+  function qualityForKbps(kbps) {
+    for (var i = 0; i < root.qualityTiers.length; i++)
+      if (Number(root.qualityTiers[i].kbps) === Number(kbps))
+        return Number(root.qualityTiers[i].quality)
+    return 60
+  }
+
+  function resolutionForKbps(kbps) {
+    for (var i = 0; i < root.qualityTiers.length; i++)
+      if (Number(root.qualityTiers[i].kbps) === Number(kbps))
+        return String(root.qualityTiers[i].resolution || "")
+    return ""
+  }
+
+  // Membership, not clamping. qualityForKbps answers with its 60 fallback for
+  // anything it does not know, so it cannot be used to validate a number read
+  // off disk that is about to be substituted into a URL.
+  function isQualityTier(kbps) {
+    for (var i = 0; i < root.qualityTiers.length; i++)
+      if (Number(root.qualityTiers[i].kbps) === Number(kbps) && Number(kbps) > 0) return true
+    return false
+  }
+
+  // What transcodeUrl actually emits. A chosen tier wins everywhere — including
+  // over a codec-failure fallback that fires an hour later — but with no tier
+  // chosen these stay on 6000/60, exactly the constants the automatic fallback
+  // has always used. Picking Original does NOT soften the fallback: a direct
+  // play that dies still has to land somewhere.
+  readonly property int transcodeBitrateKbps: root.qualityKbps > 0 ? root.qualityKbps : 6000
+  readonly property int transcodeVideoQuality: root.qualityKbps > 0
+    ? root.qualityForKbps(root.qualityKbps) : 60
+  // Empty with no tier chosen, and transcodeUrl then omits the param entirely,
+  // so the automatic codec-failure fallback sends exactly the query it always
+  // has. Only a deliberate pick adds a resolution cap.
+  readonly property string transcodeResolution: root.qualityKbps > 0
+    ? root.resolutionForKbps(root.qualityKbps) : ""
+
+  function saveQuality() { volumeSaveDebounce.restart() }
+
+  function activateQualityRow(row) {
+    if (!row) return
+    root.closeTrackPopup()
+    var next = Math.max(0, Number(row.kbps) || 0)
+    if (next === root.qualityKbps) return
+    root.qualityKbps = next
+    root.saveQuality()
+    root.beginQualityRestart()
+  }
+
+  // Same shape as beginTrackRestart — take the position, park it in resumeSec,
+  // replay through the path the choice implies — and for any TIER it is
+  // literally that function: the tier is already baked into transcodeUrl by the
+  // two properties above, so the transcode restart needs no other change.
+  //
+  // Original is the case beginTrackRestart cannot express, because it always
+  // goes to the transcoder. That path replays the direct part URL instead and
+  // clears triedTranscode, so the codec fallback is armed again for a stream
+  // that is genuinely direct-playing.
+  function beginQualityRestart() {
+    if (root.currentRatingKey === "" || root.mode !== "playing") return
+    if (root.qualityKbps > 0) {
+      root.setStatus("Switching quality — restarting the stream…", false)
+      root.beginTrackRestart()
+      return
+    }
+    if (root.currentPartKey === "") {
+      // No stashed part key (a session resumed from a response we never
+      // parsed): a full re-resolve is the honest fallback, at the cost of
+      // rejoining at the server's last reported offset rather than this one.
+      root.setStatus("Switching to direct play…", false)
+      root.playItem(root.currentRatingKey, root.currentTitle)
+      return
+    }
+    root.setStatus("Switching to direct play — restarting the stream…", false)
+    root.resumeSec = Math.max(0, Math.round(root.seekDisplayTime))
+    root.triedTranscode = false
+    root.playGen++
+    root.clearSeekPreview()
+    // Same URL construction as applyMetadata: the internal backend cannot send
+    // a header from QML's media loader, so its token rides the query.
+    var url = root.server + root.currentPartKey
+    if (root.backend !== "mpv") url += "?X-Plex-Token=" + root.token
+    if (root.backend === "mpv") root.startMpv(url)
+    else root.startInternal(url)
+  }
+
   // ---- the picker itself ----
   //
   // A plain list drawn on the theater overlay rather than a QQC2 Popup. It
   // needs no focus scope and no Shortcut objects of its own: the existing
   // dispatcher simply gives it first refusal while it is open, which is what
   // keeps it out of the layered-Esc chain's way instead of competing with it.
-  property string trackPopup: "" // "" | "audio" | "subtitle"
+  property string trackPopup: "" // "" | "audio" | "subtitle" | "quality"
   property int trackPopupIndex: 0
+
+  // One entry point for both the list's click and the keyboard's Enter, so the
+  // two can never diverge on what a row does. Track picks keep going through
+  // activateTrackRow (PUT first, restart only off its exit); quality picks
+  // never touch the part selection, so they take their own path.
+  function activatePickerRow(kind, row) {
+    if (kind === "quality") { root.activateQualityRow(row); return }
+    root.activateTrackRow(kind, row)
+  }
 
   function openTrackPopup(kind) {
     var rows = root.trackRows(kind)
@@ -1656,7 +1950,7 @@ Item {
       root.closeTrackPopup()
       return
     }
-    root.activateTrackRow(kind, rows[root.trackPopupIndex])
+    root.activatePickerRow(kind, rows[root.trackPopupIndex])
   }
 
   // First refusal on the keyboard while a picker is open. Returning true is
@@ -1681,12 +1975,16 @@ Item {
     // behind an open list.
     if (text === "a" && root.audioPickerAvailable) { root.toggleTrackPopup("audio"); return true }
     if (text === "s" && root.subtitlePickerAvailable) { root.toggleTrackPopup("subtitle"); return true }
+    if (text === "q" && root.qualityPickerAvailable) { root.toggleTrackPopup("quality"); return true }
     return true
   }
 
   function finishPlayback() {
     sendTimeline("stopped")
     pollTimer.stop()
+    // A picker left open by the ended session would otherwise keep first
+    // refusal on every key while the user is back in browse.
+    root.closeTrackPopup()
     root.mode = "list"
     root.currentTitle = ""
     root.currentThumbPath = ""
@@ -1762,7 +2060,11 @@ Item {
       + "?Path=" + encodeURIComponent("/library/metadata/" + root.currentRatingKey)
       + "&mediaIndex=0&partIndex=0&protocol=hls"
       + "&directPlay=0&directStream=0&hasMDE=1"
-      + "&videoQuality=60&maxVideoBitrate=6000&audioBoost=100&subtitleSize=100"
+      + "&videoQuality=" + root.transcodeVideoQuality
+      + "&maxVideoBitrate=" + root.transcodeBitrateKbps
+      + (root.transcodeResolution === ""
+        ? "" : "&videoResolution=" + root.transcodeResolution)
+      + "&audioBoost=100&subtitleSize=100"
       + "&session=" + root.sessionId
       + "&X-Plex-Token=" + root.token
       + "&X-Plex-Product=Plex%20Mini&X-Plex-Client-Identifier=" + root.pluginId
@@ -1788,7 +2090,7 @@ Item {
     if (root.currentRatingKey === "") return
     timelinePost.command = ["curl", "-s", "--fail", "--max-time", "5", "-o", "/dev/null"]
       .concat(root.plexHeaders)
-        .concat([root.server + "/:/timeline?ratingKey=" + root.currentRatingKey
+        .concat([root.server + "/:/timeline?ratingKey=" + encodeURIComponent(root.currentRatingKey)
         + "&key=" + encodeURIComponent("/library/metadata/" + root.currentRatingKey)
         + "&duration=" + Math.round(root.dispDuration * 1000)
         + "&time=" + Math.round(root.dispTime * 1000)
@@ -1963,20 +2265,41 @@ Item {
   // Minibar cursor actions, left to right as they sit on the bar. "seek" is a
   // drag target rather than a command, but it stays in the walk so Tab-then-l
   // reaches the slider the same way the pointer does.
-  readonly property var minibarActions: ["rewind", "play", "forward", "seek", "expand"]
+  readonly property var minibarActions: ["rewind", "play", "forward", "seek", "pip", "expand"]
 
   function activateMinibar(action) {
     var a = String(action || "")
     if (a === "rewind") { root.nudgeSeek(-10); return }
     if (a === "play") { root.togglePause(); return }
     if (a === "forward") { root.nudgeSeek(10); return }
+    if (a === "pip") { if (root.pipAvailable) root.toggleSurface(); return }
     if (a === "expand") { root.enterTheater(); return }
+  }
+
+  // Header actions, left to right, only the ones currently on screen.
+  readonly property var headerActions: {
+    var a = []
+    if (root.navStack.length > 0) a.push("back")
+    if (root.configured() && root.mode !== "setup") a.push("refresh")
+    a.push("pip")
+    a.push("close")
+    return a
+  }
+
+  function activateHeader(action) {
+    var a = String(action || "")
+    if (a === "back") { root.goBack(); return }
+    if (a === "refresh") { root.refresh(); return }
+    if (a === "pip") { if (root.pipAvailable) root.toggleSurface(); return }
+    if (a === "close") { root.close(); return }
   }
 
   function cycleRegion(dir) {
     var order = ["search", "page", "sidebar"]
-    // The minibar joins the cycle only while it is actually on screen.
+    // The minibar and header join the cycle so every visible control is
+    // keyboard-discoverable (audit finding), minibar only while on screen.
     if (root.minibarVisible) order.push("minibar")
+    order.push("header")
     var at = order.indexOf(root.cursorRegion)
     if (at < 0) at = 0
     at = ((at + dir) % order.length + order.length) % order.length
@@ -2001,6 +2324,12 @@ Item {
         bar.indexOf(root.cursorAction) >= 0 ? root.cursorAction : "play")
       return
     }
+    if (region === "header") {
+      var acts = root.headerActions
+      root.setPanelCursor("header",
+        acts.indexOf(root.cursorAction) >= 0 ? root.cursorAction : acts[0])
+      return
+    }
     root.setPanelCursor("page", "")
   }
 
@@ -2019,9 +2348,26 @@ Item {
       if (dy > 0) root.enterRegion("page")
       return
     }
+    if (root.cursorRegion === "header") {
+      // One row along the top: down leaves it, h/l walk what is visible.
+      if (dy > 0) { root.enterRegion("page"); return }
+      if (dx === 0) return
+      var hacts = root.headerActions
+      var hat = hacts.indexOf(root.cursorAction)
+      hat = hat < 0 ? 0 : ((hat + dx) % hacts.length + hacts.length) % hacts.length
+      root.setPanelCursor("header", hacts[hat])
+      return
+    }
     if (root.cursorRegion === "minibar") {
       // The bar is one row at the bottom of the window: up leaves it, h/l walk
-      // its actions.
+      // its actions — except on the seek slot, where horizontal IS the action
+      // (audit: a highlightable-but-inert slider broke "mouse never required").
+      // j steps off the slider instead, down having nowhere else to go.
+      if (root.cursorAction === "seek" && dx !== 0) { root.nudgeSeek(dx * 10); return }
+      if (root.cursorAction === "seek" && dy > 0) {
+        root.setPanelCursor("minibar", "expand")
+        return
+      }
       if (dy < 0) { root.enterRegion("page"); return }
       if (dx === 0) return
       var bar = root.minibarActions
@@ -2038,6 +2384,7 @@ Item {
   function activateCursor() {
     if (root.cursorRegion === "sidebar") { root.activateSidebar(root.cursorAction); return }
     if (root.cursorRegion === "minibar") { root.activateMinibar(root.cursorAction); return }
+    if (root.cursorRegion === "header") { root.activateHeader(root.cursorAction); return }
     if (root.cursorRegion === "search") { root.search(searchInput.text); return }
     var item = pageLoader.item
     if (item && typeof item.activateCursor === "function") item.activateCursor()
@@ -2076,6 +2423,11 @@ Item {
       root.toggleMute()
       return true
     }
+    // Stop was the only transport action without a key (audit finding).
+    if (!ctrl && !alt && key === Qt.Key_X) {
+      root.stop()
+      return true
+    }
     // Both theater and the PiP route through here, so one line covers "put the
     // picture in the corner" and "give it back".
     if (!ctrl && !alt && key === Qt.Key_P) {
@@ -2090,6 +2442,10 @@ Item {
     }
     if (root.windowed && !ctrl && !alt && key === Qt.Key_S && root.subtitlePickerAvailable) {
       root.toggleTrackPopup("subtitle")
+      return true
+    }
+    if (root.windowed && !ctrl && !alt && key === Qt.Key_Q && root.qualityPickerAvailable) {
+      root.toggleTrackPopup("quality")
       return true
     }
     return false
@@ -2309,9 +2665,36 @@ Item {
           }
         }
 
-        // resize grip — thin strip on the card's top-left corner, inside
-        // bounds. Dragging left grows the miniwindow; width persists across
-        // restarts. Above the drag surface so the corner resizes, not moves.
+        // ---------- resize grips ----------
+        //
+        // The card is anchored by its RIGHT and BOTTOM edges: x is computed as
+        // `surface width - card width - marginRight`, so marginRight pins the
+        // right edge and the LEFT edge is whatever the width leaves. That
+        // asymmetry is the whole of the margin math below.
+        //
+        // TOP-LEFT grip sits on the free edge. Growing the width moves the left
+        // edge out on its own and marginRight never has to change — which is
+        // why the original grip is three lines and touches no margin at all.
+        //
+        // TOP-RIGHT grip sits on the ANCHORED edge, so the naive mirror is
+        // wrong: growing the width there would extend the card leftwards and
+        // the grip would slide out from under the pointer in the opposite
+        // direction to the drag. For the right edge to follow the pointer,
+        // marginRight has to shrink by exactly what the width gained:
+        //
+        //   right edge  = surfaceW - marginRight          (moves right by d)
+        //   marginRight = pressRight - d
+        //   width       = startW + d
+        //   left edge   = rightEdge - width
+        //               = (surfaceW - pressRight + d) - (startW + d)
+        //               = surfaceW - pressRight - startW  → CONSTANT
+        //
+        // So the left edge stays nailed down and the right edge tracks the
+        // pointer 1:1 — the exact mirror of the left grip's feel. The margin is
+        // derived from the width the clamp actually GRANTED rather than from
+        // the raw pointer delta, because otherwise a card already at its
+        // minimum or maximum width would keep sliding sideways while the width
+        // sat pinned.
         MouseArea {
           id: resizeGrip
           anchors.left: parent.left
@@ -2333,6 +2716,43 @@ Item {
             root.videoWidth = Math.max(280, Math.min(
               (window.screen ? window.screen.width : 3800) - Style.space(28),
               startW + (sx - gx)))
+          }
+          onReleased: root.saveWidth()
+        }
+
+        MouseArea {
+          id: resizeGripRight
+          anchors.right: parent.right
+          anchors.top: parent.top
+          width: Style.space(28)
+          height: Style.space(28)
+          z: 100
+          // The other diagonal: this corner grows down-right, the left one
+          // grows down-left.
+          cursorShape: Qt.SizeBDiagCursor
+          property real sx: 0
+          property int startW: 0
+          property int pressRight: 0
+          onPressed: function(mouse) {
+            sx = mapToItem(null, mouse.x, mouse.y).x
+            startW = root.videoWidth
+            pressRight = root.marginRight
+          }
+          onPositionChanged: function(mouse) {
+            if (!pressed) return
+            var gx = mapToItem(null, mouse.x, mouse.y).x
+            // Dragging RIGHT (gx > sx) grows the card. Same clamp as the left
+            // grip; no save per frame, for the same reason.
+            var next = Math.max(280, Math.min(
+              (window.screen ? window.screen.width : 3800) - Style.space(28),
+              startW + (gx - sx)))
+            root.videoWidth = next
+            // Give back exactly the width that was granted, so the right edge
+            // lands under the pointer and the left edge does not move. Assigning
+            // videoWidth above already ran clampMargins against the OLD margin;
+            // this write and the clamp after it settle the pair together.
+            root.marginRight = pressRight - (next - startW)
+            root.clampMargins()
           }
           onReleased: root.saveWidth()
         }
@@ -2456,6 +2876,14 @@ Item {
     implicitHeight: 600
     minimumSize: Qt.size(480, 360)
     onVisibleChanged: if (visible) root.focusPrimary()
+    // A compositor-initiated close (Super+Q, killactive) bypasses root.close()
+    // entirely: playback would keep running with no surface and `opened` would
+    // desync from reality (code-review finding). Our OWN hides flip
+    // opened/windowed/sessionLocked before visibility changes, so those cases
+    // fall through the guards and only an external close lands here.
+    onClosed: {
+      if (root.opened && root.windowed && !root.sessionLocked) root.close()
+    }
 
     FocusScope {
       id: content
@@ -2864,6 +3292,7 @@ Item {
             borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
 
             Image {
+              id: minibarArtImage
               anchors.fill: parent
               anchors.margins: Style.space(2)
               // Fit, not crop: episode stills are 16:9 and movie thumbs are 2:3,
@@ -2879,7 +3308,9 @@ Item {
 
             Text {
               anchors.centerIn: parent
-              visible: root.currentThumbPath === ""
+              // Keyed on load state, not just an empty path: a 404'd fetch
+              // left neither image nor glyph, just the bare well (audit).
+              visible: minibarArtImage.status !== Image.Ready
               text: "󰎁"
               color: root.muted
               font.family: root.fontFamily
@@ -2998,6 +3429,25 @@ Item {
               onClicked: root.nudgeSeek(10)
               onHovered: function(on) { if (on) root.setPanelCursor("minibar", "forward") }
             }
+          }
+
+          Button {
+            id: minibarPip
+            anchors.right: minibarExpand.left
+            anchors.rightMargin: Style.space(2)
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: "\u{f0403}"
+            // Muted rather than hidden when unavailable, matching the header
+            // button: the tooltip gets to say why.
+            opacity: root.pipAvailable ? 1 : 0.4
+            tooltipText: root.pipAvailable
+              ? "Picture-in-picture · P"
+              : (root.mpvMode ? "mpv has the picture in its own window" : "Picture-in-picture · play something first")
+            foreground: root.foreground
+            focusable: false
+            hasCursor: root.cursorOn("minibar", "pip")
+            onClicked: if (root.pipAvailable) root.toggleSurface()
+            onHovered: function(on) { if (on) root.setPanelCursor("minibar", "pip") }
           }
 
           Button {

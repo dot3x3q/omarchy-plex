@@ -379,3 +379,49 @@ source"* if written before that — `playerTracksReady` gates on
 player's track count and Plex's embedded count disagree
 (`playerTracksAligned` false — the usual cause being a transcode), the
 ordinals are meaningless and every pick is routed back to the server.
+
+## Universal transcode — `/video/:/transcode/universal/start.m3u8`
+
+Verified 2026-08-29 against the Plex OpenAPI spec, the live Plex Web bundle
+(4.160.0), `plexinc/plex-for-kodi` (`plexnet/plexplayer.py`), python-plexapi
+and Tautulli. All four agree on the ladder, so this is the honest mapping.
+
+**Three independent params, and that is the whole subtlety.**
+
+| Param | Meaning |
+|---|---|
+| `maxVideoBitrate` | Bitrate cap **in kbps** (not bps). |
+| `videoQuality` | Plex's **0–100** encoder-quality knob. NOT a ladder index. |
+| `videoResolution` | Resolution cap, e.g. `1920x1080`. **Independent of bitrate.** |
+
+**`maxVideoBitrate` alone does not downscale.** It squeezes the source
+resolution into fewer bits. Every official client sends the full tuple, and
+plexnet computes the resolution client-side and sends it explicitly — dead
+weight if the server inferred it. So a "720p" tier must actually say `720`, or
+the label lies and the user gets a mushier 4K frame. (Caveat: no published A/B
+test; this rests on spec wording plus official-client behavior. One curl
+against the live server would settle it empirically.)
+
+**`videoQuality` is non-monotonic across the ladder** because it is a
+*per-resolution* knob that resets when the resolution band steps down:
+
+- 720p band: 2000→60, 3000→75, 4000→100
+- 1080p band: 8000→60, 10000→75, 12000→90, 20000→100
+
+So 4000→100 is correct and is *not* "higher quality than 12000→90".
+
+**Trap:** the server root XML's `transcoderVideoQualities="0,1,…,12"` is a slot
+index list and is the usual source of the "videoQuality is 0–12" confusion.
+python-plexapi overloads the name too — `optimize(videoQuality=idx)` takes the
+ladder INDEX while `MediaSettings.videoQuality` is the 0–100 wire value.
+
+**No 4K tier exists in Plex's own ladder** — 20000 pairs with 1920x1080 in
+every source, and "Original" is an uncapped 200000-kbps request. `PlexPanel`'s
+20 Mbps tier deliberately caps at `3840x2160` anyway: `videoResolution` is a
+free-form cap and this library is full of 4K DoVi.
+
+Panel implementation: `qualityTiers` in `PlexPanel.qml`. With no tier chosen
+`transcodeUrl` emits the historical `videoQuality=60&maxVideoBitrate=6000` and
+omits `videoResolution`, so the codec-failure fallback behaves exactly as it
+always has. Note 6000 is off-ladder (between the 4000/720p and 8000/1080p
+rungs) and, per the above, transcodes at source resolution.
