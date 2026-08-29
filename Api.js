@@ -18,6 +18,15 @@ function cap(value, limit) {
   return s.length > limit ? s.slice(0, limit) : s
 }
 
+// Server-derived identifiers that travel in URL paths and query strings.
+// Plex keys are numeric in practice; stripping to alphanumerics at the
+// mapping boundary means every downstream consumer (playItem, timeline,
+// URL builders) inherits the invariant instead of re-implementing it.
+// 2026-08-29 security audit: sanitization existed only in DetailPage.
+function keyOf(value) {
+  return cap(value, MAX_KEY).replace(/[^A-Za-z0-9]/g, "")
+}
+
 // Content scope is movies + TV only (DESIGN.md) — music lives in the
 // Spotify app's lane. /search proved to mix in album/artist/track/photo
 // hits for a generic query, so every mapper that walks a Metadata array
@@ -40,7 +49,7 @@ function onDeckUrl(server) {
 // Api.js builds plain URLs — panel.request() would need extra plumbing to
 // attach per-call headers for a feature headers buy nothing over.
 function recentlyAddedUrl(server, sectionId, size) {
-  var url = server + "/library/sections/" + sectionId + "/recentlyAdded"
+  var url = server + "/library/sections/" + encodeURIComponent(String(sectionId)) + "/recentlyAdded"
   return size ? url + "?X-Plex-Container-Start=0&X-Plex-Container-Size=" + size : url
 }
 
@@ -55,16 +64,16 @@ function libraryAllUrl(server, sectionId, opts) {
   if (opts.sort) params.push("sort=" + opts.sort)
   if (opts.start !== undefined) params.push("X-Plex-Container-Start=" + opts.start)
   if (opts.size !== undefined) params.push("X-Plex-Container-Size=" + opts.size)
-  var url = server + "/library/sections/" + sectionId + "/all"
+  var url = server + "/library/sections/" + encodeURIComponent(String(sectionId)) + "/all"
   return params.length ? url + "?" + params.join("&") : url
 }
 
 function metadataUrl(server, ratingKey) {
-  return server + "/library/metadata/" + ratingKey
+  return server + "/library/metadata/" + encodeURIComponent(String(ratingKey))
 }
 
 function childrenUrl(server, ratingKey) {
-  return server + "/library/metadata/" + ratingKey + "/children"
+  return server + "/library/metadata/" + encodeURIComponent(String(ratingKey)) + "/children"
 }
 
 // /search vs /hubs/search — probed both live with the same query.
@@ -166,7 +175,7 @@ function artPathFor(m) {
 // The one item shape every mapper below builds towards (Api.js contract).
 function itemFromMetadata(m) {
   return {
-    ratingKey: cap(m.ratingKey, MAX_KEY),
+    ratingKey: keyOf(m.ratingKey),
     title: cap(m.title, MAX_FIELD),
     sub: subFor(m),
     caption: captionFor(m),
