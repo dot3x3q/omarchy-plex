@@ -378,9 +378,13 @@ Item {
     }
     // The theater's native item dies with this flip (per-surface players —
     // see the crash note at the native block); capture what its successor in
-    // the PiP must resume.
-    if (root.nativeMode && root.mode === "playing")
+    // the PiP must resume, and idle the outgoing core NOW — its destruction
+    // races the window teardown, and a lost race leaks a playing audio thread
+    // (NativeVideoHost.onDestruction is the second line of defense).
+    if (root.nativeMode && root.mode === "playing") {
       root.pendingNativeArm = { pos: root.seekDisplayTime, paused: root.isPaused }
+      if (root.nativeVideo) root.nativeVideo.stop()
+    }
     root.windowed = false
     root.savePosition()
     root.pokeTheaterControls()
@@ -389,8 +393,10 @@ Item {
 
   function exitPip() {
     if (root.windowed) return
-    if (root.nativeMode && root.mode === "playing")
+    if (root.nativeMode && root.mode === "playing") {
       root.pendingNativeArm = { pos: root.seekDisplayTime, paused: root.isPaused }
+      if (root.nativeVideo) root.nativeVideo.stop()
+    }
     root.windowed = true
     root.savePosition()
     root.enterTheater() // no-op unless a session is still live
@@ -2985,13 +2991,29 @@ Item {
             pipKeyHost.forceActiveFocus()
             root.pokeTheaterControls()
           }
+          // A high-rate mouse delivers position events far faster than the
+          // display swaps frames, and every margin write re-lays-out the card
+          // AND recomputes the input-region mask — a compositor round trip.
+          // Doing that per event is the drag stutter (field report); the
+          // handler only stashes, and the FrameAnimation below applies the
+          // latest position exactly once per rendered frame.
+          property real targetX: 0
+          property real targetY: 0
           onPositionChanged: function(mouse) {
             if (!pressed) return
             var p = mapToItem(null, mouse.x, mouse.y)
-            root.marginRight = pipDrag.pressRight - (p.x - pipDrag.pressX)
-            root.marginBottom = pipDrag.pressBottom - (p.y - pipDrag.pressY)
-            root.clampMargins()
+            pipDrag.targetX = p.x
+            pipDrag.targetY = p.y
             pipDrag.moved = true
+          }
+
+          FrameAnimation {
+            running: pipDrag.pressed && pipDrag.moved
+            onTriggered: {
+              root.marginRight = pipDrag.pressRight - (pipDrag.targetX - pipDrag.pressX)
+              root.marginBottom = pipDrag.pressBottom - (pipDrag.targetY - pipDrag.pressY)
+              root.clampMargins()
+            }
           }
           // A bare click on the picture is a focus grab, not a move: the
           // handoff (and its state write) belongs to gestures that actually

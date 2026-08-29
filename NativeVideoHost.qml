@@ -25,4 +25,14 @@ import PlexMpv 1.0
 // module — and only the static description of its base class is missing.
 MpvVideo {
   anchors.fill: parent
+
+  // Every destruction path idles the core FIRST. Destroying a PLAYING item
+  // races its window's teardown (both surface flips hide one window and kill
+  // one item on the same trigger, and WlrLayershell deletes its surface on
+  // hide) — when MpvQt loses that race its render-thread cleanup can leave a
+  // zombie core whose audio thread plays on, unpausable because no QML item
+  // points at it any more (field report: pausing the PiP left audio running
+  // over the frozen frame; resuming doubled it). Stopping is a plain core
+  // command with no render-thread dependency, so it wins regardless.
+  Component.onDestruction: stop()
 }
