@@ -1571,6 +1571,39 @@ Item {
       || player.mediaStatus === MediaPlayer.BufferedMedia
       || player.mediaStatus === MediaPlayer.BufferingMedia)
 
+  // Qt plays the container's DEFAULT track, not the one Plex has selected —
+  // an anime opens dubbed in Japanese while the picker truthfully shows
+  // English as selected (field report 2026-08-29). Once the demuxer is up and
+  // the lists align, push Plex's selection into the pipeline. Re-fires per
+  // source, which is also correct after a user pick: selectedAudioId tracks
+  // the latest choice. Skipped for transcodes — the choice is muxed in.
+  function findStream(kind, streamId) {
+    var streams = kind === "audio" ? root.audioStreams : root.subtitleStreams
+    for (var i = 0; i < streams.length; i++)
+      if (streams[i] && String(streams[i].id) === String(streamId)) return streams[i]
+    return null
+  }
+
+  function applyPlexSelectedTracks() {
+    if (root.mpvMode || root.triedTranscode || !root.playerTracksReady) return
+    if (root.selectedAudioId !== "" && root.playerTracksAligned("audio")) {
+      var a = root.findStream("audio", root.selectedAudioId)
+      if (a && a.external !== true) root.setPlayerAudioTrack(Number(a.ordinal))
+    }
+    if (root.playerTracksAligned("subtitle")) {
+      var sub = root.selectedSubtitleId === ""
+        ? null : root.findStream("subtitle", root.selectedSubtitleId)
+      // An image or sidecar selection needs the server; starting playback is
+      // not the moment to force a transcode, so those stay unapplied until
+      // the user asks through the picker.
+      if (sub === null) root.setPlayerSubtitleTrack(-1)
+      else if (sub.external !== true && sub.image !== true)
+        root.setPlayerSubtitleTrack(Number(sub.ordinal))
+    }
+  }
+
+  onPlayerTracksReadyChanged: if (root.playerTracksReady) Qt.callLater(root.applyPlexSelectedTracks)
+
   // The player's list and Plex's describe the same file, so they should agree.
   // When they do not, the ordinals are meaningless and every pick has to go
   // back to the server — the usual cause being a transcode, which muxes
@@ -2077,9 +2110,19 @@ Item {
     // Universal transcode HLS: server re-encodes, player plays the playlist.
     // Token stays in the query because HLS players fetch segments themselves;
     // the URL exists only inside this machine's mpv/player process.
+    // Bisected live against PMS 2026-08-29 after every transcode returned a
+    // bare 400 (upstream's fallback had never actually worked here):
+    //  - "path" must be lowercase; the old "Path" is rejected outright.
+    //  - X-Plex-Platform is REQUIRED in the query — the server derives its
+    //    whole transcode client profile from it. "Chrome" gets the h264/aac
+    //    HLS ladder QtMultimedia's ffmpeg handles, and is what python-plexapi
+    //    sends for the same reason.
+    //  - X-Plex-Client-Identifier in THIS query is the one param that turns a
+    //    200 into a 400 (it collides with the device record our header-borne
+    //    identifier registered) — so uniquely here, it stays out.
     return root.server + "/video/:/transcode/universal/start.m3u8"
-      + "?Path=" + encodeURIComponent("/library/metadata/" + root.currentRatingKey)
-      + "&mediaIndex=0&partIndex=0&protocol=hls"
+      + "?path=" + encodeURIComponent("/library/metadata/" + root.currentRatingKey)
+      + "&mediaIndex=0&partIndex=0&protocol=hls&fastSeek=1"
       + "&directPlay=0&directStream=0&hasMDE=1"
       + "&videoQuality=" + root.transcodeVideoQuality
       + "&maxVideoBitrate=" + root.transcodeBitrateKbps
@@ -2087,8 +2130,9 @@ Item {
         ? "" : "&videoResolution=" + root.transcodeResolution)
       + "&audioBoost=100&subtitleSize=100"
       + "&session=" + root.sessionId
+      + "&X-Plex-Platform=Chrome"
       + "&X-Plex-Token=" + root.token
-      + "&X-Plex-Product=Plex%20Mini&X-Plex-Client-Identifier=" + root.pluginId
+      + "&X-Plex-Product=Plex%20Mini"
   }
 
   function playbackFailed() {
@@ -3424,7 +3468,7 @@ Item {
 
           Row {
             id: minibarTransport
-            anchors.right: minibarExpand.left
+            anchors.right: minibarPip.left
             anchors.rightMargin: Style.space(4)
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(2)
