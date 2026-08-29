@@ -216,6 +216,9 @@ Item {
   }
 
   // session / progress-reporting state
+  // The playing stream URL, kept for the native engine's surface handoff — a
+  // new per-surface player has to reload the same stream at position.
+  property string currentMediaUrl: ""
   property string currentRatingKey: ""
   property string sessionId: ""
   property bool triedTranscode: false
@@ -350,12 +353,7 @@ Item {
   // Native mode is deliberately NOT excluded here: mpvMode means the EXTERNAL
   // window, and the native engine draws in this one, so its picture reparents
   // into the card exactly as the VideoOutput does.
-  // nativeMode excluded FOR NOW: reparenting the MpvQt FBO item between
-  // QQuickWindows drops its render context (black card) and a subsequent
-  // seek crashed the shell (field crash 2026-08-29). The fix in flight is a
-  // per-surface item with a reload-at-position handoff; until it lands, PiP
-  // on the native engine stays gated off.
-  readonly property bool pipAvailable: root.mode === "playing" && !root.mpvMode && !root.nativeMode
+  readonly property bool pipAvailable: root.mode === "playing" && !root.mpvMode
 
   function enterPip() {
     if (!root.pipAvailable || !root.windowed) return
@@ -378,6 +376,11 @@ Item {
       window.screen = host
       root.clampMargins()
     }
+    // The theater's native item dies with this flip (per-surface players —
+    // see the crash note at the native block); capture what its successor in
+    // the PiP must resume.
+    if (root.nativeMode && root.mode === "playing")
+      root.pendingNativeArm = { pos: root.seekDisplayTime, paused: root.isPaused }
     root.windowed = false
     root.savePosition()
     root.pokeTheaterControls()
@@ -386,6 +389,8 @@ Item {
 
   function exitPip() {
     if (root.windowed) return
+    if (root.nativeMode && root.mode === "playing")
+      root.pendingNativeArm = { pos: root.seekDisplayTime, paused: root.isPaused }
     root.windowed = true
     root.savePosition()
     root.enterTheater() // no-op unless a session is still live
@@ -2183,6 +2188,8 @@ Item {
     root.mode = "list"
     root.currentTitle = ""
     root.currentThumbPath = ""
+    root.currentMediaUrl = ""
+    root.pendingNativeArm = null
     root.clearSeekPreview()
     root.setPanelCursor("page", "")
   }
@@ -2225,31 +2232,56 @@ Item {
   // is a QQuickFramebufferObject, which is OpenGL-only by Qt's own
   // documentation — a shell running QSG_RHI_BACKEND=vulkan would load this
   // module successfully and then render nothing. See NativeVideoHost.qml.
-  readonly property bool nativeReady: nativeLoader.status === Loader.Ready
-    && nativeLoader.item !== null
-  readonly property var nativeVideo: nativeLoader.item
+  // Availability comes from a windowless probe (import-only, no mpv core);
+  // the live player is whichever per-surface Loader is active. ONE MpvVideo
+  // must never move between QQuickWindows: the FBO's render context dies with
+  // the swap and the next render call locks a freed mutex —
+  // mpv_render_context_render → pthread_mutex_lock, SIGSEGV, the whole shell
+  // (field crash 2026-08-29, coredump-confirmed). So each surface owns its own
+  // item and a surface switch is a deliberate reload-at-position handoff.
+  readonly property bool nativeReady: nativeProbe.status === Loader.Ready
+  readonly property var nativeVideo: root.windowed ? theaterNativeLoader.item : pipNativeLoader.item
   readonly property bool nativeMode: root.backend === "internal" && root.nativeReady
 
-  function startNative(url) {
+  Loader {
+    id: nativeProbe
+    asynchronous: false
+    source: "NativeProbe.qml"
+    width: 0; height: 0
+  }
+
+  // What the next-created native item should do the moment it exists: either a
+  // fresh play (from startNative racing its own Loader activation) or a
+  // surface handoff (position and pause state captured before the flip).
+  property var pendingNativeArm: null
+
+  function armNativePlayback() {
     var v = root.nativeVideo
-    if (!v) { root.playbackFailed(); return }
-    // Headers BEFORE loadUrl: mpv reads http-header-fields when it opens the
-    // stream, not continuously. This is also the security win — the token
-    // reaches neither a URL (QtMultimedia) nor an argv (external mpv), only a
-    // property inside this process.
+    var arm = root.pendingNativeArm
+    if (!v || !arm || root.currentMediaUrl === "") return
+    root.pendingNativeArm = null
     v.httpHeaders = ["X-Plex-Token: " + root.token]
     v.volume = root.volumePct
-    // mpv's pause property outlives a file, so a session that was paused on the
-    // way out (close(), a session lock) would load the NEXT one paused. This is
-    // the native spelling of player.play().
     v.paused = false
-    root.mode = "playing"
-    root.setStatus("", false)
-    // The resume point rides loadUrl as mpv's `start` property, applied before
-    // the first frame — there is no seek-after-load race here and therefore no
-    // work for the resumeRetry ladder below.
-    v.loadUrl(url, Math.max(0, root.resumeSec))
+    v.loadUrl(root.currentMediaUrl, Math.max(0, Number(arm.pos) || 0))
+    // mpv applies a pause set during load before the first frame, so a
+    // handoff out of a paused theater lands paused in the PiP too.
+    if (arm.paused === true) v.paused = true
+  }
+
+  function startNative(url) {
+    // Headers ride a property, not a URL or argv — the security win. The
+    // resume point rides loadUrl as mpv's `start` property, applied before the
+    // first frame, so the resumeRetry ladder below has nothing to do here.
+    root.currentMediaUrl = url
+    root.pendingNativeArm = { pos: root.resumeSec, paused: false }
     root.resumeSec = 0
+    root.setStatus("", false)
+    // Setting mode activates this surface's Loader; if the item already
+    // exists (replaying, or a transcode restart) arm right away, otherwise
+    // the Loader's onLoaded consumes the pending arm.
+    root.mode = "playing"
+    if (root.nativeVideo) root.armNativePlayback()
   }
 
   // mpv's own event stream, arriving on the GUI thread. endReached is a real
@@ -2895,7 +2927,19 @@ Item {
         HoverHandler { id: pipHover }
 
         // The video reparents in here (see videoLayer).
-        Item { id: pipSlot; anchors.fill: parent }
+        Item {
+          id: pipSlot
+          anchors.fill: parent
+
+          Loader {
+            id: pipNativeLoader
+            anchors.fill: parent
+            asynchronous: false
+            active: root.nativeMode && root.mode === "playing" && !root.windowed
+            source: "NativeVideoHost.qml"
+            onLoaded: root.armNativePlayback()
+          }
+        }
 
         // Drag surface. Sits under the control strip so the buttons win their
         // own clicks, and reads SCENE coordinates: the scene belongs to the
@@ -3223,7 +3267,23 @@ Item {
       }
 
       // The video parks here while the real window owns the picture.
-      Item { id: theaterSlot; anchors.fill: parent }
+      Item {
+        id: theaterSlot
+        anchors.fill: parent
+
+        // This surface's OWN native player — never reparented (the crash
+        // note at the native block is the whole story). Created only while
+        // this surface is showing native playback; destroying it on the way
+        // out is MpvQt's supported teardown path.
+        Loader {
+          id: theaterNativeLoader
+          anchors.fill: parent
+          asynchronous: false
+          active: root.nativeMode && root.mode === "playing" && root.windowed
+          source: "NativeVideoHost.qml"
+          onLoaded: root.armNativePlayback()
+        }
+      }
 
       // ================= browse =================
       Item {
@@ -3788,36 +3848,17 @@ Item {
   // Full-bleed in both hosts: no margins, the background showing through the
   // letterbox bars.
   //
-  // Both in-window engines live in here, and exactly one of them is ever
-  // visible. KNOWN RISK, carried deliberately: the native item is a
-  // QQuickFramebufferObject, and moving one between QQuickWindows may drop its
-  // render context where a VideoOutput survives it. Nothing above changes if it
-  // does — the reparent is the same line either way — but a black PiP after the
-  // first pop-out is the symptom to expect, and the fix would live here.
+  // Only the QtMultimedia sink lives in here now. The native players are
+  // per-surface (see theaterSlot/pipSlot): the risk note that used to sit
+  // here came true — a reparented FBO's render context died with the window
+  // swap and took the shell down — so the native engine never rides this
+  // reparent again.
   Item {
     id: videoLayer
     parent: root.windowed ? theaterSlot : pipSlot
     anchors.fill: parent
     // In the PiP the picture is the entire point, so it is never hidden there.
     visible: !root.windowed || root.inTheater
-
-    // The probe. NOT asynchronous: nativeReady has to be settled before the
-    // first playSource picks an engine, and an async Loader would still be
-    // loading. A missing or broken module leaves this at Loader.Error, which
-    // costs a warning in the log and nothing else — see NativeVideoHost.qml.
-    //
-    // Deliberately not gated on `backend`: the probe result then depends only
-    // on whether the module exists, not on when the async config read lands,
-    // which is what makes nativeMode stable before the first play. The cost is
-    // an idle libmpv core (one thread, no window, nothing decoding) sitting
-    // there even when the user chose the external-mpv backend.
-    Loader {
-      id: nativeLoader
-      anchors.fill: parent
-      asynchronous: false
-      source: "NativeVideoHost.qml"
-      visible: root.nativeMode
-    }
 
     VideoOutput {
       id: videoOut
