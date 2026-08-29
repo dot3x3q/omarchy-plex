@@ -11,9 +11,10 @@ import "Model.js" as Model
 // you drop to browse. What is here is everything that should vanish when you
 // stop touching the machine.
 //
-// Overlay strip anatomy follows the Spotify plugin's footer (MIT): a seek
-// slider between position and duration captions, a transport cluster, and the
-// title. Cursor region is "playing" for every control on it.
+// Overlay strip anatomy follows the Spotify plugin's footer (MIT), squeezed
+// into ONE row: title, position, seek, duration, transport, volume. The two-row
+// version was 84px of chrome over the film for the same six things.
+// Cursor region is "playing" for every control on it.
 Item {
   id: view
 
@@ -28,11 +29,33 @@ Item {
   // Pointer movement anywhere over the video wakes the strip. Sits below the
   // strip so its buttons keep their own clicks; the strip has its own hover
   // handler for the case where the pointer is parked on a control.
+  //
+  // It is also the theater half of drag-anywhere: the window has no chrome to
+  // grab, and a full-bleed video is the largest bare surface in the app. Past
+  // the threshold the compositor takes the gesture over; below it, a click is
+  // still just a click that pokes the controls awake.
   MouseArea {
     id: videoSurface
     anchors.fill: parent
     hoverEnabled: true
-    onPositionChanged: view.panel.pokeTheaterControls()
+
+    property real pressX: 0
+    property real pressY: 0
+    property bool handedOff: false
+
+    onPressed: function(mouse) {
+      videoSurface.pressX = mouse.x
+      videoSurface.pressY = mouse.y
+      videoSurface.handedOff = false
+    }
+    onPositionChanged: function(mouse) {
+      view.panel.pokeTheaterControls()
+      if (!videoSurface.pressed || videoSurface.handedOff) return
+      if (Math.abs(mouse.x - videoSurface.pressX) < view.panel.dragThreshold
+          && Math.abs(mouse.y - videoSurface.pressY) < view.panel.dragThreshold) return
+      videoSurface.handedOff = true
+      view.panel.beginWindowDrag()
+    }
     onClicked: view.panel.pokeTheaterControls()
   }
 
@@ -57,10 +80,16 @@ Item {
     anchors.right: parent.right
     anchors.bottom: parent.bottom
     anchors.margins: Style.space(14)
-    height: Style.space(84)
+    height: Style.space(46)
     radius: Style.cornerRadius
     color: Style.normalFillFor(view.foreground, view.accent)
     borderSpec: Border.controlSpec("normal", view.foreground, view.accent)
+
+    // One row has to give something up in a narrow window. The title goes
+    // first — the window is already titled and the picture is right there — and
+    // the volume slider second, since ↑/↓ and the mute button still cover it.
+    readonly property bool showTitle: strip.width > Style.space(700)
+    readonly property bool showVolume: !view.panel.mpvMode && strip.width > Style.space(520)
 
     // Hovering the strip holds it open even with the pointer perfectly still —
     // the timeout is there to get the chrome out of the way of the film, not to
@@ -72,75 +101,14 @@ Item {
     HoverHandler { id: stripHover }
 
     Text {
-      id: positionCaption
-      anchors.left: parent.left
-      anchors.leftMargin: Style.space(12)
-      anchors.top: parent.top
-      anchors.topMargin: Style.space(10)
-      color: view.muted
-      font.family: view.fontFamily
-      font.pixelSize: Style.font.caption
-      textFormat: Text.PlainText
-      text: Model.fmtDuration(view.panel.seekDisplayTime)
-    }
-
-    Text {
-      id: durationCaption
-      anchors.right: parent.right
-      anchors.rightMargin: Style.space(12)
-      anchors.top: positionCaption.top
-      color: view.muted
-      font.family: view.fontFamily
-      font.pixelSize: Style.font.caption
-      textFormat: Text.PlainText
-      text: Model.fmtDuration(view.panel.dispDuration)
-    }
-
-    CursorSurface {
-      id: seekCursor
-      anchors.left: positionCaption.right
-      anchors.leftMargin: Style.space(8)
-      anchors.right: durationCaption.left
-      anchors.rightMargin: Style.space(8)
-      anchors.verticalCenter: positionCaption.verticalCenter
-      height: seekSlider.implicitHeight
-      hasCursor: view.panel.cursorOn("playing", "seek")
-      foreground: view.foreground
-      accent: view.accent
-
-      HoverHandler {
-        onHoveredChanged: if (hovered) view.panel.setPanelCursor("playing", "seek")
-      }
-
-      PanelSlider {
-        id: seekSlider
-        anchors.fill: parent
-        bar: view.panel.panelBar
-        minimum: 0
-        maximum: Math.max(1, view.panel.dispDuration)
-        step: 10
-        // The previewed position, not the reported one: see the seek-ack block
-        // in PlexPanel.qml for why the knob has to hold its ground.
-        value: view.panel.seekDisplayTime
-        onMoved: function(seconds) { view.panel.previewSeek(seconds) }
-        onReleased: function(seconds) { view.panel.commitSeek(seconds) }
-
-        HoverHandler { id: seekSliderHover }
-        PanelToolTip {
-          visible: seekSliderHover.hovered
-          text: "Seek 10s · ← / → · Shift for 30s"
-        }
-      }
-    }
-
-    Text {
       id: theaterTitle
+      visible: strip.showTitle
       anchors.left: parent.left
       anchors.leftMargin: Style.space(12)
-      anchors.right: transportRow.left
-      anchors.rightMargin: Style.space(10)
-      anchors.bottom: parent.bottom
-      anchors.bottomMargin: Style.space(14)
+      anchors.verticalCenter: parent.verticalCenter
+      // Never more than a third of the strip: the seek slider is the control
+      // that actually needs the width, and a long episode title would eat it.
+      width: visible ? Math.min(implicitWidth, Math.max(0, strip.width * 0.3)) : 0
       color: view.foreground
       font.family: view.fontFamily
       font.pixelSize: Style.font.body
@@ -150,12 +118,88 @@ Item {
       text: view.panel.currentTitle
     }
 
+    Text {
+      id: positionCaption
+      anchors.left: strip.showTitle ? theaterTitle.right : parent.left
+      anchors.leftMargin: Style.space(12)
+      anchors.verticalCenter: parent.verticalCenter
+      color: view.muted
+      font.family: view.fontFamily
+      font.pixelSize: Style.font.caption
+      textFormat: Text.PlainText
+      text: Model.fmtDuration(view.panel.seekDisplayTime)
+    }
+
+    // ---------- right-hand cluster, anchored right to left ----------
+
+    CursorSurface {
+      id: volumeCursor
+      visible: strip.showVolume
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(12)
+      anchors.verticalCenter: parent.verticalCenter
+      width: visible ? Style.space(84) : 0
+      height: volumeSlider.implicitHeight
+      hasCursor: view.panel.cursorOn("playing", "volume")
+      foreground: view.foreground
+      accent: view.accent
+      // Same no-box treatment as the scrubbers: two adjacent sliders where only
+      // one grew a rectangle on hover would read as a bug.
+      fill: "transparent"
+      borderSpec: Border.none()
+
+      HoverHandler {
+        id: volumeHover
+        onHoveredChanged: if (hovered) view.panel.setPanelCursor("playing", "volume")
+      }
+
+      PanelSlider {
+        id: volumeSlider
+        anchors.fill: parent
+        bar: view.panel.panelBar
+        minimum: 0
+        maximum: 200
+        step: 5
+        integer: true
+        // Five evenly-spaced notches over 0–200 land on 0/50/100/150/200, so
+        // one of them sits exactly on 100 — the line where Qt's own ceiling
+        // stops and the PipeWire boost starts. That is the mark that matters.
+        tickCount: 5
+        value: view.panel.volumePct
+        knobColor: view.panel.cursorOn("playing", "volume") ? view.accent : view.foreground
+        onMoved: function(pct) { view.panel.setVolumePct(pct) }
+        onReleased: function(pct) { view.panel.setVolumePct(pct) }
+
+        PanelToolTip {
+          visible: volumeHover.hovered
+          text: "Volume · ↑ / ↓ · boosts to 200%"
+        }
+      }
+    }
+
+    // Fixed-width slot whose TEXT comes and goes, so the row never reflows when
+    // the reading appears. Shows for any adjustment, keyboard included.
+    Text {
+      id: volumeCaption
+      visible: strip.showVolume
+      anchors.right: volumeCursor.left
+      anchors.rightMargin: Style.space(6)
+      anchors.verticalCenter: parent.verticalCenter
+      width: visible ? Style.space(34) : 0
+      horizontalAlignment: Text.AlignRight
+      color: view.panel.volumePct > 100 ? view.accent : view.muted
+      font.family: view.fontFamily
+      font.pixelSize: Style.font.caption
+      textFormat: Text.PlainText
+      text: (view.panel.volumeAdjusting || volumeHover.hovered || volumeSlider.dragging)
+        ? view.panel.volumePct + "%" : ""
+    }
+
     Row {
       id: transportRow
-      anchors.right: parent.right
+      anchors.right: strip.showVolume ? volumeCaption.left : parent.right
       anchors.rightMargin: Style.space(10)
-      anchors.bottom: parent.bottom
-      anchors.bottomMargin: Style.space(6)
+      anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(3)
 
       TransportButton {
@@ -226,7 +270,7 @@ Item {
       // picture out of the tiling tree without stopping it.
       TransportButton {
         glyphText: "\u{f0403}"
-        tooltipText: "Picture-in-picture"
+        tooltipText: "Picture-in-picture · P"
         foreground: view.foreground
         hasCursor: view.panel.cursorOn("playing", "pip")
         onClicked: view.panel.toggleSurface()
@@ -245,6 +289,66 @@ Item {
         onHovered: function(on) {
           view.panel.pokeTheaterControls()
           if (on) view.panel.setPanelCursor("playing", "browse")
+        }
+      }
+    }
+
+    Text {
+      id: durationCaption
+      anchors.right: transportRow.left
+      anchors.rightMargin: Style.space(10)
+      anchors.verticalCenter: parent.verticalCenter
+      color: view.muted
+      font.family: view.fontFamily
+      font.pixelSize: Style.font.caption
+      textFormat: Text.PlainText
+      text: Model.fmtDuration(view.panel.dispDuration)
+    }
+
+    // The flexible middle: whatever the two captions and the two clusters leave.
+    CursorSurface {
+      id: seekCursor
+      anchors.left: positionCaption.right
+      anchors.leftMargin: Style.space(8)
+      anchors.right: durationCaption.left
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      height: seekSlider.implicitHeight
+      hasCursor: view.panel.cursorOn("playing", "seek")
+      foreground: view.foreground
+      accent: view.accent
+      // No hover box on the timeline. The panel-cursor plumbing is untouched —
+      // hover still claims the cursor and the keyboard "seek" action is still
+      // reachable — but the fill and border are dropped, because a rectangle
+      // snapping up around the scrubber reads as a rendering defect rather than
+      // a highlight. The knob carries the keyboard indication instead.
+      fill: "transparent"
+      borderSpec: Border.none()
+
+      HoverHandler {
+        onHoveredChanged: if (hovered) view.panel.setPanelCursor("playing", "seek")
+      }
+
+      PanelSlider {
+        id: seekSlider
+        anchors.fill: parent
+        bar: view.panel.panelBar
+        minimum: 0
+        maximum: Math.max(1, view.panel.dispDuration)
+        step: 10
+        // The previewed position, not the reported one: see the seek-ack block
+        // in PlexPanel.qml for why the knob has to hold its ground.
+        value: view.panel.seekDisplayTime
+        // PanelSlider's own hot state is mouse-only and read-only, so the panel
+        // cursor speaks through the knob's color instead of a surrounding box.
+        knobColor: view.panel.cursorOn("playing", "seek") ? view.accent : view.foreground
+        onMoved: function(seconds) { view.panel.previewSeek(seconds) }
+        onReleased: function(seconds) { view.panel.commitSeek(seconds) }
+
+        HoverHandler { id: seekSliderHover }
+        PanelToolTip {
+          visible: seekSliderHover.hovered
+          text: "Seek 10s · ← / → · Shift for 30s"
         }
       }
     }

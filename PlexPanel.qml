@@ -1,6 +1,7 @@
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
+import Quickshell.Services.Pipewire
 import QtQuick
 import QtMultimedia
 import qs.Commons
@@ -363,6 +364,24 @@ Item {
     else root.exitPip()
   }
 
+  // ---- moving and resizing the real window ----
+  //
+  // The window draws no chrome, so there is no title bar to grab; dragging any
+  // bare part of it moves it instead. Both of these hand the gesture to the
+  // compositor on the first call and then stop being involved — no delta
+  // tracking, no coordinate frame to fight (the PiP comment further down is the
+  // long version of why that matters), and it works on a TILED window as well
+  // as a floating one because the compositor decides what the gesture means.
+  //
+  // The threshold is the whole reason a plain click still does nothing: without
+  // it, every click that misses a control would start a move.
+  readonly property int dragThreshold: Style.space(6)
+
+  function beginWindowDrag() {
+    if (!root.windowed) return false
+    return appWindow.startSystemMove()
+  }
+
   // Margins measure the PiP CARD's distance from the screen edges, not the
   // surface's — the layer surface itself is full-screen and never moves. Its
   // own width/height are therefore the usable area, and they are the same
@@ -400,6 +419,18 @@ Item {
     posSave.running = true
   }
 
+  // Volume moves in 5% key steps and in slider drags, so the write is deferred:
+  // one shell process per keystroke (or per frame) is exactly the mistake the
+  // resize grip already documents.
+  Timer {
+    id: volumeSaveDebounce
+    interval: 600
+    repeat: false
+    onTriggered: posSave.running = true
+  }
+
+  function saveVolume() { volumeSaveDebounce.restart() }
+
   function savePosition() {
     posSave.right = "" + Math.round(root.marginRight)
     posSave.bottom = "" + Math.round(root.marginBottom)
@@ -413,6 +444,12 @@ Item {
     property string bottom: "14"
     property string width: "460"
     property string windowed: "true"
+    // Bound rather than staged like the three above: every writer of this file
+    // (savePosition, saveWidth, saveVolume) must emit the CURRENT volume, and a
+    // binding cannot go stale the way a field only one of them sets would.
+    // Rebuilding the command string is free here — volume moves on release and
+    // key steps, not on every drag frame.
+    property string volume: "" + root.volumePct
     running: false
     command: ["sh", "-c",
       "d='" + root.stateDir + "'; d=${d%/}; b=${d##*/}; "
@@ -420,8 +457,9 @@ Item {
       + "mkdir -p -- \"$p/$b\" && [ ! -L \"$p/$b\" ] && chmod 700 \"$p/$b\" "
       + "&& cd -P -- \"$p/$b\" && [ \"$(pwd -P)\" = \"$p/$b\" ] "
       + "&& umask 077 && t=.window.$$.tmp && trap 'rm -f -- \"$t\"' EXIT "
-      + "&& printf '{\"right\":%s,\"bottom\":%s,\"width\":%s,\"windowed\":%s}' "
+      + "&& printf '{\"right\":%s,\"bottom\":%s,\"width\":%s,\"windowed\":%s,\"volume\":%s}' "
       + posSave.right + " " + posSave.bottom + " " + posSave.width + " " + posSave.windowed
+      + " " + posSave.volume
       + " > \"$t\" && chmod 600 \"$t\" && mv -f -- \"$t\" window.json && trap - EXIT"]
   }
 
@@ -444,7 +482,8 @@ Item {
           var doc = JSON.parse(raw)
           if (doc.right !== undefined) root.marginRight = Math.max(0, doc.right | 0)
           if (doc.bottom !== undefined) root.marginBottom = Math.max(0, doc.bottom | 0)
-          if (doc.width !== undefined) root.videoWidth = Math.max(280, Math.min(900, doc.width | 0))
+          if (doc.width !== undefined) root.videoWidth = Math.max(280, Math.min(3800, doc.width | 0))
+          if (doc.volume !== undefined) root.volumePct = Math.max(0, Math.min(200, doc.volume | 0))
           // Nothing is playing at load, and a PiP with no session shows no
           // picture and offers no way to start one — a persisted floaty always
           // comes back as the real window.
@@ -853,6 +892,9 @@ Item {
         "--no-config", "--no-ytdl",
         "--hwdec=auto", "--vo=gpu-next",
         "--really-quiet", "--keep-open=no",
+        // mpv does its own >100% gain, so the 0–200 scale goes straight in and
+        // the PipeWire boost never runs under this backend.
+        "--volume-max=200", "--volume=" + root.volumePct,
         "--start=" + Math.max(0, root.resumeSec) + ".5",
         "--input-ipc-server=" + root.ipcSock,
         "--http-header-fields=X-Plex-Token: " + root.token,
@@ -953,6 +995,137 @@ Item {
   function toggleMute() {
     if (root.mpvMode) return
     audio.muted = !audio.muted
+  }
+
+  // ---- volume, 0–200% ----
+  //
+  // QtMultimedia's AudioOutput.volume is hard-capped at 1.0 — there is no boost
+  // in Qt at all — so 0–100 is the player's own gain and 100–200 has to come
+  // from the graph, where PipeWire happily runs a stream above unity. Quiet
+  // film mixes are the reason this exists.
+  //
+  // mpv needs none of that: it takes 0–200 natively (--volume-max=200 is in its
+  // argv) and gets the number over the same IPC as every other command.
+  property int volumePct: 60
+  readonly property real audioVolume: Math.min(1, root.volumePct / 100)
+
+  // Set by every volume change so the strip can flash the percentage without
+  // the pointer being anywhere near the slider.
+  property bool volumeAdjusting: false
+
+  Timer {
+    id: volumeAdjustTimer
+    interval: 1500
+    repeat: false
+    onTriggered: root.volumeAdjusting = false
+  }
+
+  // mpvSend spawns a socat per call, and a slider drag emits an event per
+  // frame; coalesce so a drag costs one process rather than sixty.
+  Timer {
+    id: mpvVolumePush
+    interval: 120
+    repeat: false
+    onTriggered: if (root.mpvMode)
+      root.mpvSend('{"command":["set_property","volume",' + root.volumePct + ']}')
+  }
+
+  function setVolumePct(pct) {
+    var next = Math.max(0, Math.min(200, Math.round(Number(pct) || 0)))
+    root.volumeAdjusting = true
+    volumeAdjustTimer.restart()
+    if (next === root.volumePct) return
+    root.volumePct = next
+    // mpv takes the 0–200 number as-is; the internal backend splits at 100.
+    if (root.mpvMode) mpvVolumePush.restart()
+    root.saveVolume()
+  }
+
+  function nudgeVolume(delta) { root.setVolumePct(root.volumePct + delta) }
+
+  // ---- the 100–200 zone: PipeWire per-stream boost ----
+  //
+  // The quickshell PROCESS publishes several identical-looking output streams —
+  // node.name, media.name and application.name are all just "quickshell" — so
+  // there is no reliable way to pick out the one this player feeds. The
+  // sanctioned trade: boost every quickshell output stream while the boost is
+  // live, remember each one touched, and put them all back to unity the moment
+  // it is not. A notification ping that is briefly loud is an accepted cost on a
+  // single-user desktop; a graph left boosted after playback is not, which is
+  // why the deactivation set below is deliberately wide (stop, finish, failure,
+  // close, item end, session lock, backend switch, volume back under 100).
+  // Pausing is NOT in it: a paused film keeps the level you chose for it.
+  readonly property var pwNodes: Pipewire.nodes ? Pipewire.nodes.values : []
+
+  readonly property var quickshellStreams: {
+    var out = []
+    for (var i = 0; i < root.pwNodes.length; i++) {
+      var n = root.pwNodes[i]
+      if (!n || !n.isStream) continue
+      if (String(n.name || "") !== "quickshell") continue
+      // Same playback-stream test the shell's audio panel uses, and for the
+      // same reason: node.properties is invalid until a node is bound, and
+      // reading it during node churn can destabilize the Pipewire service.
+      if (n.isSink !== true && String(n.type || "").indexOf("Output") < 0) continue
+      out.push(n)
+    }
+    return out
+  }
+
+  // audio (and therefore audio.volume) is only valid on a BOUND node.
+  PwObjectTracker { objects: root.quickshellStreams }
+
+  property var boostedStreams: []
+
+  readonly property bool volumeBoostActive: root.opened
+    && !root.sessionLocked
+    && root.mode === "playing"
+    && root.backend !== "mpv"
+    && root.volumePct > 100
+
+  function applyStreamBoost() {
+    if (!root.volumeBoostActive) { root.restoreStreamVolumes(); return }
+    var live = root.quickshellStreams
+    var target = root.volumePct / 100
+    var touched = []
+    for (var i = 0; i < live.length; i++) {
+      var n = live[i]
+      if (!n || !n.audio) continue
+      if (Math.abs(n.audio.volume - target) > 0.001) n.audio.volume = target
+      touched.push(n)
+    }
+    root.boostedStreams = touched
+  }
+
+  function restoreStreamVolumes() {
+    if (root.boostedStreams.length === 0) return
+    var live = root.quickshellStreams
+    for (var i = 0; i < root.boostedStreams.length; i++) {
+      var n = root.boostedStreams[i]
+      // Only touch what PipeWire still publishes: a departed stream has nothing
+      // to restore and its wrapper may already be on its way out.
+      if (!n || live.indexOf(n) < 0 || !n.audio) continue
+      // Never stomp a level the user lowered by hand in the audio panel — the
+      // only thing being undone here is our own boost.
+      if (n.audio.volume > 1) n.audio.volume = 1
+    }
+    root.boostedStreams = []
+  }
+
+  onVolumeBoostActiveChanged: root.applyStreamBoost()
+  onVolumePctChanged: root.applyStreamBoost()
+  onQuickshellStreamsChanged: root.applyStreamBoost()
+
+  // The player creates a fresh stream per playback, and a node that has only
+  // just appeared is not bound yet, so its volume cannot be written on the tick
+  // it shows up. Re-assert while the boost is up; it settles in one pass and
+  // then costs a comparison per node.
+  Timer {
+    id: boostAssert
+    interval: 400
+    repeat: true
+    running: root.volumeBoostActive
+    onTriggered: root.applyStreamBoost()
   }
 
   function togglePause() {
@@ -1116,7 +1289,8 @@ Item {
     // so binding it here throws ReferenceError on load.
     audioOutput: AudioOutput {
       id: audio
-      volume: 0.6
+      // Hard-capped at 1.0 by Qt; everything above 100% is PipeWire's job.
+      volume: root.audioVolume
     }
     onMediaStatusChanged: function(status) {
       if (status === MediaPlayer.LoadedMedia && root.resumeSec > 0) {
@@ -1447,11 +1621,17 @@ Item {
       return true
     }
     if (!ctrl && !alt && (key === Qt.Key_Up || key === Qt.Key_Down)) {
-      if (!root.mpvMode) audio.volume = Math.max(0, Math.min(1, audio.volume + (key === Qt.Key_Up ? 0.05 : -0.05)))
+      root.nudgeVolume(key === Qt.Key_Up ? 5 : -5)
       return true
     }
     if (!ctrl && !alt && key === Qt.Key_M) {
       root.toggleMute()
+      return true
+    }
+    // Both theater and the PiP route through here, so one line covers "put the
+    // picture in the corner" and "give it back".
+    if (!ctrl && !alt && key === Qt.Key_P) {
+      root.toggleSurface()
       return true
     }
     return false
@@ -1511,6 +1691,8 @@ Item {
     if (key === Qt.Key_PageUp) { root.pageStep(-1); return true }
     if (key === Qt.Key_PageDown) { root.pageStep(1); return true }
     if (!ctrl && !alt && text === "r") { root.refresh(); return true }
+    // A no-op unless a session is live: enterPip() guards on pipAvailable.
+    if (!ctrl && !alt && text === "p") { root.toggleSurface(); return true }
     return false
   }
 
@@ -1652,7 +1834,11 @@ Item {
             var gx = mapToItem(null, mouse.x, mouse.y).x
             // No save here: a write per mouse event spawned a shell process per
             // frame. The release below persists the settled width once.
-            root.videoWidth = Math.max(280, Math.min(900, startW + (sx - gx)))
+            // Cap at the surface, not a constant: 900 was upstream's laptop-scale
+            // limit and read as "not very big" on a 4K monitor (field report).
+            root.videoWidth = Math.max(280, Math.min(
+              (window.screen ? window.screen.width : 3800) - Style.space(28),
+              startW + (sx - gx)))
           }
           onReleased: root.saveWidth()
         }
@@ -1696,7 +1882,7 @@ Item {
             anchors.rightMargin: Style.space(4)
             anchors.verticalCenter: parent.verticalCenter
             iconText: "\u{f0b26}"
-            tooltipText: "Back to the window · Esc"
+            tooltipText: "Back to the window · Esc / P"
             foreground: root.foreground
             focusable: false
             hasCursor: root.cursorOn("pip", "window")
@@ -1715,6 +1901,9 @@ Item {
             hasCursor: root.cursorOn("pip", "seek")
             foreground: root.foreground
             accent: root.accent
+            // Same treatment as the other two scrubbers — see minibarSeek.
+            fill: "transparent"
+            borderSpec: Border.none()
 
             HoverHandler {
               onHoveredChanged: if (hovered) root.setPanelCursor("pip", "seek")
@@ -1724,6 +1913,7 @@ Item {
               id: pipSeekSlider
               anchors.fill: parent
               bar: root.panelBar
+              knobColor: root.cursorOn("pip", "seek") ? root.accent : root.foreground
               minimum: 0
               maximum: Math.max(1, root.dispDuration)
               step: 10
@@ -1770,6 +1960,32 @@ Item {
 
       // Focus parking spot for when no text field should hold the caret.
       Item { id: keyHost; width: 0; height: 0 }
+
+      // Drag-anywhere. Declared FIRST among the visual children so every row,
+      // button and slider sits above it and keeps its own clicks — what reaches
+      // here is bare background (the window margin, empty sidebar, gaps between
+      // cards). Flickables above it still win their own drags, so a swipe over a
+      // poster grid scrolls rather than moving the window.
+      MouseArea {
+        id: windowDrag
+        anchors.fill: parent
+        property real pressX: 0
+        property real pressY: 0
+        property bool handedOff: false
+
+        onPressed: function(mouse) {
+          windowDrag.pressX = mouse.x
+          windowDrag.pressY = mouse.y
+          windowDrag.handedOff = false
+        }
+        onPositionChanged: function(mouse) {
+          if (!windowDrag.pressed || windowDrag.handedOff) return
+          if (Math.abs(mouse.x - windowDrag.pressX) < root.dragThreshold
+              && Math.abs(mouse.y - windowDrag.pressY) < root.dragThreshold) return
+          windowDrag.handedOff = true
+          root.beginWindowDrag()
+        }
+      }
 
       // The video parks here while the real window owns the picture.
       Item { id: theaterSlot; anchors.fill: parent }
@@ -1985,7 +2201,7 @@ Item {
               // that can say WHY the button is dead.
               foreground: root.pipAvailable ? root.foreground : root.muted
               tooltipText: root.pipAvailable
-                ? "Picture-in-picture"
+                ? "Picture-in-picture · P"
                 : (root.mpvMode
                   ? "mpv has the picture in its own window"
                   : "Picture-in-picture · play something first")
@@ -2201,6 +2417,14 @@ Item {
             hasCursor: root.cursorOn("minibar", "seek")
             foreground: root.foreground
             accent: root.accent
+            // A scrubber gets no hover box. The panel-cursor plumbing stays
+            // exactly as it was — hover still claims the cursor and the keyboard
+            // "seek" action is still reachable — but the fill and the border are
+            // dropped, because a rectangle snapping up around the timeline reads
+            // as a rendering defect rather than a highlight. The knob below
+            // carries the keyboard indication instead.
+            fill: "transparent"
+            borderSpec: Border.none()
 
             HoverHandler {
               onHoveredChanged: if (hovered) root.setPanelCursor("minibar", "seek")
@@ -2210,6 +2434,9 @@ Item {
               id: minibarSlider
               anchors.fill: parent
               bar: root.panelBar
+              // PanelSlider's own hot state is mouse-only and read-only, so the
+              // panel cursor speaks through the knob's color instead.
+              knobColor: root.cursorOn("minibar", "seek") ? root.accent : root.foreground
               minimum: 0
               maximum: Math.max(1, root.dispDuration)
               step: 10
@@ -2287,6 +2514,52 @@ Item {
         anchors.fill: parent
         active: root.inTheater && root.windowed
         sourceComponent: theaterViewComponent
+      }
+
+      // ---------- resize bands ----------
+      // startSystemResize turned out to exist alongside startSystemMove on
+      // FloatingWindow (Qt::Edges parameter), so the four edges and four corners
+      // each get a grab band. Declared last, and z-raised, so they win over the
+      // content underneath — they only ever cover the outermost few pixels,
+      // which the window's Style.space(14) content margin leaves empty anyway.
+      // No threshold here: a press on an 8px edge band is unambiguous, and a
+      // click that never moves simply ends the compositor's gesture immediately.
+      // Hyprland's Super+RMB keeps working regardless; this is the mouse-only path.
+      Item {
+        id: resizeEdges
+        anchors.fill: parent
+        z: 100
+
+        Repeater {
+          model: [
+            Qt.TopEdge, Qt.BottomEdge, Qt.LeftEdge, Qt.RightEdge,
+            Qt.TopEdge | Qt.LeftEdge, Qt.TopEdge | Qt.RightEdge,
+            Qt.BottomEdge | Qt.LeftEdge, Qt.BottomEdge | Qt.RightEdge
+          ]
+
+          MouseArea {
+            required property var modelData
+            readonly property int edges: Number(modelData)
+            readonly property bool onTop: (edges & Qt.TopEdge) !== 0
+            readonly property bool onBottom: (edges & Qt.BottomEdge) !== 0
+            readonly property bool onLeft: (edges & Qt.LeftEdge) !== 0
+            readonly property bool onRight: (edges & Qt.RightEdge) !== 0
+            readonly property int band: Style.space(8)
+
+            x: onLeft ? 0 : (onRight ? resizeEdges.width - band : band)
+            y: onTop ? 0 : (onBottom ? resizeEdges.height - band : band)
+            width: (onLeft || onRight) ? band : Math.max(0, resizeEdges.width - band * 2)
+            height: (onTop || onBottom) ? band : Math.max(0, resizeEdges.height - band * 2)
+
+            cursorShape: (onLeft || onRight)
+              ? ((onTop || onBottom)
+                ? (onTop === onLeft ? Qt.SizeFDiagCursor : Qt.SizeBDiagCursor)
+                : Qt.SizeHorCursor)
+              : Qt.SizeVerCursor
+
+            onPressed: appWindow.startSystemResize(edges)
+          }
+        }
       }
     }
   }
