@@ -14,8 +14,12 @@ import "Api.js" as Api
 //   omarchy-shell shell toggle io.github.joshuaswarren.plexmini
 // Config lives in ~/.config/plexmini/config.json:
 //   { "server": "http://host:32400", "token": "...", "backend": "internal" }
-// backend "internal" (default): ytmini-style miniplayer — video renders
-//   inside the floating panel with transport controls under it.
+// backend "internal" (default): the video renders INSIDE this window, with the
+//   theater strip over it. Which in-window engine draws it is a capability
+//   question, not a preference — see the native-engine block below: with the
+//   compiled PlexMpv module installed it is libmpv, and without it Qt's
+//   QtMultimedia. The config value keeps its two names because they describe
+//   where the picture goes, which is the only part the user chose.
 // backend "mpv" (opt-in): playback launches in a standalone mpv window,
 //   pinned bottom-right (--hwdec=auto --vo=gpu-next for dGPU decode, same
 //   engine as plex-mpv-shim); the panel becomes the remote over mpv's IPC.
@@ -342,6 +346,10 @@ Item {
   // A PiP is only ever a picture. With no session it is a dead grey rectangle
   // with no browse UI and no obvious way back, and under the mpv backend the
   // picture lives in mpv's own window, so there is nothing to put in it.
+  //
+  // Native mode is deliberately NOT excluded here: mpvMode means the EXTERNAL
+  // window, and the native engine draws in this one, so its picture reparents
+  // into the card exactly as the VideoOutput does.
   readonly property bool pipAvailable: root.mode === "playing" && !root.mpvMode
 
   function enterPip() {
@@ -671,12 +679,15 @@ Item {
   onSessionLockedChanged: {
     if (root.mode !== "playing") return
     if (root.sessionLocked) {
-      root.wasPlayingBeforeLock = !root.mpvPaused && (root.backend === "mpv"
-        || player.playbackState === MediaPlayer.PlayingState)
+      // isPaused already knows which of the three engines is live, and says
+      // exactly what the hand-rolled expression here used to.
+      root.wasPlayingBeforeLock = !root.isPaused
       if (root.backend === "mpv") mpvSend('{"command":["set_property","pause",true]}')
+      else if (root.nativeMode) { if (root.nativeVideo) root.nativeVideo.paused = true }
       else player.pause()
     } else if (root.wasPlayingBeforeLock) {
       if (root.backend === "mpv") mpvSend('{"command":["set_property","pause",false]}')
+      else if (root.nativeMode) { if (root.nativeVideo) root.nativeVideo.paused = false }
       else player.play()
     }
   }
@@ -739,6 +750,12 @@ Item {
         mpvSend('{"command":["set_property","pause",true]}')
         root.mpvPaused = true
       }
+    } else if (root.nativeMode) {
+      // Guarded on mode for the same reason the mpv branch is, and for one
+      // more: mpv's pause property outlives the file, so pausing an idle core
+      // would make the NEXT item load paused. (startNative clears it anyway —
+      // belt and braces, because this is the path that sets it.)
+      if (root.mode === "playing" && root.nativeVideo) root.nativeVideo.paused = true
     } else if (player.playbackState === MediaPlayer.PlayingState) {
       player.pause()
     }
@@ -984,7 +1001,13 @@ Item {
       root.currentThumbPath = root.metadataThumb(jsonText)
       root.stashStreams(jsonText)
       var mediaUrl = root.server + partKey
-      if (root.backend !== "mpv") mediaUrl += "?X-Plex-Token=" + root.token
+      // Only QtMultimedia needs the token on the URL: its media loader cannot
+      // send an HTTP header at all, which is the documented exception the
+      // artwork URLs share. Both mpv engines carry it in a header instead, so
+      // in native mode this direct-play URL is clean — no token in the string
+      // handed to the demuxer, none in any log line that quotes it.
+      if (root.backend !== "mpv" && !root.nativeMode)
+        mediaUrl += "?X-Plex-Token=" + root.token
       playSource(mediaUrl, resolve.title)
     } catch (e) {
       fail("Could not resolve media")
@@ -1154,6 +1177,12 @@ Item {
     triggeredOnStart: false
     onTriggered: {
       root.tickCount++
+      // Property polling is EXTERNAL-mpv only: that backend has no way to push
+      // and this timer is its 1 s heartbeat over socat. The native engine
+      // publishes time-pos/duration/pause through NOTIFY signals, and the
+      // internal one through Qt's own bindings — but the timer still runs for
+      // all three, because the scrobble threshold and the 10 s timeline reports
+      // below are the timer's real job.
       if (root.backend === "mpv" && root.mode === "playing") {
         mpvSend('{"command":["get_property","time-pos"],"request_id":0}\n{"command":["get_property","duration"],"request_id":1}\n{"command":["get_property","pause"],"request_id":2}')
       }
@@ -1165,7 +1194,8 @@ Item {
       if (root.tickCount % 10 === 0) {
         var paused = root.backend === "mpv"
           ? root.mpvPaused
-          : player.playbackState === MediaPlayer.PausedState
+          : (root.nativeMode ? root.isPaused
+            : player.playbackState === MediaPlayer.PausedState)
         sendTimeline(paused ? "paused" : "playing")
       }
     }
@@ -1173,10 +1203,18 @@ Item {
 
   // Mute belongs to the internal backend's AudioOutput, which is file-scope
   // here; the theater strip is a separate file, so it gets these instead.
-  readonly property bool audioMuted: audio.muted
+  // Native mode has its own mute, on the mpv core rather than on Qt's
+  // AudioOutput — the strip's speaker glyph reads whichever engine is live.
+  readonly property bool audioMuted: root.nativeMode
+    ? (root.nativeVideo ? root.nativeVideo.muted === true : false)
+    : audio.muted
 
   function toggleMute() {
     if (root.mpvMode) return
+    if (root.nativeMode) {
+      if (root.nativeVideo) root.nativeVideo.muted = !root.nativeVideo.muted
+      return
+    }
     audio.muted = !audio.muted
   }
 
@@ -1335,10 +1373,14 @@ Item {
 
   property var boostedStreams: []
 
+  // Only QtMultimedia needs this. Both mpv engines do their own gain above
+  // unity (volume-max=200), so boosting the graph under them would multiply the
+  // two and leave every other quickshell stream loud for no reason at all.
   readonly property bool volumeBoostActive: root.opened
     && !root.sessionLocked
     && root.mode === "playing"
     && root.backend !== "mpv"
+    && !root.nativeMode
     && root.volumePct > 100
 
   function applyStreamBoost() {
@@ -1371,8 +1413,16 @@ Item {
   }
 
   onVolumeBoostActiveChanged: root.applyStreamBoost()
-  onVolumePctChanged: root.applyStreamBoost()
   onQuickshellStreamsChanged: root.applyStreamBoost()
+  onVolumePctChanged: {
+    // The native item takes the whole 0–200 scale directly, in-process, so it
+    // needs neither the boost below nor the external backend's 120 ms coalescer
+    // (that timer exists to avoid one socat per drag frame; this is a property
+    // write). A second handler for this signal would be a creation-time error,
+    // so the boost call stays here rather than getting one of its own.
+    if (root.nativeMode && root.nativeVideo) root.nativeVideo.volume = root.volumePct
+    root.applyStreamBoost()
+  }
 
   // The player creates a fresh stream per playback, and a node that has only
   // just appeared is not bound yet, so its volume cannot be written on the tick
@@ -1388,12 +1438,16 @@ Item {
 
   function togglePause() {
     if (root.backend === "mpv") mpvSend('{"command":["cycle","pause"]}')
+    // The native item has no cycle command; its paused property is the observed
+    // mpv one, so reading it back is reading mpv's actual state.
+    else if (root.nativeMode) { if (root.nativeVideo) root.nativeVideo.paused = !root.nativeVideo.paused }
     else if (player.playbackState === MediaPlayer.PlayingState) player.pause()
     else player.play()
   }
 
   function seekRel(seconds) {
     if (root.backend === "mpv") mpvSend('{"command":["seek",' + seconds + ']}')
+    else if (root.nativeMode) { if (root.nativeVideo) root.nativeVideo.seekRelative(seconds) }
     else player.position = Math.max(0, player.position + seconds * 1000)
   }
 
@@ -1401,6 +1455,11 @@ Item {
     if (root.backend === "mpv") {
       if (root.dispDuration <= 0) return
       mpvSend('{"command":["set_property","time-pos",' + (fraction * root.dispDuration).toFixed(1) + ']}')
+    } else if (root.nativeMode) {
+      // The native API takes seconds, not a fraction — the callers all speak
+      // fractions because that is what a slider produces.
+      if (root.dispDuration <= 0 || !root.nativeVideo) return
+      root.nativeVideo.seekAbsolute(fraction * root.dispDuration)
     } else if (player.duration > 0) {
       player.position = Math.max(0, Math.min(player.duration, fraction * player.duration))
     }
@@ -1566,7 +1625,12 @@ Item {
   // active track without open source") and does not populate the track lists
   // until the demuxer has resolved the streams. Waiting for a loaded buffer
   // covers both.
+  // Native mode is excluded outright rather than left to fall out of the
+  // mediaStatus test: `player` never gets a source there, so everything
+  // downstream of this (alignment, player-supplied labels, the Qt default-track
+  // fix) is meaningless and must not be consulted.
   readonly property bool playerTracksReady: root.backend !== "mpv"
+    && !root.nativeMode
     && (player.mediaStatus === MediaPlayer.LoadedMedia
       || player.mediaStatus === MediaPlayer.BufferedMedia
       || player.mediaStatus === MediaPlayer.BufferingMedia)
@@ -1585,7 +1649,11 @@ Item {
   }
 
   function applyPlexSelectedTracks() {
-    if (root.mpvMode || root.triedTranscode || !root.playerTracksReady) return
+    // Qt only. The native engine has the same problem and a different answer —
+    // see applyNativeSelectedTracks, which fires off fileLoaded() instead of
+    // off a mediaStatus poll.
+    if (root.mpvMode || root.nativeMode) return
+    if (root.triedTranscode || !root.playerTracksReady) return
     if (root.selectedAudioId !== "" && root.playerTracksAligned("audio")) {
       var a = root.findStream("audio", root.selectedAudioId)
       if (a && a.external !== true) root.setPlayerAudioTrack(Number(a.ordinal))
@@ -1678,14 +1746,28 @@ Item {
     if (row.none === true) return false
     // A sidecar file is in no container, so neither player can see it.
     if (row.external === true) return true
-    // mpv draws anything that is muxed, image subtitles included.
-    if (root.mpvMode) return false
+    // Either mpv — the external window or the in-window native item — draws
+    // anything that is muxed, image subtitles included, so no muxed track ever
+    // costs a burn-in transcode on those engines.
+    if (root.mpvMode || root.nativeMode) return false
     // Qt's ffmpeg backend only ever reads a subtitle rect's TEXT payload; the
     // bitmap one is never touched, so a PGS or VOBSUB track cannot be drawn
     // in-window at all and the server has to burn it into the picture. Not a
     // corner case here — Akira ships three image tracks and one SRT.
     if (kind === "subtitle" && row.image === true) return true
     return !root.playerTracksAligned(kind)
+  }
+
+  // The picker's "burn-in" caption, kept honest by construction. It is exactly
+  // the case where a MUXED image subtitle forces a server round trip — a
+  // QtMultimedia-only limitation, since both mpv engines draw PGS and VOBSUB
+  // themselves. Derived from rowNeedsServer rather than restating its
+  // condition in the delegate, because a warning about the more expensive
+  // outcome is precisely the thing that must not drift from the decision.
+  function rowBurnsIn(row) {
+    return row !== null && row !== undefined
+      && row.image === true && row.external !== true
+      && root.rowNeedsServer("subtitle", row)
   }
 
   function setPlayerAudioTrack(ordinal) {
@@ -1704,6 +1786,60 @@ Item {
     return true
   }
 
+  // ---- the mpv side of the same job ----
+  //
+  // One ordinal contract, two transports. Both mpv engines number tracks from 1
+  // per type in container order — the same order Plex lists its streams in,
+  // which is what `ordinal` counts — so callers add 1 to a Plex ordinal and
+  // pass anything below 1 to mean "none". The native item takes the number
+  // through an invokable; the external one gets it over IPC.
+  function setMpvAudioTrack(ordinal) {
+    if (root.nativeMode) {
+      if (root.nativeVideo) root.nativeVideo.setAudioTrack(ordinal)
+      return
+    }
+    root.mpvSend('{"command":["set_property","aid",' + ordinal + ']}')
+  }
+
+  function setMpvSubtitleTrack(ordinal) {
+    if (root.nativeMode) {
+      // mpvvideo.cpp turns anything < 1 into mpv's "no" itself.
+      if (root.nativeVideo) root.nativeVideo.setSubtitleTrack(ordinal)
+      return
+    }
+    if (ordinal < 1) { root.mpvSend('{"command":["set_property","sid","no"]}'); return }
+    root.mpvSend('{"command":["set_property","sid",' + ordinal + ']}')
+  }
+
+  // The native sibling of applyPlexSelectedTracks, and it exists for the same
+  // field report: mpv, like Qt, opens the container's DEFAULT track rather than
+  // the one Plex has selected, so a dubbed film starts in the wrong language
+  // while the picker truthfully shows the right one.
+  //
+  // Simpler than the Qt version in three ways. fileLoaded() IS the readiness
+  // signal, so there is no mediaStatus dance. There is no alignment test,
+  // because the ordinals address the same demuxer Plex enumerated rather than a
+  // second pipeline's idea of the track list. And an IMAGE subtitle is applied
+  // here where the Qt path has to leave it alone — libmpv renders PGS and
+  // VOBSUB, so honouring that selection costs nothing, whereas on Qt it would
+  // silently force a burn-in transcode at the moment playback starts.
+  function applyNativeSelectedTracks() {
+    if (!root.nativeMode || !root.nativeVideo) return
+    // A transcode is already muxed to the chosen tracks and carries exactly one
+    // of each, so ordinals counted off the ORIGINAL file would miss.
+    if (root.triedTranscode) return
+    if (root.selectedAudioId !== "") {
+      var a = root.findStream("audio", root.selectedAudioId)
+      if (a && a.external !== true) root.setMpvAudioTrack(Number(a.ordinal) + 1)
+    }
+    var sub = root.selectedSubtitleId === ""
+      ? null : root.findStream("subtitle", root.selectedSubtitleId)
+    // A sidecar file is in no container, so no ordinal addresses it; that one
+    // still needs the server, and only if the user asks through the picker.
+    if (sub === null) root.setMpvSubtitleTrack(-1)
+    else if (sub.external !== true) root.setMpvSubtitleTrack(Number(sub.ordinal) + 1)
+  }
+
   function activateTrackRow(kind, row) {
     if (!row) return
     var needsServer = root.rowNeedsServer(kind, row)
@@ -1711,16 +1847,15 @@ Item {
     if (kind === "audio") root.selectedAudioId = String(row.streamId || "")
     else root.selectedSubtitleId = String(row.streamId || "")
 
-    if (root.mpvMode) {
-      // mpv numbers tracks from 1 per type, in container order — the same
-      // order Plex lists its streams in, which is what `ordinal` counts.
-      // Best-effort by construction: there is no cheap readback to confirm the
-      // mux order matched, so a file whose container order disagreed with
-      // Plex's would pick the neighbouring track.
+    // Both mpv engines take the same route: flip the track in the running
+    // pipeline by ordinal, then tell the server what was chosen so a transcode
+    // started later is muxed from it. Best-effort by construction — there is no
+    // cheap readback to confirm the mux order matched, so a file whose
+    // container order disagreed with Plex's would pick the neighbouring track.
+    if (root.mpvMode || root.nativeMode) {
       if (needsServer) { root.putTrackSelection(true); return }
-      if (kind === "audio") root.mpvSend('{"command":["set_property","aid",' + (Number(row.ordinal) + 1) + ']}')
-      else if (row.none === true) root.mpvSend('{"command":["set_property","sid","no"]}')
-      else root.mpvSend('{"command":["set_property","sid",' + (Number(row.ordinal) + 1) + ']}')
+      if (kind === "audio") root.setMpvAudioTrack(Number(row.ordinal) + 1)
+      else root.setMpvSubtitleTrack(row.none === true ? -1 : Number(row.ordinal) + 1)
       root.putTrackSelection(false)
       return
     }
@@ -1940,10 +2075,11 @@ Item {
     root.triedTranscode = false
     root.playGen++
     root.clearSeekPreview()
-    // Same URL construction as applyMetadata: the internal backend cannot send
-    // a header from QML's media loader, so its token rides the query.
+    // Same URL construction as applyMetadata, including the reason only the
+    // QtMultimedia path appends a token: its media loader cannot send headers.
     var url = root.server + root.currentPartKey
-    if (root.backend !== "mpv") url += "?X-Plex-Token=" + root.token
+    if (root.backend !== "mpv" && !root.nativeMode)
+      url += "?X-Plex-Token=" + root.token
     if (root.backend === "mpv") root.startMpv(url)
     else root.startInternal(url)
   }
@@ -2051,6 +2187,13 @@ Item {
     if (root.backend === "mpv") {
       mpvQuit.running = true
       finishPlayback()
+    } else if (root.nativeMode) {
+      // mpv's end-file reason for this is "stop", which mpvvideo.cpp ignores
+      // deliberately: a user-initiated stop is neither an EOF nor a failure, so
+      // it cannot trip the transcode fallback on the way out. The core stays
+      // idle and reusable for the next item.
+      if (root.nativeVideo) root.nativeVideo.stop()
+      finishPlayback()
     } else {
       player.stop()
       player.source = ""
@@ -2058,8 +2201,72 @@ Item {
     }
   }
 
+  // ---- native backend: libmpv, rendered in-window ----
+  //
+  // A THIRD engine, and the only one nobody selects. `backend` still means
+  // "where does the picture go" — in this window, or in mpv's own — and the
+  // in-window slot is filled by whichever engine is actually available:
+  // libmpv when the compiled PlexMpv module is installed, QtMultimedia when it
+  // is not. That auto-upgrade is why there is no third config value to pick and
+  // no setting to get wrong.
+  //
+  // Why prefer it: QtMultimedia's sink does no HDR tone mapping (this library
+  // is full of 4K DoVi, and it plays with crushed blacks and clipped
+  // highlights) and drops to software decode on NVIDIA. It also cannot send an
+  // HTTP header, which is why the internal path has always had to hang the Plex
+  // token off the media URL. libmpv fixes all three.
+  //
+  // The QtMultimedia path is NOT legacy and must not be removed. MpvQt's item
+  // is a QQuickFramebufferObject, which is OpenGL-only by Qt's own
+  // documentation — a shell running QSG_RHI_BACKEND=vulkan would load this
+  // module successfully and then render nothing. See NativeVideoHost.qml.
+  readonly property bool nativeReady: nativeLoader.status === Loader.Ready
+    && nativeLoader.item !== null
+  readonly property var nativeVideo: nativeLoader.item
+  readonly property bool nativeMode: root.backend === "internal" && root.nativeReady
+
+  function startNative(url) {
+    var v = root.nativeVideo
+    if (!v) { root.playbackFailed(); return }
+    // Headers BEFORE loadUrl: mpv reads http-header-fields when it opens the
+    // stream, not continuously. This is also the security win — the token
+    // reaches neither a URL (QtMultimedia) nor an argv (external mpv), only a
+    // property inside this process.
+    v.httpHeaders = ["X-Plex-Token: " + root.token]
+    v.volume = root.volumePct
+    // mpv's pause property outlives a file, so a session that was paused on the
+    // way out (close(), a session lock) would load the NEXT one paused. This is
+    // the native spelling of player.play().
+    v.paused = false
+    root.mode = "playing"
+    root.setStatus("", false)
+    // The resume point rides loadUrl as mpv's `start` property, applied before
+    // the first frame — there is no seek-after-load race here and therefore no
+    // work for the resumeRetry ladder below.
+    v.loadUrl(url, Math.max(0, root.resumeSec))
+    root.resumeSec = 0
+  }
+
+  // mpv's own event stream, arriving on the GUI thread. endReached is a real
+  // EOF and playbackFailed is a decode/transport error — the C++ swallows the
+  // "stop" and "quit" reasons, so root.stop() cannot trip the transcode ladder.
+  Connections {
+    target: root.nativeVideo
+    enabled: root.nativeMode
+
+    function onFileLoaded() { root.applyNativeSelectedTracks() }
+    function onEndReached() { if (root.mode === "playing") root.finishPlayback() }
+    // Same entry point as every other engine's failure, so the direct-play →
+    // server-transcode ladder is shared rather than reimplemented.
+    function onPlaybackFailed(reason) { if (root.mode === "playing") root.playbackFailed() }
+  }
+
   // ---- internal backend (fallback) ----
   function startInternal(url) {
+    // The in-window engine auto-upgrades (see the native block above): when the
+    // module is there, "internal" plays through libmpv and QtMultimedia is
+    // never touched.
+    if (root.nativeMode) { root.startNative(url); return }
     player.stop()
     if (typeof videoOut !== "undefined" && videoOut !== null) player.videoOutput = videoOut
     player.source = url
@@ -2075,6 +2282,10 @@ Item {
     interval: 250
     repeat: true
     onTriggered: {
+      // QtMultimedia only. libmpv applies the resume point as its `start`
+      // property before the first frame, so there is nothing here to retry —
+      // and player is not even the live engine to ask.
+      if (root.nativeMode) { stop(); return }
       if (root.resumeSec <= 0 || root.mode !== "playing") { stop(); return }
       var target = root.resumeSec * 1000
       if (player.position >= target - 1000) { root.resumeSec = 0; stop(); return }
@@ -2198,11 +2409,25 @@ Item {
   }
 
   // ---- display helpers ----
+  //
+  // Three engines, one set of numbers. Everything downstream reads these and
+  // nothing else: the seek-ack loop, both scrubbers, the minibar clock, the
+  // scrobble threshold and the timeline reports. The native readings arrive on
+  // mpv's own event stream through NOTIFY signals rather than the external
+  // backend's 1 s socat poll, so they update at mpv's rate for free.
   readonly property bool mpvMode: root.backend === "mpv" && root.mode === "playing"
-  readonly property real dispTime: mpvMode ? root.mpvTime : player.position / 1000
-  readonly property real dispDuration: mpvMode ? root.mpvDuration : player.duration / 1000
+  readonly property real dispTime: root.mpvMode
+    ? root.mpvTime
+    : (root.nativeMode ? (root.nativeVideo ? root.nativeVideo.timePos : 0)
+      : player.position / 1000)
+  readonly property real dispDuration: root.mpvMode
+    ? root.mpvDuration
+    : (root.nativeMode ? (root.nativeVideo ? root.nativeVideo.duration : 0)
+      : player.duration / 1000)
   readonly property bool isPaused: root.mpvMode
-    ? root.mpvPaused : player.playbackState !== MediaPlayer.PlayingState
+    ? root.mpvPaused
+    : (root.nativeMode ? (root.nativeVideo ? root.nativeVideo.paused : true)
+      : player.playbackState !== MediaPlayer.PlayingState)
 
   // ---- page routing ----
   function pageComponent() {
@@ -3557,6 +3782,13 @@ Item {
   //
   // Full-bleed in both hosts: no margins, the background showing through the
   // letterbox bars.
+  //
+  // Both in-window engines live in here, and exactly one of them is ever
+  // visible. KNOWN RISK, carried deliberately: the native item is a
+  // QQuickFramebufferObject, and moving one between QQuickWindows may drop its
+  // render context where a VideoOutput survives it. Nothing above changes if it
+  // does — the reparent is the same line either way — but a black PiP after the
+  // first pop-out is the symptom to expect, and the fix would live here.
   Item {
     id: videoLayer
     parent: root.windowed ? theaterSlot : pipSlot
@@ -3564,10 +3796,32 @@ Item {
     // In the PiP the picture is the entire point, so it is never hidden there.
     visible: !root.windowed || root.inTheater
 
+    // The probe. NOT asynchronous: nativeReady has to be settled before the
+    // first playSource picks an engine, and an async Loader would still be
+    // loading. A missing or broken module leaves this at Loader.Error, which
+    // costs a warning in the log and nothing else — see NativeVideoHost.qml.
+    //
+    // Deliberately not gated on `backend`: the probe result then depends only
+    // on whether the module exists, not on when the async config read lands,
+    // which is what makes nativeMode stable before the first play. The cost is
+    // an idle libmpv core (one thread, no window, nothing decoding) sitting
+    // there even when the user chose the external-mpv backend.
+    Loader {
+      id: nativeLoader
+      anchors.fill: parent
+      asynchronous: false
+      source: "NativeVideoHost.qml"
+      visible: root.nativeMode
+    }
+
     VideoOutput {
       id: videoOut
       anchors.fill: parent
-      visible: root.backend !== "mpv"
+      // Hidden, not destroyed, when libmpv has the picture: player.videoOutput
+      // is a sink pointer QtMultimedia holds for the life of the session, and
+      // this stays the fallback the panel drops back to if the module ever goes
+      // away between runs.
+      visible: root.backend !== "mpv" && !root.nativeMode
       fillMode: VideoOutput.PreserveAspectFit
     }
   }

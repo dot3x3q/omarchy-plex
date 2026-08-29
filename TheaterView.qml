@@ -659,6 +659,10 @@ Item {
         // sidecar the player cannot see, or an image subtitle Qt cannot draw.
         // Both mean the server has to build a new stream, which costs a
         // restart — worth saying before the click, not after.
+        //
+        // "burn-in" is a QtMultimedia-only warning — EITHER mpv engine renders
+        // a muxed image subtitle itself — so the panel derives it from
+        // rowNeedsServer rather than this delegate restating the condition.
         Text {
           anchors.right: rowCheck.left
           anchors.rightMargin: Style.space(4)
@@ -666,7 +670,7 @@ Item {
           visible: text !== ""
           text: modelData.external === true
             ? "server"
-            : (modelData.image === true && !view.panel.mpvMode ? "burn-in" : "")
+            : (view.panel.rowBurnsIn(modelData) ? "burn-in" : "")
           color: view.muted
           font.family: view.fontFamily
           font.pixelSize: Style.font.caption
