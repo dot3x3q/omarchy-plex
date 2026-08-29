@@ -3280,6 +3280,10 @@ Item {
           anchors.fill: parent
           asynchronous: false
           active: root.nativeMode && root.mode === "playing" && root.windowed
+          // Alive while browsing (playback continues behind the minibar),
+          // painted only in theater — without this the film renders full-bleed
+          // UNDER the browse UI (field report).
+          visible: root.inTheater
           source: "NativeVideoHost.qml"
           onLoaded: root.armNativePlayback()
         }
