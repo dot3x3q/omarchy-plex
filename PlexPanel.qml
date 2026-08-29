@@ -718,7 +718,13 @@ Item {
     WlrLayershell.layer: WlrLayer.Top
     // A launcher-style picker must receive typing immediately on open;
     // OnDemand does not request Wayland keyboard focus until a mouse click.
-    WlrLayershell.keyboardFocus: root.opened ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+    // But holding Exclusive for the panel's whole lifetime makes every other
+    // window deaf while a miniplayer sits in the corner. Grab exclusively
+    // only in the transient browse/setup modes; during playback drop to
+    // OnDemand so the desktop stays usable — clicking the panel re-arms the
+    // playback keys (Space, arrows), clicking any window gives it back.
+    WlrLayershell.keyboardFocus: !root.opened ? WlrKeyboardFocus.None
+      : (root.mode === "playing" ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.Exclusive)
     exclusionMode: ExclusionMode.Ignore
 
     // Keyboard host. PanelWindow cannot carry a Keys attachment (it is not
