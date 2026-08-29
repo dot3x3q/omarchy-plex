@@ -186,3 +186,10 @@ Then: libmpv render-in-window (existing roadmap item), replacing QtMultimedia.
 - `p` toggles PiP everywhere; PiP size cap is the surface width, not 900px.
 - PiP verified by 3x3q: drag 1:1, corner snap, click-through desktop, focus
   handoff — all confirmed perfect.
+- Browse-alongside-PiP: considered and REJECTED (3x3q, 2026-08-29) — "I really
+  like having everything in the same window." The PiP stays video-only; getting
+  back to browse means popping back to the real window. Do not resurrect.
+- Queued next: vertical volume popup on mute hover (magnetic detents at
+  50/100/150/200, replaces the inline strip slider), stream-quality picker
+  (Original/direct + transcode tiers, joins the track popups), PiP resize grip
+  top-right in addition to top-left.
