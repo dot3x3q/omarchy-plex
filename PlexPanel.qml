@@ -376,15 +376,13 @@ Item {
       window.screen = host
       root.clampMargins()
     }
-    // Verify AFTER the surface maps: the unmapped screen-set is best-effort
-    // (field report: PiP came up on the original monitor after the window had
-    // moved). A late reassign recreates the surface, and onScreenChanged
-    // bounces the player onto it.
-    var intended = host
-    Qt.callLater(function() {
-      if (intended && !root.windowed && !root.sameScreen(intended, root.pipScreen))
-        window.screen = intended
-    })
+    // appWindow.screen is Qt's OPINION of the window's output, and on Wayland
+    // it proved to be a default, not a fact — a window tiled on monitor three
+    // still spawned its PiP on monitor one (field report, twice). The
+    // compositor is the only authority on where a toplevel lives, so ask it;
+    // the answer lands after the PiP maps, and reassigning screen then flows
+    // through onScreenChanged -> bouncePipPlayer like any other move.
+    pipHostQuery.running = true
     // The theater's native item dies with this flip (per-surface players —
     // see the crash note at the native block); capture what its successor in
     // the PiP must resume, and idle the outgoing core NOW — its destruction
@@ -547,6 +545,38 @@ Item {
     root.pipGhostX = Math.max(0, Math.min(target.width - root.videoWidth, localX))
     root.pipGhostY = Math.max(0, Math.min(target.height - root.videoHeight, localY))
     root.pipDropScreen = target
+  }
+
+  function adoptPipScreenByName(name) {
+    var wanted = String(name || "").trim()
+    if (wanted === "" || root.windowed) return
+    var list = Quickshell.screens
+    if (!list) return
+    for (var i = 0; i < list.length; i++) {
+      var scr = list[i]
+      if (scr && String(scr.name) === wanted) {
+        if (!root.sameScreen(scr, root.pipScreen)) {
+          window.screen = scr
+          root.clampMargins()
+        }
+        return
+      }
+    }
+  }
+
+  // Fixed pipeline, nothing interpolated: which output does the compositor
+  // say the Plex Mini toplevel is on right now. Queried at PiP entry, while
+  // the toplevel is still mapped and matchable by title.
+  Process {
+    id: pipHostQuery
+    running: false
+    command: ["sh", "-c",
+      "m=$(hyprctl -j clients | jq -r 'first(.[] | select(.class==\"org.quickshell\" and (.title|endswith(\"Plex Mini\"))) | .monitor)'); "
+      + "hyprctl -j monitors | jq -r --argjson m \"${m:-null}\" 'first(.[] | select(.id==$m) | .name) // empty'"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.adoptPipScreenByName(String(text || ""))
+    }
   }
 
   function commitPipScreen(next) {
