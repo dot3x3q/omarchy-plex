@@ -34,6 +34,22 @@ Item {
 
   property var shell: null
   property var manifest: null
+  // Shared now-playing state: the shell injects the plugin's single
+  // PlayerState.qml service instance because this property exists (see
+  // shell.qml's panel Instantiator), and the bar widget reads the same
+  // instance via bar.shell.serviceFor() for its marquee.
+  property var service: null
+
+  function syncPlayerState() {
+    if (!root.service) return
+    root.service.playing = root.mode === "playing"
+    root.service.paused = root.isPaused
+    root.service.title = root.currentTitle
+  }
+  onServiceChanged: root.syncPlayerState()
+  onModeChanged: root.syncPlayerState()
+  onIsPausedChanged: root.syncPlayerState()
+  onCurrentTitleChanged: root.syncPlayerState()
 
   readonly property string pluginId: "io.github.joshuaswarren.plexmini"
   readonly property string configDir: (Quickshell.env("XDG_CONFIG_HOME")
@@ -52,6 +68,16 @@ Item {
   readonly property color urgent: Color.urgent
   readonly property color muted: Color.muted
   readonly property string fontFamily: Style.font.family
+
+  // PanelSlider styles itself from a bar-like object and falls back to literal
+  // hex when it has none. Hand it the panel's own theme roles so no slider in
+  // this plugin ever paints an off-theme track or knob outline.
+  readonly property var panelBar: QtObject {
+    readonly property color foreground: root.foreground
+    readonly property color background: root.background
+    readonly property color urgent: root.urgent
+    readonly property string fontFamily: root.fontFamily
+  }
 
   property int videoWidth: 460
   readonly property int videoHeight: Math.round(videoWidth * 9 / 16)
@@ -149,6 +175,22 @@ Item {
   property string statusText: ""
   property bool statusUrgent: false
   property string currentTitle: ""
+  // Raw Plex art path for the playing item, stashed off the resolve response
+  // so the minibar has a thumbnail without a second round trip.
+  property string currentThumbPath: ""
+
+  // Playback and view are orthogonal. `mode` stays the ENGINE's state — it is
+  // "playing" for as long as a session exists, and the timeline ticks, the
+  // scrobble threshold and close()'s pause semantics all key on it. `theater`
+  // is only about who owns the window: true = video full-bleed, false = browse
+  // with the now-playing minibar along the bottom and the session still live.
+  // That split is what lets Esc leave the video without ending playback.
+  property bool theater: false
+  readonly property bool inTheater: root.mode === "playing" && root.theater
+  readonly property bool minibarVisible: root.mode === "playing" && !root.theater
+
+  // Ending a session can never leave the view stranded on a dead video surface.
+  onModeChanged: if (root.mode !== "playing") root.theater = false
 
   // Video libraries from /library/sections: [{ id, title, type }].
   property var libraries: []
@@ -382,9 +424,12 @@ Item {
   // ---- lifecycle ----
   function focusPrimary() {
     // Defer until the mode's UI is visible; typing should search immediately.
+    // Theater has no search box and its keys are transport keys, so the caret
+    // parks on keyHost there — but browsing with a live session behind the
+    // minibar is still browsing, and should land in the search field.
     Qt.callLater(function() {
       if (!root.opened) return
-      if (root.mode === "list" || root.mode === "error") searchInput.forceActiveFocus()
+      if (!root.inTheater && searchInput.visible) searchInput.forceActiveFocus()
       else keyHost.forceActiveFocus()
     })
   }
@@ -618,6 +663,9 @@ Item {
   // Resolve the media part, then hand the URL to the backend. Direct play
   // first; universal transcode HLS is the fallback when a codec fails.
   function playItem(ratingKey, title) {
+    // Drop the old artwork now: a minibar showing the last thing you watched
+    // beside the new title is worse than a placeholder glyph for one second.
+    root.currentThumbPath = ""
     resolve.ratingKey = ratingKey
     resolve.title = title
     resolve.command = ["curl", "-s", "--fail", "--max-time", "10", "--max-filesize", "2097152"]
@@ -638,11 +686,28 @@ Item {
       root.scrobbled = false
       root.tickCount = 0
       root.resumeSec = parsed.viewOffsetSec
+      root.currentThumbPath = root.metadataThumb(jsonText)
       var mediaUrl = root.server + partKey
       if (root.backend !== "mpv") mediaUrl += "?X-Plex-Token=" + root.token
       playSource(mediaUrl, resolve.title)
     } catch (e) {
       fail("Could not resolve media")
+    }
+  }
+
+  // Model.parsePlaybackMetadata deliberately only knows about playback (it is
+  // frozen and pinned), but the resolve body already carries the artwork the
+  // minibar wants — read it out of the same response instead of asking twice.
+  function metadataThumb(jsonText) {
+    try {
+      var doc = JSON.parse(jsonText)
+      var mc = doc && doc.MediaContainer
+      var meta = mc && mc.Metadata && mc.Metadata.length > 0 ? mc.Metadata[0] : null
+      if (!meta) return ""
+      var item = Api.itemFromMetadata(meta)
+      return String(item.thumbPath || item.artPath || "")
+    } catch (e) {
+      return ""
     }
   }
 
@@ -655,12 +720,33 @@ Item {
   function playSource(url, title) {
     root.currentTitle = title
     root.playGen++
+    root.clearSeekPreview()
     if (root.backend === "mpv") startMpv(url)
     else startInternal(url)
     pollTimer.restart()
-    // The search field hides with the browse pane; transport keys need a home.
+    // Starting playback always drops into theater (enterTheater parks focus on
+    // keyHost too — the search field hides, so transport keys need a home).
+    root.enterTheater()
+  }
+
+  // ---- theater / browse view switch ----
+  // Neither of these touches the engine: mode, the poll timer and the timeline
+  // reports are unaffected, which is the entire point of the split.
+  function enterTheater() {
+    if (root.mode !== "playing") return
+    root.theater = true
+    root.pokeTheaterControls()
     keyHost.forceActiveFocus()
     root.setPanelCursor("playing", "play")
+  }
+
+  function exitTheater() {
+    if (!root.theater) return
+    root.theater = false
+    keyHost.forceActiveFocus()
+    // Hand the highlight to the bar that just appeared, so the first Enter
+    // goes straight back to theater.
+    root.setPanelCursor("minibar", "expand")
   }
 
   // ---- mpv backend ----
@@ -783,6 +869,15 @@ Item {
     }
   }
 
+  // Mute belongs to the internal backend's AudioOutput, which is file-scope
+  // here; the theater strip is a separate file, so it gets these instead.
+  readonly property bool audioMuted: audio.muted
+
+  function toggleMute() {
+    if (root.mpvMode) return
+    audio.muted = !audio.muted
+  }
+
   function togglePause() {
     if (root.backend === "mpv") mpvSend('{"command":["cycle","pause"]}')
     else if (player.playbackState === MediaPlayer.PlayingState) player.pause()
@@ -803,11 +898,98 @@ Item {
     }
   }
 
+  // ---- asynchronous seek, previewed until acknowledged ----
+  // Both backends answer a seek late: the internal player re-buffers, and mpv
+  // only reports its new time-pos on the next 1 s poll. A slider bound straight
+  // to dispTime therefore snaps back to where you dragged from, which reads as
+  // "the seek didn't take". Hold the previewed position until the backend
+  // reports it (or gives up). Simplified from the Spotify plugin's
+  // PlaybackSlider (MIT) — same shape, no separate component.
+  property real seekPreview: -1
+  property double seekPreviewAt: 0
+  property string seekPreviewKey: ""
+  readonly property bool seekPending: root.seekPreview >= 0
+  readonly property real seekDisplayTime: root.seekPending ? root.seekPreview : root.dispTime
+  readonly property real seekAckTolerance: 2
+  readonly property int seekAckMinMs: 300
+  readonly property int seekAckTimeoutMs: 8000
+
+  function previewSeek(seconds) {
+    var span = Math.max(0, root.dispDuration)
+    root.seekPreview = Math.max(0, Math.min(span, Number(seconds) || 0))
+    root.seekPreviewKey = root.currentRatingKey
+    root.seekPreviewAt = Date.now()
+    seekAckTimer.restart()
+  }
+
+  function clearSeekPreview() {
+    seekAckTimer.stop()
+    root.seekPreview = -1
+    root.seekPreviewAt = 0
+    root.seekPreviewKey = ""
+  }
+
+  // Absolute seek from a slider drag.
+  function commitSeek(seconds) {
+    root.previewSeek(seconds)
+    if (root.dispDuration > 0) root.seekAbs(root.seekPreview / root.dispDuration)
+  }
+
+  // Relative seek from a transport button or an arrow key. Previewed for the
+  // same reason, and stacked on the pending preview so a double-tap of ← moves
+  // twenty seconds on screen rather than fighting the stale reported position.
+  function nudgeSeek(seconds) {
+    if (root.dispDuration > 0)
+      root.previewSeek((root.seekPending ? root.seekPreview : root.dispTime) + seconds)
+    root.seekRel(seconds)
+  }
+
+  Timer {
+    id: seekAckTimer
+    interval: 50
+    repeat: true
+    onTriggered: {
+      if (!root.seekPending) { stop(); return }
+      // A different item is playing: the previewed position describes media
+      // that is no longer on screen.
+      if (root.seekPreviewKey !== root.currentRatingKey) { root.clearSeekPreview(); return }
+      var elapsed = Date.now() - root.seekPreviewAt
+      if (elapsed >= root.seekAckTimeoutMs) { root.clearSeekPreview(); return }
+      if (elapsed >= root.seekAckMinMs
+          && Math.abs(root.dispTime - root.seekPreview) <= root.seekAckTolerance)
+        root.clearSeekPreview()
+    }
+  }
+
+  // ---- theater overlay auto-hide ----
+  // A paused theater always shows its controls; while playing, any pointer
+  // movement or key press buys another two seconds.
+  property bool theaterControlsShown: true
+  readonly property bool theaterControlsVisible: root.theaterControlsShown || root.isPaused
+
+  Timer {
+    id: theaterHideTimer
+    interval: 2000
+    repeat: false
+    onTriggered: root.theaterControlsShown = false
+  }
+
+  function pokeTheaterControls() {
+    root.theaterControlsShown = true
+    if (root.inTheater && !root.isPaused) theaterHideTimer.restart()
+    else theaterHideTimer.stop()
+  }
+
+  onInTheaterChanged: root.pokeTheaterControls()
+  onIsPausedChanged: if (root.inTheater) root.pokeTheaterControls()
+
   function finishPlayback() {
     sendTimeline("stopped")
     pollTimer.stop()
     root.mode = "list"
     root.currentTitle = ""
+    root.currentThumbPath = ""
+    root.clearSeekPreview()
     root.setPanelCursor("page", "")
   }
 
@@ -989,6 +1171,7 @@ Item {
   Component { id: libraryPageComponent; LibraryPage { panel: root } }
   Component { id: detailPageComponent; DetailPage { panel: root } }
   Component { id: settingsPageComponent; SettingsPage { panel: root } }
+  Component { id: theaterViewComponent; TheaterView { panel: root } }
 
   // ---- sidebar model ----
   // Actions are strings so the cursor can name one without an index:
@@ -1047,7 +1230,15 @@ Item {
       root.setPanelCursor("page", "")
       return
     }
-    if (root.mode !== "playing" && root.navStack.length > 0) {
+    // Esc out of theater is a VIEW step, not a playback one — the session keeps
+    // running and the minibar takes over. Only once you are already browsing
+    // does Esc resume its normal layered walk (back-stack, then arm close).
+    if (root.inTheater) {
+      root.disarmEscapeClose()
+      root.exitTheater()
+      return
+    }
+    if (root.navStack.length > 0) {
       root.disarmEscapeClose()
       root.goBack()
       return
@@ -1067,8 +1258,23 @@ Item {
     root.setPanelCursor("search", "input")
   }
 
+  // Minibar cursor actions, left to right as they sit on the bar. "seek" is a
+  // drag target rather than a command, but it stays in the walk so Tab-then-l
+  // reaches the slider the same way the pointer does.
+  readonly property var minibarActions: ["rewind", "play", "forward", "seek", "expand"]
+
+  function activateMinibar(action) {
+    var a = String(action || "")
+    if (a === "rewind") { root.nudgeSeek(-10); return }
+    if (a === "play") { root.togglePause(); return }
+    if (a === "forward") { root.nudgeSeek(10); return }
+    if (a === "expand") { root.enterTheater(); return }
+  }
+
   function cycleRegion(dir) {
     var order = ["search", "page", "sidebar"]
+    // The minibar joins the cycle only while it is actually on screen.
+    if (root.minibarVisible) order.push("minibar")
     var at = order.indexOf(root.cursorRegion)
     if (at < 0) at = 0
     at = ((at + dir) % order.length + order.length) % order.length
@@ -1085,6 +1291,12 @@ Item {
       var actions = root.sidebarActions
       var action = actions.indexOf(root.cursorAction) >= 0 ? root.cursorAction : actions[0]
       root.setPanelCursor("sidebar", action)
+      return
+    }
+    if (region === "minibar") {
+      var bar = root.minibarActions
+      root.setPanelCursor("minibar",
+        bar.indexOf(root.cursorAction) >= 0 ? root.cursorAction : "play")
       return
     }
     root.setPanelCursor("page", "")
@@ -1105,6 +1317,17 @@ Item {
       if (dy > 0) root.enterRegion("page")
       return
     }
+    if (root.cursorRegion === "minibar") {
+      // The bar is one row at the bottom of the window: up leaves it, h/l walk
+      // its actions.
+      if (dy < 0) { root.enterRegion("page"); return }
+      if (dx === 0) return
+      var bar = root.minibarActions
+      var spot = bar.indexOf(root.cursorAction)
+      spot = spot < 0 ? 0 : ((spot + dx) % bar.length + bar.length) % bar.length
+      root.setPanelCursor("minibar", bar[spot])
+      return
+    }
     // "page" — the page owns its own geometry, so it decides what a step means.
     var item = pageLoader.item
     if (item && typeof item.moveCursor === "function") item.moveCursor(dx, dy)
@@ -1112,6 +1335,7 @@ Item {
 
   function activateCursor() {
     if (root.cursorRegion === "sidebar") { root.activateSidebar(root.cursorAction); return }
+    if (root.cursorRegion === "minibar") { root.activateMinibar(root.cursorAction); return }
     if (root.cursorRegion === "search") { root.search(searchInput.text); return }
     var item = pageLoader.item
     if (item && typeof item.activateCursor === "function") item.activateCursor()
@@ -1139,7 +1363,7 @@ Item {
     if (key === Qt.Key_Space) { root.togglePause(); return true }
     if (key === Qt.Key_Return || key === Qt.Key_Enter) { root.togglePause(); return true }
     if (!ctrl && !alt && (key === Qt.Key_Left || key === Qt.Key_Right)) {
-      root.seekRel((key === Qt.Key_Left ? -1 : 1) * (shift ? 30 : 10))
+      root.nudgeSeek((key === Qt.Key_Left ? -1 : 1) * (shift ? 30 : 10))
       return true
     }
     if (!ctrl && !alt && (key === Qt.Key_Up || key === Qt.Key_Down)) {
@@ -1147,7 +1371,7 @@ Item {
       return true
     }
     if (!ctrl && !alt && key === Qt.Key_M) {
-      if (!root.mpvMode) audio.muted = !audio.muted
+      root.toggleMute()
       return true
     }
     return false
@@ -1165,7 +1389,20 @@ Item {
     // Alt+Left is what every other app on this desktop uses for Back.
     if (alt && key === Qt.Key_Left) { root.goBack(); return true }
 
-    if (root.mode === "playing") return root.handlePlayingKey(event, ctrl, shift, alt)
+    // Theater owns the keyboard outright; browsing with a live session behind
+    // the minibar keeps every normal browse key.
+    if (root.inTheater) {
+      root.pokeTheaterControls()
+      return root.handlePlayingKey(event, ctrl, shift, alt)
+    }
+
+    // Global play/pause is the whole point of a minibar. A focused text field
+    // never reaches this line — Qt only bubbles keys the field ignored, and a
+    // TextField eats Space — so this cannot fire mid-query.
+    if (root.mode === "playing" && !ctrl && !alt && key === Qt.Key_Space) {
+      root.togglePause()
+      return true
+    }
 
     if (key === Qt.Key_Tab || key === Qt.Key_Backtab) {
       root.cycleRegion(shift || key === Qt.Key_Backtab ? -1 : 1)
@@ -1273,18 +1510,45 @@ Item {
     // Focus parking spot for when no text field should hold the caret.
     Item { id: keyHost; width: 0; height: 0 }
 
+    // ================= video surface =================
+    // Video is the one full-bleed surface in the app: no content margins, the
+    // window background showing through the letterbox bars.
+    //
+    // It deliberately does NOT live inside TheaterView. player.videoOutput is a
+    // sink pointer QtMultimedia keeps for the life of the session, so putting
+    // the VideoOutput behind the theater Loader would destroy the sink out from
+    // under a running player every time you pressed Esc to browse. Kept
+    // instantiated and merely invisible, the item stops painting while the
+    // player keeps decoding — audio continues behind the minibar, and returning
+    // to theater picks the picture back up with no reload.
+    Item {
+      id: videoLayer
+      anchors.fill: parent
+      visible: root.inTheater
+
+      VideoOutput {
+        id: videoOut
+        anchors.fill: parent
+        visible: root.backend !== "mpv"
+        fillMode: VideoOutput.PreserveAspectFit
+      }
+    }
+
     // ================= browse =================
     Item {
       id: browse
       anchors.fill: parent
       anchors.margins: Style.space(14)
-      visible: root.mode !== "playing"
+      visible: !root.inTheater
 
       BorderSurface {
         id: sidebar
         anchors.left: parent.left
         anchors.top: parent.top
-        anchors.bottom: parent.bottom
+        // Everything above the minibar shrinks to make room for it, so a live
+        // session never sits on top of the list it came from.
+        anchors.bottom: minibarSeparator.visible ? minibarSeparator.top : parent.bottom
+        anchors.bottomMargin: minibarSeparator.visible ? Style.space(10) : 0
         width: content.compact
           ? Style.space(54)
           : Math.min(Style.space(214), Math.max(Style.space(176), browse.width * 0.225))
@@ -1407,7 +1671,7 @@ Item {
         anchors.leftMargin: Style.space(10)
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.bottom: parent.bottom
+        anchors.bottom: sidebar.bottom
 
         Row {
           id: pageHeader
@@ -1575,119 +1839,160 @@ Item {
           sourceComponent: root.pageComponent()
         }
       }
-    }
 
-    // ================= playing (wave-1 parity; theater is wave 3) =================
-    Item {
-      id: playingView
-      anchors.fill: parent
-      anchors.margins: Style.space(14)
-      visible: root.mode === "playing"
-
-      BorderSurface {
-        id: videoWell
+      // ---------- now-playing minibar ----------
+      // Spans the full browse width under both sidebar and pane, Spotify-footer
+      // style: artwork well, title + clock, transport, thin seek slider, and
+      // the way back into theater. Only on screen while a session is live and
+      // the video is not.
+      PanelSeparator {
+        id: minibarSeparator
+        visible: root.minibarVisible
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.bottom: transportRow.top
+        anchors.bottom: minibar.top
         anchors.bottomMargin: Style.space(10)
+        foreground: root.foreground
+      }
+
+      BorderSurface {
+        id: minibar
+        visible: root.minibarVisible
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        height: visible ? Style.space(64) : 0
         radius: Style.cornerRadius
         color: Style.normalFillFor(root.foreground, root.accent)
         borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
 
-        VideoOutput {
-          id: videoOut
+        // Anything on the bar that is not itself a control takes you back to
+        // theater. Declared first so the real controls sit above it and win
+        // their own clicks. Hovering bare bar lights the expand button, which
+        // both names what a click does and keeps one highlight on screen.
+        MouseArea {
           anchors.fill: parent
-          anchors.margins: Style.space(2)
-          visible: root.backend !== "mpv"
-          fillMode: VideoOutput.PreserveAspectFit
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.enterTheater()
+          onEntered: root.setPanelCursor("minibar", "expand")
         }
-
-        // mpv draws into its own window, so in that mode this well is a plate.
-        Text {
-          anchors.centerIn: parent
-          visible: root.backend === "mpv"
-          color: root.muted
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          textFormat: Text.PlainText
-          text: root.triedTranscode ? "Playing via server transcode" : "Playing in mpv (hardware decode)"
-        }
-      }
-
-      Item {
-        id: transportRow
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        height: Style.space(72)
 
         BorderSurface {
-          id: seekTrack
+          id: minibarArt
           anchors.left: parent.left
-          anchors.right: parent.right
-          anchors.top: parent.top
-          height: Style.space(7)
+          anchors.leftMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+          height: Math.max(Style.space(24), parent.height - Style.space(16))
+          width: height
           radius: Style.cornerRadius
-          color: Style.normalFillFor(root.foreground, root.accent)
+          color: Style.selectedFillFor(root.foreground, root.accent)
           borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
 
-          Rectangle {
-            height: parent.height
-            radius: parent.radius
-            color: root.accent
-            width: root.dispDuration > 0
-              ? Math.max(0, Math.min(parent.width, parent.width * (root.dispTime / root.dispDuration)))
-              : 0
-            // Sliders are the one place the design allows easing; the poll
-            // tick only lands once a second and a hard jump reads as a stall.
-            Behavior on width { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+          Image {
+            anchors.fill: parent
+            anchors.margins: Style.space(2)
+            // Fit, not crop: episode stills are 16:9 and movie thumbs are 2:3,
+            // and the well shows through either way.
+            source: root.currentThumbPath === "" ? "" : root.imageUrl(root.currentThumbPath, 120, 120)
+            sourceSize.width: 120
+            sourceSize.height: 120
+            fillMode: Image.PreserveAspectFit
+            asynchronous: true
+            cache: false
+            visible: status === Image.Ready
           }
 
-          MouseArea {
-            anchors.fill: parent
-            anchors.margins: -Style.space(4)
-            cursorShape: Qt.PointingHandCursor
-            onClicked: function(mouse) { if (width > 0) root.seekAbs(mouse.x / width) }
+          Text {
+            anchors.centerIn: parent
+            visible: root.currentThumbPath === ""
+            text: "󰎁"
+            color: root.muted
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.iconLarge
           }
         }
 
         Column {
-          anchors.left: parent.left
-          anchors.top: seekTrack.bottom
-          anchors.topMargin: Style.space(8)
-          spacing: Style.space(1)
+          anchors.left: minibarArt.right
+          anchors.leftMargin: Style.space(9)
+          anchors.right: minibarSeek.left
+          anchors.rightMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.space(2)
 
           Text {
+            width: parent.width
+            text: root.currentTitle
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
+            font.bold: true
             textFormat: Text.PlainText
-            text: Model.fmtDuration(root.dispTime) + " / " + Model.fmtDuration(root.dispDuration)
+            elide: Text.ElideRight
           }
           Text {
+            width: parent.width
+            text: Model.fmtDuration(root.seekDisplayTime) + " / " + Model.fmtDuration(root.dispDuration)
             color: root.muted
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             textFormat: Text.PlainText
             elide: Text.ElideRight
-            text: root.currentTitle
+          }
+        }
+
+        CursorSurface {
+          id: minibarSeek
+          // The floaty surface is narrower than the slider is useful at; the
+          // bar keeps its transport and drops the scrubber there.
+          visible: !content.compact
+          width: visible ? Math.max(Style.space(90), minibar.width * 0.22) : 0
+          height: minibarSlider.implicitHeight
+          anchors.right: minibarTransport.left
+          anchors.rightMargin: visible ? Style.space(8) : 0
+          anchors.verticalCenter: parent.verticalCenter
+          hasCursor: root.cursorOn("minibar", "seek")
+          foreground: root.foreground
+          accent: root.accent
+
+          HoverHandler {
+            onHoveredChanged: if (hovered) root.setPanelCursor("minibar", "seek")
+          }
+
+          PanelSlider {
+            id: minibarSlider
+            anchors.fill: parent
+            bar: root.panelBar
+            minimum: 0
+            maximum: Math.max(1, root.dispDuration)
+            step: 10
+            value: root.seekDisplayTime
+            onMoved: function(seconds) { root.previewSeek(seconds) }
+            onReleased: function(seconds) { root.commitSeek(seconds) }
+
+            HoverHandler { id: minibarSliderHover }
+            PanelToolTip {
+              visible: minibarSliderHover.hovered
+              text: "Seek · ← / →"
+            }
           }
         }
 
         Row {
-          anchors.right: parent.right
-          anchors.top: seekTrack.bottom
-          anchors.topMargin: Style.space(4)
-          spacing: Style.space(6)
+          id: minibarTransport
+          anchors.right: minibarExpand.left
+          anchors.rightMargin: Style.space(4)
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.space(2)
 
           TransportButton {
             glyphText: "󰒮"
-            tooltipText: "Back 10s · ←"
+            tooltipText: "Back 10s"
             foreground: root.foreground
-            hasCursor: root.cursorOn("playing", "rewind")
-            onClicked: root.seekRel(-10)
-            onHovered: function(on) { if (on) root.setPanelCursor("playing", "rewind") }
+            hasCursor: root.cursorOn("minibar", "rewind")
+            onClicked: root.nudgeSeek(-10)
+            onHovered: function(on) { if (on) root.setPanelCursor("minibar", "rewind") }
           }
 
           TransportButton {
@@ -1695,40 +2000,45 @@ Item {
             glyphSize: Style.font.iconLarge
             tooltipText: root.isPaused ? "Play · Space" : "Pause · Space"
             foreground: root.foreground
-            hasCursor: root.cursorOn("playing", "play")
+            hasCursor: root.cursorOn("minibar", "play")
             onClicked: root.togglePause()
-            onHovered: function(on) { if (on) root.setPanelCursor("playing", "play") }
+            onHovered: function(on) { if (on) root.setPanelCursor("minibar", "play") }
           }
 
           TransportButton {
             glyphText: "󰒭"
-            tooltipText: "Forward 10s · →"
+            tooltipText: "Forward 10s"
             foreground: root.foreground
-            hasCursor: root.cursorOn("playing", "forward")
-            onClicked: root.seekRel(10)
-            onHovered: function(on) { if (on) root.setPanelCursor("playing", "forward") }
-          }
-
-          TransportButton {
-            visible: !root.mpvMode
-            glyphText: audio.muted ? "󰖁" : "󰕾"
-            tooltipText: audio.muted ? "Unmute · M" : "Mute · M"
-            foreground: audio.muted ? root.urgent : root.foreground
-            hasCursor: root.cursorOn("playing", "mute")
-            onClicked: audio.muted = !audio.muted
-            onHovered: function(on) { if (on) root.setPanelCursor("playing", "mute") }
-          }
-
-          TransportButton {
-            glyphText: "󰓛"
-            tooltipText: "Stop"
-            foreground: root.urgent
-            hasCursor: root.cursorOn("playing", "stop")
-            onClicked: root.stop()
-            onHovered: function(on) { if (on) root.setPanelCursor("playing", "stop") }
+            hasCursor: root.cursorOn("minibar", "forward")
+            onClicked: root.nudgeSeek(10)
+            onHovered: function(on) { if (on) root.setPanelCursor("minibar", "forward") }
           }
         }
+
+        Button {
+          id: minibarExpand
+          anchors.right: parent.right
+          anchors.rightMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+          iconText: "󰅃"
+          tooltipText: "Theater · Enter"
+          foreground: root.foreground
+          focusable: false
+          hasCursor: root.cursorOn("minibar", "expand")
+          onClicked: root.enterTheater()
+          onHovered: function(on) { if (on) root.setPanelCursor("minibar", "expand") }
+        }
       }
+    }
+
+    // ================= theater =================
+    // Controls only — the video surface is `videoLayer` above, which has to
+    // outlive this Loader for the sink to survive an Esc to browse.
+    Loader {
+      id: theaterLoader
+      anchors.fill: parent
+      active: root.inTheater
+      sourceComponent: theaterViewComponent
     }
   }
 }
