@@ -4,6 +4,7 @@ import Quickshell.Wayland
 import QtQuick
 import QtMultimedia
 import qs.Commons
+import qs.Ui
 import "Model.js" as Model
 
 // Plex Mini panel entry point.
@@ -16,6 +17,12 @@ import "Model.js" as Model
 // backend "mpv" (opt-in): playback launches in a standalone mpv window,
 //   pinned bottom-right (--hwdec=auto --vo=gpu-next for dGPU decode, same
 //   engine as plex-mpv-shim); the panel becomes the remote over mpv's IPC.
+//
+// The window draws no chrome of its own: Hyprland owns the frame, the drag
+// and the resize, so an in-app title bar would only duplicate the compositor
+// and steal 34px from every screen. What the old header did lives on as the
+// status banner, the header row's actions, and the window `title:` property
+// that Hyprland's rules still match on.
 //
 // Security posture: the X-Plex-Token travels only in HTTP headers for API
 // calls (never URL query — process lists, logs, and redirects leak those).
@@ -42,6 +49,8 @@ Item {
   readonly property color foreground: Color.foreground
   readonly property color accent: Color.accent
   readonly property color urgent: Color.urgent
+  readonly property color muted: Color.muted
+  readonly property string fontFamily: Style.font.family
 
   property int videoWidth: 460
   readonly property int videoHeight: Math.round(videoWidth * 9 / 16)
@@ -84,14 +93,14 @@ Item {
     // Validate visibly instead of silently mangling; nothing user-controlled
     // is ever interpolated into shell source.
     if (!Model.validServer(root.server)) {
-      root.statusText = "Server must look like http://host:32400"
+      root.setStatus("Server must look like http://host:32400", true)
       return false
     }
     if (!Model.validToken(root.token)) {
-      root.statusText = "Token looks wrong — Plex tokens are letters/digits, 20ish chars"
+      root.setStatus("Token looks wrong — Plex tokens are letters/digits, 20ish chars", true)
       return false
     }
-    root.statusText = ""
+    root.setStatus("", false)
     saveProcess.running = true
     return true
   }
@@ -124,12 +133,32 @@ Item {
 
   function configured() { return root.server !== "" && root.token !== "" }
 
+  // Settings page calls this once saveConfig() has accepted the form.
+  function configApplied() {
+    root.mode = "list"
+    root.setStatus("", false)
+    root.loadLibraries()
+    root.navigate("home", ({}))
+    keyHost.forceActiveFocus()
+  }
+
   // ---- state ----
   property bool opened: false
   property string mode: "setup" // setup | list | playing | error
   property string statusText: ""
-  property var items: [] // [{ title, sub, ratingKey }]
+  property bool statusUrgent: false
   property string currentTitle: ""
+
+  // Video libraries from /library/sections: [{ id, title, type }].
+  property var libraries: []
+  // Wave-2 pages read this; the root fills it so the debounced search box
+  // keeps working before SearchPage is real.
+  property var searchResults: []
+
+  function setStatus(msg, urgent) {
+    root.statusText = msg === undefined || msg === null ? "" : String(msg)
+    root.statusUrgent = urgent === true
+  }
 
   // session / progress-reporting state
   property string currentRatingKey: ""
@@ -148,7 +177,98 @@ Item {
   property real mpvDuration: 0
   property bool mpvPaused: false
 
-  // ---- window position (drag header; persisted) ----
+  // ---- navigation ----
+  // navStack holds where we came FROM; the live location is currentPage.
+  property var navStack: []
+  property string currentPage: "home"
+  property var pageParams: ({})
+  readonly property int navStackLimit: 32
+
+  function navigate(page, params) {
+    var next = String(page || "home")
+    var args = params === undefined || params === null ? ({}) : params
+    if (next === root.currentPage) {
+      // Same page, new arguments: replace rather than stack a history entry,
+      // or every debounced keystroke in the search box becomes a back step.
+      root.pageParams = args
+      return
+    }
+    var stack = root.navStack.slice()
+    stack.push({ page: root.currentPage, params: root.pageParams })
+    while (stack.length > root.navStackLimit) stack.shift()
+    root.navStack = stack
+    root.currentPage = next
+    root.pageParams = args
+    root.setPanelCursor("page", "")
+  }
+
+  function goBack() {
+    if (root.navStack.length === 0) {
+      if (root.currentPage !== "home") {
+        root.currentPage = "home"
+        root.pageParams = ({})
+        root.setPanelCursor("page", "")
+      }
+      return
+    }
+    var stack = root.navStack.slice()
+    var prev = stack.pop()
+    root.navStack = stack
+    root.currentPage = String(prev.page || "home")
+    root.pageParams = prev.params === undefined || prev.params === null ? ({}) : prev.params
+    root.setPanelCursor("page", "")
+  }
+
+  // ---- scroll memory (LRU, bounded) ----
+  // Pages hand back their contentY on teardown and ask for it again on load,
+  // so drilling into a detail page and coming back lands where you left.
+  property var scrollPositions: ({})
+  property var scrollOrder: []
+  readonly property int scrollLimit: 64
+
+  function rememberScroll(key, y) {
+    var name = String(key || root.currentPage)
+    if (name === "") return
+    var order = Array.isArray(root.scrollOrder) ? root.scrollOrder.slice() : []
+    var store = root.scrollPositions && typeof root.scrollPositions === "object"
+      ? root.scrollPositions : ({})
+    var at = order.indexOf(name)
+    if (at >= 0) order.splice(at, 1)
+    order.push(name)
+    store[name] = Math.max(0, Number(y) || 0)
+    while (order.length > root.scrollLimit) {
+      var dropped = String(order.shift() || "")
+      if (dropped !== "") delete store[dropped]
+    }
+    root.scrollOrder = order
+    root.scrollPositions = store
+  }
+
+  function scrollFor(key) {
+    var name = String(key || root.currentPage)
+    if (!root.scrollPositions || typeof root.scrollPositions !== "object") return 0
+    return Math.max(0, Number(root.scrollPositions[name]) || 0)
+  }
+
+  // ---- panel cursor ----
+  // Exactly one highlight exists at a time and mouse and keyboard share it:
+  // controls read cursorOn(region, action) and write setPanelCursor() on
+  // hover, so the keyboard cursor follows the pointer instead of fighting it.
+  // Regions: "sidebar" | "search" | "page" | "playing".
+  property string cursorRegion: "page"
+  property string cursorAction: ""
+
+  function setPanelCursor(region, action) {
+    root.cursorRegion = region === undefined || region === null ? "" : String(region)
+    root.cursorAction = action === undefined || action === null ? "" : String(action)
+  }
+
+  function cursorOn(region, action) {
+    return root.cursorRegion === String(region)
+      && root.cursorAction === String(action === undefined || action === null ? "" : action)
+  }
+
+  // ---- window position (persisted) ----
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME")
     || (Quickshell.env("HOME") + "/.local/state")) + "/plexmini"
   property int marginRight: 14
@@ -275,7 +395,7 @@ Item {
     // the player beats orphaning audio behind a list.
     if (root.mode !== "playing") {
       root.mode = "list"
-      if (root.items.length === 0) loadOnDeck()
+      if (root.libraries.length === 0) loadLibraries()
     }
     root.focusPrimary()
   }
@@ -309,12 +429,163 @@ Item {
     "-H", "X-Plex-Client-Identifier: " + root.pluginId
   ]
 
-  function loadOnDeck() {
-    apiFetch.op = "onDeck"
-    apiFetch.command = ["curl", "-s", "--fail", "--max-time", "10", "--max-filesize", "4194304"]
-      .concat(root.plexHeaders)
-      .concat([root.server + "/library/onDeck"])
-    apiFetch.running = true
+  // Four curl slots and a FIFO queue. A home page fans out one request per
+  // library, and an unbounded fan-out would have the server rate-limiting us
+  // and the process table churning; four in flight keeps it civil and still
+  // saturates a LAN Plex.
+  property var reqQueue: []
+  readonly property var reqSlots: [req0, req1, req2, req3]
+
+  function request(path, cb) {
+    if (!root.configured()) { if (cb) cb(null); return }
+    var queue = root.reqQueue.slice()
+    queue.push({ path: String(path || ""), cb: cb })
+    root.reqQueue = queue
+    root.pumpRequests()
+  }
+
+  function pumpRequests() {
+    for (var i = 0; i < root.reqSlots.length; i++) {
+      if (root.reqQueue.length === 0) return
+      var slot = root.reqSlots[i]
+      if (slot.busy) continue
+      var queue = root.reqQueue.slice()
+      var job = queue.shift()
+      root.reqQueue = queue
+      slot.busy = true
+      slot.streamDone = false
+      slot.exitDone = false
+      slot.body = ""
+      slot.cb = job.cb
+      // Command fully set BEFORE running: Quickshell latches argv at start
+      // and silently ignores writes to a running Process.
+      slot.command = ["curl", "-s", "--fail", "--max-time", "10", "--max-filesize", "4194304"]
+        .concat(root.plexHeaders)
+        .concat([root.server + job.path])
+      slot.running = true
+    }
+  }
+
+  // A slot frees up only once BOTH its stdout stream has ended and the
+  // process has exited. Quickshell emits streamFinished when the child closes
+  // stdout, which can happen before it actually exits — handing that slot a
+  // new command right then would have it silently dropped and the queue would
+  // wedge with jobs that never run.
+  function slotSettled(slot) {
+    if (!slot.streamDone || !slot.exitDone) return
+    var cb = slot.cb
+    var body = slot.body
+    slot.cb = null
+    slot.body = ""
+    slot.busy = false
+    if (cb) {
+      var parsed = null
+      // --fail leaves stdout empty on any HTTP error, so a parse failure and
+      // a transport failure land in the same place: cb(null).
+      try { parsed = JSON.parse(String(body || "")) } catch (e) { parsed = null }
+      cb(parsed)
+    }
+    root.pumpRequests()
+  }
+
+  Process {
+    id: req0
+    property var cb: null
+    property string body: ""
+    property bool busy: false
+    property bool streamDone: false
+    property bool exitDone: false
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: { req0.body = String(text || ""); req0.streamDone = true; root.slotSettled(req0) }
+    }
+    onExited: { req0.exitDone = true; root.slotSettled(req0) }
+  }
+  Process {
+    id: req1
+    property var cb: null
+    property string body: ""
+    property bool busy: false
+    property bool streamDone: false
+    property bool exitDone: false
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: { req1.body = String(text || ""); req1.streamDone = true; root.slotSettled(req1) }
+    }
+    onExited: { req1.exitDone = true; root.slotSettled(req1) }
+  }
+  Process {
+    id: req2
+    property var cb: null
+    property string body: ""
+    property bool busy: false
+    property bool streamDone: false
+    property bool exitDone: false
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: { req2.body = String(text || ""); req2.streamDone = true; root.slotSettled(req2) }
+    }
+    onExited: { req2.exitDone = true; root.slotSettled(req2) }
+  }
+  Process {
+    id: req3
+    property var cb: null
+    property string body: ""
+    property bool busy: false
+    property bool streamDone: false
+    property bool exitDone: false
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: { req3.body = String(text || ""); req3.streamDone = true; root.slotSettled(req3) }
+    }
+    onExited: { req3.exitDone = true; root.slotSettled(req3) }
+  }
+
+  // Artwork is the one documented exception to headers-only auth: QML's Image
+  // cannot send an X-Plex-Token header, so it has to ride the query string.
+  // These URLs must never be logged.
+  // Wave 2: replace with Api.imageUrl once Api.js lands.
+  function imageUrl(path, w, h) {
+    var p = String(path || "")
+    if (p === "" || !root.configured()) return ""
+    return root.server + "/photo/:/transcode?width=" + Math.max(1, Math.round(w))
+      + "&height=" + Math.max(1, Math.round(h))
+      + "&minSize=1&upscale=1&url=" + encodeURIComponent(p)
+      + "&X-Plex-Token=" + root.token
+  }
+
+  // Wave 2: Api.mapSections replaces this inline filter. Movies and TV only —
+  // music is the Spotify app's lane, so artist/photo sections never appear.
+  function loadLibraries() {
+    root.request("/library/sections", function(doc) {
+      var out = []
+      try {
+        var dirs = doc && doc.MediaContainer && doc.MediaContainer.Directory
+          ? doc.MediaContainer.Directory : []
+        for (var i = 0; i < dirs.length && out.length < 32; i++) {
+          var d = dirs[i]
+          if (!d || (d.type !== "movie" && d.type !== "show")) continue
+          out.push({ id: String(d.key), title: String(d.title || ""), type: String(d.type) })
+        }
+      } catch (e) { /* leave the sidebar at Home + Settings */ }
+      root.libraries = out
+    })
+  }
+
+  function libraryTitle(id) {
+    for (var i = 0; i < root.libraries.length; i++)
+      if (root.libraries[i].id === String(id)) return String(root.libraries[i].title)
+    return "Library"
+  }
+
+  function libraryType(id) {
+    for (var i = 0; i < root.libraries.length; i++)
+      if (root.libraries[i].id === String(id)) return String(root.libraries[i].type)
+    return ""
   }
 
   Timer {
@@ -325,12 +596,28 @@ Item {
   }
 
   function search(q) {
-    if (q.trim() === "") { loadOnDeck(); return }
-    apiFetch.op = "search"
-    apiFetch.command = ["curl", "-s", "--fail", "--max-time", "10", "--max-filesize", "4194304"]
-      .concat(root.plexHeaders)
-      .concat([root.server + "/search?query=" + encodeURIComponent(q.trim())])
-    apiFetch.running = true
+    var query = String(q === undefined || q === null ? "" : q).trim()
+    if (query === "") {
+      root.searchResults = []
+      if (root.currentPage === "search") root.goBack()
+      return
+    }
+    root.navigate("search", { query: query })
+    root.request("/search?query=" + encodeURIComponent(query), function(doc) {
+      // Wave 2: Api.mapSearch replaces this; Model.mapItems is the frozen,
+      // unit-tested mapper the old list mode used and it still fits.
+      var out = []
+      try { out = Model.mapItems(doc ? doc.MediaContainer : null, "search") } catch (e) { out = [] }
+      root.searchResults = out
+      root.setStatus(out.length === 0 ? "No results for “" + query + "”" : "", false)
+    })
+  }
+
+  function refresh() {
+    if (!root.configured()) return
+    root.loadLibraries()
+    var item = pageLoader.item
+    if (item && typeof item.reload === "function") item.reload()
   }
 
   // Resolve the media part, then hand the URL to the backend. Direct play
@@ -364,22 +651,10 @@ Item {
     }
   }
 
-  function applyList(jsonText, op) {
-    try {
-      var out = Model.mapItems(JSON.parse(jsonText).MediaContainer, op)
-      root.items = out
-      root.mode = "list"
-      root.statusText = op === "search" && out.length === 0 ? "No results" : ""
-      root.focusPrimary()
-    } catch (e) {
-      fail("Plex request failed — check server URL and token")
-    }
-  }
-
   function fail(msg) {
     pollTimer.stop()
     root.mode = "error"
-    root.statusText = msg
+    root.setStatus(msg, true)
   }
 
   function playSource(url, title) {
@@ -388,8 +663,9 @@ Item {
     if (root.backend === "mpv") startMpv(url)
     else startInternal(url)
     pollTimer.restart()
-    // The search field hides with the list; transport keys need a home.
+    // The search field hides with the browse pane; transport keys need a home.
     keyHost.forceActiveFocus()
+    root.setPanelCursor("playing", "play")
   }
 
   // ---- mpv backend ----
@@ -531,32 +807,13 @@ Item {
       player.position = Math.max(0, Math.min(player.duration, fraction * player.duration))
     }
   }
-  // ---- keyboard navigation ----
-  // Up/Down move a selection through the results, Enter plays it, Space
-  // toggles pause, Left/Right seek, Escape hides. The search field shares
-  // the arrows and Enter with the list, launcher-style.
-  function moveSel(delta) {
-    var n = resultList.count
-    if (n === 0 || root.mode !== "list") return
-    var i = resultList.currentIndex
-    if (i < 0) i = delta > 0 ? 0 : n - 1
-    else i = ((i + delta) % n + n) % n
-    resultList.currentIndex = i
-    resultList.positionViewAtIndex(i, ListView.Contain)
-  }
-
-  function playSel() {
-    if (root.mode !== "list") return
-    if (resultList.currentIndex >= 0 && resultList.currentIndex < root.items.length)
-      root.playItem(root.items[resultList.currentIndex].ratingKey,
-                    root.items[resultList.currentIndex].title)
-  }
 
   function finishPlayback() {
     sendTimeline("stopped")
     pollTimer.stop()
     root.mode = "list"
     root.currentTitle = ""
+    root.setPanelCursor("page", "")
   }
 
   function stop() {
@@ -577,7 +834,7 @@ Item {
     if (typeof videoOut !== "undefined" && videoOut !== null) player.videoOutput = videoOut
     player.source = url
     root.mode = "playing"
-    root.statusText = ""
+    root.setStatus("", false)
     player.play()
   }
 
@@ -641,7 +898,7 @@ Item {
       return
     }
     root.triedTranscode = true
-    root.statusText = "Direct play failed — transcoding…"
+    root.setStatus("Direct play failed — transcoding…", false)
     var url = transcodeUrl()
     root.playGen++
     if (root.backend === "mpv") startMpv(url)
@@ -682,17 +939,6 @@ Item {
     running: false
   }
 
-  // ---- API response processes (command set before running) ----
-  Process {
-    id: apiFetch
-    property string op: "onDeck"
-    running: false
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.applyList(String(text || ""), apiFetch.op)
-    }
-  }
-
   Process {
     id: resolve
     property string ratingKey: ""
@@ -709,8 +955,240 @@ Item {
   readonly property bool mpvMode: root.backend === "mpv" && root.mode === "playing"
   readonly property real dispTime: mpvMode ? root.mpvTime : player.position / 1000
   readonly property real dispDuration: mpvMode ? root.mpvDuration : player.duration / 1000
+  readonly property bool isPaused: root.mpvMode
+    ? root.mpvPaused : player.playbackState !== MediaPlayer.PlayingState
 
+  // ---- page routing ----
+  function pageComponent() {
+    if (root.mode === "setup" || root.currentPage === "settings") return settingsPageComponent
+    if (root.currentPage === "search") return searchPageComponent
+    if (root.currentPage === "library") return libraryPageComponent
+    if (root.currentPage === "detail") return detailPageComponent
+    return homePageComponent
+  }
 
+  function pageTitle() {
+    if (root.mode === "setup") return "Set up Plex Mini"
+    if (root.currentPage === "settings") return "Settings"
+    if (root.currentPage === "search") return "Search"
+    if (root.currentPage === "library") return root.libraryTitle(root.pageParams.sectionId)
+    if (root.currentPage === "detail") return String(root.pageParams.title || "Details")
+    return "Continue Watching"
+  }
+
+  function pageSubtitle() {
+    if (root.mode === "setup") return "Point this at your Plex server to get started"
+    if (root.currentPage === "settings") return "Server, token and playback backend"
+    if (root.currentPage === "search") {
+      var q = String(root.pageParams.query || "")
+      return q === "" ? "Movies and TV across your whole server" : "Results for “" + q + "”"
+    }
+    if (root.currentPage === "library")
+      return root.libraryType(root.pageParams.sectionId) === "show" ? "TV shows" : "Movies"
+    if (root.currentPage === "detail") return String(root.pageParams.subtitle || "")
+    return "Pick up where you left off"
+  }
+
+  Component { id: homePageComponent; HomePage { panel: root } }
+  Component { id: searchPageComponent; SearchPage { panel: root } }
+  Component { id: libraryPageComponent; LibraryPage { panel: root } }
+  Component { id: detailPageComponent; DetailPage { panel: root } }
+  Component { id: settingsPageComponent; SettingsPage { panel: root } }
+
+  // ---- sidebar model ----
+  // Actions are strings so the cursor can name one without an index:
+  // "home", "lib:<sectionId>", "settings".
+  readonly property var sidebarActions: {
+    var a = ["home"]
+    for (var i = 0; i < root.libraries.length; i++) a.push("lib:" + root.libraries[i].id)
+    a.push("settings")
+    return a
+  }
+
+  function activateSidebar(action) {
+    var a = String(action || "")
+    if (a === "home") { root.navigate("home", ({})); return }
+    if (a === "settings") { root.navigate("settings", ({})); return }
+    if (a.indexOf("lib:") === 0) {
+      var id = a.substring(4)
+      root.navigate("library", { sectionId: id })
+    }
+  }
+
+  // ---- keyboard ----
+  // The root FocusScope is the fallback handler, not the first one: Qt sends
+  // a key to the focused item and only bubbles it up here if that item did
+  // not accept it. That is exactly the gate the design asks for — a focused
+  // text field swallows letters, "/" and Left/Right on its own, so h/j/k/l
+  // and the single-letter shortcuts below cannot fire while you are typing,
+  // while Up/Down/Tab/Esc (which a single-line field ignores) still reach us.
+  property bool escapeCloseArmed: false
+
+  Timer {
+    id: escapeCloseTimer
+    interval: 1500
+    repeat: false
+    onTriggered: root.escapeCloseArmed = false
+  }
+
+  function armEscapeClose() {
+    root.escapeCloseArmed = true
+    escapeCloseTimer.restart()
+  }
+
+  function disarmEscapeClose() {
+    escapeCloseTimer.stop()
+    root.escapeCloseArmed = false
+  }
+
+  function escapePressed() {
+    if (searchInput.activeFocus && searchInput.text !== "") {
+      searchInput.text = ""
+      root.disarmEscapeClose()
+      return
+    }
+    if (searchInput.activeFocus) {
+      keyHost.forceActiveFocus()
+      root.setPanelCursor("page", "")
+      return
+    }
+    if (root.mode !== "playing" && root.navStack.length > 0) {
+      root.disarmEscapeClose()
+      root.goBack()
+      return
+    }
+    if (root.escapeCloseArmed) {
+      root.disarmEscapeClose()
+      root.close()
+      return
+    }
+    root.armEscapeClose()
+  }
+
+  function focusSearch() {
+    if (!searchInput.visible) return
+    searchInput.selectAll()
+    searchInput.forceActiveFocus()
+    root.setPanelCursor("search", "input")
+  }
+
+  function cycleRegion(dir) {
+    var order = ["search", "page", "sidebar"]
+    var at = order.indexOf(root.cursorRegion)
+    if (at < 0) at = 0
+    at = ((at + dir) % order.length + order.length) % order.length
+    // Skip the search box when it is not on screen (setup, playing).
+    if (order[at] === "search" && !searchInput.visible)
+      at = ((at + dir) % order.length + order.length) % order.length
+    root.enterRegion(order[at])
+  }
+
+  function enterRegion(region) {
+    if (region === "search") { root.focusSearch(); return }
+    keyHost.forceActiveFocus()
+    if (region === "sidebar") {
+      var actions = root.sidebarActions
+      var action = actions.indexOf(root.cursorAction) >= 0 ? root.cursorAction : actions[0]
+      root.setPanelCursor("sidebar", action)
+      return
+    }
+    root.setPanelCursor("page", "")
+  }
+
+  function moveCursor(dx, dy) {
+    if (root.cursorRegion === "sidebar") {
+      if (dx > 0) { root.enterRegion("page"); return }
+      if (dy === 0) return
+      var actions = root.sidebarActions
+      var at = actions.indexOf(root.cursorAction)
+      if (at < 0) at = 0
+      else at = ((at + dy) % actions.length + actions.length) % actions.length
+      root.setPanelCursor("sidebar", actions[at])
+      return
+    }
+    if (root.cursorRegion === "search") {
+      if (dy > 0) root.enterRegion("page")
+      return
+    }
+    // "page" — the page owns its own geometry, so it decides what a step means.
+    var item = pageLoader.item
+    if (item && typeof item.moveCursor === "function") item.moveCursor(dx, dy)
+  }
+
+  function activateCursor() {
+    if (root.cursorRegion === "sidebar") { root.activateSidebar(root.cursorAction); return }
+    if (root.cursorRegion === "search") { root.search(searchInput.text); return }
+    var item = pageLoader.item
+    if (item && typeof item.activateCursor === "function") item.activateCursor()
+  }
+
+  function pageStep(dir) {
+    var item = pageLoader.item
+    if (!item) return
+    if (dir < 0 && typeof item.pageUp === "function") item.pageUp()
+    else if (dir > 0 && typeof item.pageDown === "function") item.pageDown()
+  }
+
+  // Enter from the search field: drill into whatever the page has selected if
+  // anything is, otherwise treat Enter as "run this search now".
+  function searchAccepted() {
+    if (root.cursorRegion === "page") {
+      var item = pageLoader.item
+      if (item && typeof item.activateCursor === "function") { item.activateCursor(); return }
+    }
+    root.search(searchInput.text)
+  }
+
+  function handlePlayingKey(event, ctrl, shift, alt) {
+    var key = event.key
+    if (key === Qt.Key_Space) { root.togglePause(); return true }
+    if (key === Qt.Key_Return || key === Qt.Key_Enter) { root.togglePause(); return true }
+    if (!ctrl && !alt && (key === Qt.Key_Left || key === Qt.Key_Right)) {
+      root.seekRel((key === Qt.Key_Left ? -1 : 1) * (shift ? 30 : 10))
+      return true
+    }
+    if (!ctrl && !alt && (key === Qt.Key_Up || key === Qt.Key_Down)) {
+      if (!root.mpvMode) audio.volume = Math.max(0, Math.min(1, audio.volume + (key === Qt.Key_Up ? 0.05 : -0.05)))
+      return true
+    }
+    if (!ctrl && !alt && key === Qt.Key_M) {
+      if (!root.mpvMode) audio.muted = !audio.muted
+      return true
+    }
+    return false
+  }
+
+  function handleKey(event) {
+    var key = event.key
+    var ctrl = (event.modifiers & Qt.ControlModifier) !== 0
+    var shift = (event.modifiers & Qt.ShiftModifier) !== 0
+    var alt = (event.modifiers & Qt.AltModifier) !== 0
+    var text = String(event.text || "").toLowerCase()
+
+    if (key === Qt.Key_Escape) { root.escapePressed(); return true }
+
+    // Alt+Left is what every other app on this desktop uses for Back.
+    if (alt && key === Qt.Key_Left) { root.goBack(); return true }
+
+    if (root.mode === "playing") return root.handlePlayingKey(event, ctrl, shift, alt)
+
+    if (key === Qt.Key_Tab || key === Qt.Key_Backtab) {
+      root.cycleRegion(shift || key === Qt.Key_Backtab ? -1 : 1)
+      return true
+    }
+
+    if (!ctrl && !alt && (key === Qt.Key_Slash || text === "/")) { root.focusSearch(); return true }
+
+    var dy = (key === Qt.Key_Up || text === "k") ? -1 : ((key === Qt.Key_Down || text === "j") ? 1 : 0)
+    var dx = (key === Qt.Key_Left || text === "h") ? -1 : ((key === Qt.Key_Right || text === "l") ? 1 : 0)
+    if (!ctrl && !alt && (dx !== 0 || dy !== 0)) { root.moveCursor(dx, dy); return true }
+
+    if (key === Qt.Key_Return || key === Qt.Key_Enter) { root.activateCursor(); return true }
+    if (key === Qt.Key_PageUp) { root.pageStep(-1); return true }
+    if (key === Qt.Key_PageDown) { root.pageStep(1); return true }
+    if (!ctrl && !alt && text === "r") { root.refresh(); return true }
+    return false
+  }
 
   // ---- window ----
   PanelWindow {
@@ -738,11 +1216,6 @@ Item {
       : (root.mode === "playing" ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.Exclusive)
     exclusionMode: ExclusionMode.Ignore
 
-    // Keyboard host. PanelWindow cannot carry a Keys attachment (it is not
-    // an Item — the shell logs "Could not attach Keys"), so every shortcut
-    // lives here and this Item owns focus whenever the search field does not.
-    //   Space pause · Left/Right seek · Up/Down select · Enter play
-    //   PgUp/PgDn page the list · Esc hide · M mute (internal backend)
     onVisibleChanged: if (visible) root.focusPrimary()
 
       // resize grip — thin strip on the panel's left edge, inside bounds.
@@ -789,509 +1262,465 @@ Item {
     Item { id: winSlot; anchors.fill: parent }
   }
 
-  Item {
+  FocusScope {
     id: content
     parent: root.windowed ? winSlot : panelSlot
     anchors.fill: parent
+    focus: true
 
+    // Below this the sidebar drops to an icon rail; the floaty surface is
+    // always narrower than this, so it gets the rail for free.
+    readonly property bool compact: content.width < Style.space(760)
+
+    Keys.priority: Keys.BeforeItem
+    Keys.onPressed: function(event) { if (root.handleKey(event)) event.accepted = true }
+
+    // Focus parking spot for when no text field should hold the caret.
+    Item { id: keyHost; width: 0; height: 0 }
+
+    // ================= browse =================
     Item {
-      id: keyHost
-      width: 0; height: 0
-      focus: true
-
-      Keys.onSpacePressed: function(event) { event.accepted = true; root.togglePause() }
-      Keys.onLeftPressed: function(event) { event.accepted = true; root.seekRel(-30) }
-      Keys.onRightPressed: function(event) { event.accepted = true; root.seekRel(30) }
-      Keys.onUpPressed: function(event) { event.accepted = true; root.moveSel(-1) }
-      Keys.onDownPressed: function(event) { event.accepted = true; root.moveSel(1) }
-      // PageUp/PageDown/M have no attached-signal form; catch them here.
-      Keys.onPressed: function(event) {
-        if (event.key === Qt.Key_PageUp) { event.accepted = true; root.moveSel(-8) }
-        else if (event.key === Qt.Key_PageDown) { event.accepted = true; root.moveSel(8) }
-        else if (event.key === Qt.Key_M && !root.mpvMode) { event.accepted = true; audio.muted = !audio.muted }
-      }
-      Keys.onReturnPressed: function(event) { event.accepted = true; root.playSel() }
-      Keys.onEnterPressed: function(event) { event.accepted = true; root.playSel() }
-      Keys.onEscapePressed: function(event) { event.accepted = true; root.close() }
-    }
-
-    Column {
+      id: browse
       anchors.fill: parent
-      anchors.margins: 1
-      spacing: 0
+      anchors.margins: Style.space(14)
+      visible: root.mode !== "playing"
 
-      // header
-      Rectangle {
-        width: parent.width
-        height: 34
-        color: root.background
-
-        MouseArea {
-          id: headerDrag
-          // The compositor owns movement of the real window (Super+drag);
-          // header-dragging is a floaty-mode affordance only.
-          enabled: !root.windowed
-          anchors.fill: parent
-          cursorShape: root.windowed ? Qt.ArrowCursor : Qt.SizeAllCursor
-          property int sx: 0
-          property int sy: 0
-          onPressed: function(mouse) { sx = mouse.x; sy = mouse.y }
-          onPositionChanged: function(mouse) {
-            if (!pressed) return
-            // Accumulate against the CURRENT margins, not a press-time
-            // snapshot. mouse.x is in this item's coordinates, and the item
-            // moves under the cursor as the margins change — so each event
-            // already reports only the not-yet-applied remainder. Subtracting
-            // from a fixed snapshot re-counts the applied part and converges
-            // to dragging at half the pointer speed.
-            root.marginRight = root.marginRight - (mouse.x - sx)
-            root.marginBottom = root.marginBottom - (mouse.y - sy)
-            root.clampMargins()
-          }
-          onReleased: root.savePosition()
-        }
-
-        Text {
-          anchors.left: parent.left
-          anchors.leftMargin: 10
-          anchors.verticalCenter: parent.verticalCenter
-          width: parent.width - 100
-          elide: Text.ElideRight
-          textFormat: Text.PlainText
-          color: root.mode === "error" ? root.urgent : root.foreground
-          text: {
-            if (root.mode === "error") return root.statusText
-            if (root.mode === "playing") return root.currentTitle + (root.mpvMode && root.mpvPaused ? " (paused)" : "")
-            if (root.mode === "setup") return "Plex Mini — server setup"
-            return root.statusText !== "" ? root.statusText : "Continue Watching"
-          }
-          font.pixelSize: 13
-          font.family: Style.fontFamily
-        }
+      BorderSurface {
+        id: sidebar
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: content.compact
+          ? Style.space(54)
+          : Math.min(Style.space(214), Math.max(Style.space(176), browse.width * 0.225))
+        radius: Style.cornerRadius
+        color: Style.normalFillFor(root.foreground, root.accent)
+        borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
 
         Row {
+          id: brandRow
+          anchors.left: parent.left
           anchors.right: parent.right
-          anchors.rightMargin: 12
-          anchors.verticalCenter: parent.verticalCenter
-          spacing: 18
-
-          // surface toggle: real window <-> floaty corner panel
-          Text {
-            color: root.foreground
-            opacity: 0.7
-            // windowed: pin (F0403) sends it to the floaty corner panel;
-            // floaty: dock-window (F0B26) promotes it to a real window.
-            text: root.windowed ? "\u{f0403}" : "\u{f0b26}"
-            font.pixelSize: 15
-            font.family: Style.fontFamily
-            MouseArea {
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: root.toggleSurface()
-            }
-          }
+          anchors.top: parent.top
+          anchors.margins: Style.space(11)
+          height: Style.space(42)
+          spacing: Style.space(9)
 
           Text {
-            visible: root.mode === "playing" || root.mode === "list"
-            color: root.foreground
-            opacity: root.mode === "playing" ? 1 : 0.4
-            text: (root.mpvMode ? root.mpvPaused : player.playbackState === MediaPlayer.PausedState) ? "󰐊" : "󰏤"
-            font.pixelSize: 15
-            font.family: Style.fontFamily
-            MouseArea {
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: root.togglePause()
-            }
+            anchors.verticalCenter: parent.verticalCenter
+            text: "󰚺"
+            color: root.accent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.iconLarge
           }
-
-          Text {
-            color: root.foreground
-            text: "󰅖"
-            font.pixelSize: 16
-            font.family: Style.fontFamily
-            MouseArea {
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              onClicked: root.close()
-            }
-          }
-        }
-      }
-
-      Rectangle { width: parent.width; height: 1; color: root.accent; opacity: 0.35 }
-
-
-      // setup form
-      Column {
-        width: parent.width
-        height: root.mode === "setup" ? 200 : 0
-        visible: height > 0
-        spacing: 8
-        topPadding: 12
-
-        Repeater {
-          model: [
-            { field: "server", placeholder: "Server URL e.g. http://192.168.1.50:32400" },
-            { field: "token", placeholder: "X-Plex-Token (app.plex.tv URL or plex.tv/api/devices)" }
-          ]
-          delegate: Rectangle {
-            required property var modelData
-            width: parent.width - 20
-            x: 10
-            height: 32
-            radius: Style.cornerRadius
-            color: root.background
-            border.color: input.activeFocus ? root.accent : root.foreground
-            border.width: 1
-            opacity: 0.9
-
-            TextInput {
-              id: input
-              anchors.fill: parent
-              anchors.margins: 8
-              color: root.foreground
-              selectionColor: root.accent
-              echoMode: modelData.field === "token" ? TextInput.Password : TextInput.Normal
-              font.pixelSize: 12
-              font.family: Style.fontFamily
-              clip: true
-              verticalAlignment: TextInput.AlignVCenter
-              // One-way seed only: writing back through onTextChanged caused
-              // a binding loop that corrupted typed URLs mid-keystroke.
-              text: modelData.field === "server" ? root.server : root.token
-              onTextEdited: {
-                if (modelData.field === "server") root.server = text.trim()
-                else root.token = text.trim()
-              }
-              onAccepted: {
-                if (modelData.field === "server") root.server = text.trim().replace(/\/+$/, "")
-                if (root.saveConfig()) root.loadOnDeck()
-              }
-
-              Text {
-                visible: input.text === "" && !input.activeFocus
-                anchors.fill: parent
-                anchors.margins: 8
-                verticalAlignment: Text.AlignVCenter
-                color: root.foreground
-                opacity: 0.6
-                font.pixelSize: 12
-                font.family: Style.fontFamily
-                text: modelData.placeholder
-              }
-            }
-          }
-        }
-
-        Text {
-          x: 12
-          color: root.statusText !== "" ? root.urgent : root.foreground
-          opacity: root.statusText !== "" ? 1 : 0.7
-          font.pixelSize: 11
-          font.family: Style.fontFamily
-          text: root.statusText !== ""
-            ? root.statusText
-            : "Enter saves · stored chmod 600 in ~/.config/plexmini · backend: " + root.backend
-        }
-
-        Rectangle {
-          width: 90
-          height: 28
-          x: 10
-          radius: Style.cornerRadius
-          color: mouseSave.containsPress ? root.accent : Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.2)
-
-          Text {
-            anchors.centerIn: parent
-            color: root.foreground
-            font.pixelSize: 12
-            font.family: Style.fontFamily
-            text: "Connect"
-          }
-          MouseArea {
-            id: mouseSave
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: {
-              if (root.saveConfig()) { root.loadOnDeck(); keyHost.forceActiveFocus() }
-            }
-          }
-        }
-      }
-
-      // search bar (list mode)
-      Rectangle {
-        width: parent.width - 24
-        x: 12
-        height: root.mode === "list" || root.mode === "error" ? 30 : 0
-        visible: height > 0
-        radius: Style.cornerRadius
-        color: root.background
-        border.color: searchInput.activeFocus ? root.accent : root.foreground
-        border.width: 1
-        opacity: 0.9
-
-        TextInput {
-          id: searchInput
-          anchors.fill: parent
-          anchors.margins: 7
-          color: root.foreground
-          selectionColor: root.accent
-          font.pixelSize: 12
-          font.family: Style.fontFamily
-          clip: true
-          verticalAlignment: TextInput.AlignVCenter
-          onTextChanged: {
-            resultList.currentIndex = -1
-            searchDebounce.restart()
-          }
-          Keys.onEscapePressed: { if (text !== "") text = ""; else root.close() }
-          Keys.onUpPressed: function(event) { event.accepted = true; root.moveSel(-1) }
-          Keys.onDownPressed: function(event) { event.accepted = true; root.moveSel(1) }
-          // Keys handlers consume the key before TextInput's keyPressEvent,
-          // so onAccepted would never fire: play a selection if one exists,
-          // otherwise treat Enter as "run this search".
-          Keys.onReturnPressed: function(event) {
-            event.accepted = true
-            if (resultList.currentIndex >= 0 && resultList.currentIndex < root.items.length) root.playSel()
-            else if (text.trim() !== "") root.search(text)
-          }
-          Keys.onEnterPressed: function(event) {
-            event.accepted = true
-            if (resultList.currentIndex >= 0 && resultList.currentIndex < root.items.length) root.playSel()
-            else if (text.trim() !== "") root.search(text)
-          }
-          Keys.onTabPressed: function(event) { event.accepted = true; keyHost.forceActiveFocus() }
-
-          Text {
-            visible: searchInput.text === "" && !searchInput.activeFocus
-            anchors.fill: parent
-            anchors.margins: 7
-            verticalAlignment: Text.AlignVCenter
-            color: root.foreground
-            opacity: 0.6
-            font.pixelSize: 12
-            font.family: Style.fontFamily
-            text: "Search your library and press Enter…"
-          }
-        }
-      }
-      ListView {
-        id: resultList
-        width: parent.width
-        height: root.mode !== "playing"
-          ? Math.max(0, content.height - 34 - 1 - (searchInput.visible ? 30 : 0) - 14)
-          : 0
-        visible: height > 0
-        focus: true
-        clip: true
-        spacing: 2
-        model: root.items
-        currentIndex: -1
-        keyNavigationEnabled: false // window-level handlers own the keys
-        delegate: Rectangle {
-          id: resultRow
-          required property var modelData
-          required property int index
-          readonly property bool selected: ListView.isCurrentItem
-          width: ListView.view.width - 24
-          height: 44
-          x: 12
-          radius: Style.cornerRadius
-          color: rowMouse.containsPress ? root.tint(0.28)
-            : (resultRow.selected ? root.tint(0.16)
-              : (rowMouse.containsMouse ? root.tint(0.15) : "transparent"))
-          Behavior on color { ColorAnimation { duration: 100 } }
 
           Column {
+            visible: !content.compact
+            width: Math.max(Style.space(40), parent.width - Style.space(38))
             anchors.verticalCenter: parent.verticalCenter
-            anchors.left: parent.left
-            anchors.leftMargin: 10
-            anchors.right: parent.right
-            anchors.rightMargin: 10
-            spacing: 1
+            spacing: 0
+
             Text {
               width: parent.width
-              elide: Text.ElideRight
-              textFormat: Text.PlainText
+              text: "Plex Mini"
               color: root.foreground
-              font.pixelSize: 13
-              font.family: Style.fontFamily
-              text: modelData.title
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.subtitle
+              font.bold: true
+              elide: Text.ElideRight
             }
             Text {
               width: parent.width
+              text: root.configured() ? "Movies and TV" : "Not connected"
+              color: root.muted
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
               elide: Text.ElideRight
-              visible: modelData.sub !== ""
-              textFormat: Text.PlainText
-              color: root.foreground
-              opacity: 0.55
-              font.pixelSize: 11
-              font.family: Style.fontFamily
-              text: modelData.sub
             }
           }
-          MouseArea {
-            id: rowMouse
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.playItem(modelData.ratingKey, modelData.title)
+        }
+
+        Column {
+          id: navColumn
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: brandRow.bottom
+          anchors.margins: Style.space(8)
+          spacing: Style.space(2)
+
+          PanelSeparator { width: parent.width; foreground: root.foreground }
+
+          Button {
+            width: parent.width
+            text: content.compact ? "" : "Home"
+            iconText: "󰋜"
+            tooltipText: "Continue Watching"
+            foreground: root.foreground
+            leftAlign: !content.compact
+            focusable: false
+            selected: root.currentPage === "home" && root.mode !== "setup"
+            hasCursor: root.cursorOn("sidebar", "home")
+            onClicked: root.activateSidebar("home")
+            onHovered: function(on) { if (on) root.setPanelCursor("sidebar", "home") }
           }
+
+          Repeater {
+            model: root.libraries
+
+            Button {
+              required property var modelData
+              width: navColumn.width
+              text: content.compact ? "" : String(modelData.title)
+              iconText: modelData.type === "show" ? "󰦔" : "󰎁"
+              tooltipText: String(modelData.title)
+              foreground: root.foreground
+              leftAlign: !content.compact
+              focusable: false
+              selected: root.currentPage === "library"
+                && String(root.pageParams.sectionId) === String(modelData.id)
+              hasCursor: root.cursorOn("sidebar", "lib:" + modelData.id)
+              onClicked: root.activateSidebar("lib:" + modelData.id)
+              onHovered: function(on) { if (on) root.setPanelCursor("sidebar", "lib:" + modelData.id) }
+            }
+          }
+
+          PanelSeparator { width: parent.width; foreground: root.foreground }
+        }
+
+        Button {
+          id: settingsNavButton
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+          anchors.margins: Style.space(8)
+          text: content.compact ? "" : "Settings"
+          iconText: "󰒓"
+          tooltipText: "Server, token and playback backend"
+          foreground: root.foreground
+          leftAlign: !content.compact
+          focusable: false
+          selected: root.mode === "setup" || root.currentPage === "settings"
+          hasCursor: root.cursorOn("sidebar", "settings")
+          onClicked: root.activateSidebar("settings")
+          onHovered: function(on) { if (on) root.setPanelCursor("sidebar", "settings") }
         }
       }
 
-      // video surface — internal backend renders in-panel; mpv uses its own
-      // window, so this collapses to zero height in mpv mode.
       Item {
-        width: parent.width
-        height: root.mode === "playing" && root.backend === "internal"
-          ? (root.windowed ? Math.max(0, content.height - 34 - 1 - 56) : root.videoHeight)
-          : 0
+        id: pane
+        anchors.left: sidebar.right
+        anchors.leftMargin: Style.space(10)
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+
+        Row {
+          id: pageHeader
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: parent.top
+          height: Style.space(52)
+          spacing: Style.space(5)
+
+          Button {
+            id: backButton
+            visible: root.navStack.length > 0
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: "󰁍"
+            tooltipText: "Back · Alt+Left"
+            foreground: root.foreground
+            focusable: false
+            hasCursor: root.cursorOn("header", "back")
+            onClicked: root.goBack()
+            onHovered: function(on) { if (on) root.setPanelCursor("header", "back") }
+          }
+
+          Column {
+            width: Math.max(Style.space(80), parent.width
+              - (backButton.visible ? backButton.width + parent.spacing : 0)
+              - refreshButton.width - pipButton.width - closeButton.width
+              - parent.spacing * 3)
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(1)
+
+            Text {
+              width: parent.width
+              text: root.pageTitle()
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+            }
+            Text {
+              width: parent.width
+              text: root.pageSubtitle()
+              color: root.muted
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+            }
+          }
+
+          Button {
+            id: refreshButton
+            anchors.verticalCenter: parent.verticalCenter
+            visible: root.configured() && root.mode !== "setup"
+            iconText: "󰑐"
+            tooltipText: "Refresh · R"
+            foreground: root.foreground
+            focusable: false
+            hasCursor: root.cursorOn("header", "refresh")
+            onClicked: root.refresh()
+            onHovered: function(on) { if (on) root.setPanelCursor("header", "refresh") }
+          }
+
+          Button {
+            id: pipButton
+            anchors.verticalCenter: parent.verticalCenter
+            // Until the now-playing bar exists (wave 3) this is the only way
+            // back out of the floaty surface, so it stays in the header.
+            iconText: root.windowed ? "\u{f0403}" : "\u{f0b26}"
+            tooltipText: root.windowed ? "Send to corner panel" : "Back to a real window"
+            foreground: root.foreground
+            focusable: false
+            hasCursor: root.cursorOn("header", "pip")
+            onClicked: root.toggleSurface()
+            onHovered: function(on) { if (on) root.setPanelCursor("header", "pip") }
+          }
+
+          Button {
+            id: closeButton
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: "󰅖"
+            // The armed state has to be visible or the second Esc is a guess.
+            foreground: root.escapeCloseArmed ? root.urgent : root.foreground
+            bordered: root.escapeCloseArmed
+            tooltipText: root.escapeCloseArmed ? "Press Esc again to close" : "Close · Esc, Esc"
+            focusable: false
+            hasCursor: root.cursorOn("header", "close")
+            onClicked: root.close()
+            onHovered: function(on) { if (on) root.setPanelCursor("header", "close") }
+          }
+        }
+
+        BorderSurface {
+          id: statusBanner
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: pageHeader.bottom
+          anchors.topMargin: visible ? Style.space(6) : 0
+          visible: root.statusText !== ""
+          // Both the height and the margin collapse so an empty banner costs
+          // exactly zero and nothing below it shifts.
+          implicitHeight: visible ? bannerText.implicitHeight + Style.space(12) : 0
+          height: implicitHeight
+          radius: Style.cornerRadius
+          color: root.statusUrgent
+            ? Style.selectedFillFor(root.foreground, root.urgent)
+            : Style.normalFillFor(root.foreground, root.accent)
+          borderSpec: Border.controlSpec("normal", root.foreground,
+            root.statusUrgent ? root.urgent : root.accent)
+
+          Text {
+            id: bannerText
+            anchors.fill: parent
+            anchors.margins: Style.space(6)
+            text: root.statusText
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+          }
+        }
+
+        TextField {
+          id: searchInput
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: statusBanner.visible ? statusBanner.bottom : pageHeader.bottom
+          anchors.topMargin: visible ? Style.space(8) : 0
+          height: visible ? Style.space(38) : 0
+          visible: root.configured() && root.mode !== "setup"
+          foreground: root.foreground
+          accent: root.accent
+          placeholderText: "Search movies and TV · /"
+          hasCursor: root.cursorOn("search", "input")
+          onTextEdited: {
+            searchDebounce.restart()
+            root.setPanelCursor("search", "input")
+          }
+          onAccepted: root.searchAccepted()
+          onHoveredChanged: if (hovered) root.setPanelCursor("search", "input")
+        }
+
+        Loader {
+          id: pageLoader
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: searchInput.visible
+            ? searchInput.bottom
+            : (statusBanner.visible ? statusBanner.bottom : pageHeader.bottom)
+          anchors.topMargin: Style.space(8)
+          anchors.bottom: parent.bottom
+          // Re-evaluates because pageComponent() reads mode/currentPage.
+          sourceComponent: root.pageComponent()
+        }
+      }
+    }
+
+    // ================= playing (wave-1 parity; theater is wave 3) =================
+    Item {
+      id: playingView
+      anchors.fill: parent
+      anchors.margins: Style.space(14)
+      visible: root.mode === "playing"
+
+      BorderSurface {
+        id: videoWell
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: transportRow.top
+        anchors.bottomMargin: Style.space(10)
+        radius: Style.cornerRadius
+        color: Style.normalFillFor(root.foreground, root.accent)
+        borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
 
         VideoOutput {
           id: videoOut
           anchors.fill: parent
+          anchors.margins: Style.space(2)
+          visible: root.backend !== "mpv"
           fillMode: VideoOutput.PreserveAspectFit
         }
-      }
-      // mpv status plate (mpv renders in its own window)
-      Item {
-        width: parent.width
-        height: root.mode === "playing" && root.backend === "mpv" ? root.videoHeight * 0.45 : 0
+
+        // mpv draws into its own window, so in that mode this well is a plate.
         Text {
           anchors.centerIn: parent
-          color: root.foreground
-          opacity: 0.5
-          font.pixelSize: 12
-          font.family: Style.fontFamily
+          visible: root.backend === "mpv"
+          color: root.muted
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          textFormat: Text.PlainText
           text: root.triedTranscode ? "Playing via server transcode" : "Playing in mpv (hardware decode)"
         }
       }
 
-      // controls (playing)
       Item {
-        width: parent.width
-        height: root.mode === "playing" ? 56 : 0
-        visible: height > 0
+        id: transportRow
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        height: Style.space(72)
 
-        Rectangle {
-          id: seekBar
+        BorderSurface {
+          id: seekTrack
           anchors.left: parent.left
           anchors.right: parent.right
           anchors.top: parent.top
-          anchors.leftMargin: 14
-          anchors.rightMargin: 14
-          height: 7
-          radius: 3
-          color: root.foreground
-          opacity: 0.25
+          height: Style.space(7)
+          radius: Style.cornerRadius
+          color: Style.normalFillFor(root.foreground, root.accent)
+          borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
 
           Rectangle {
-            width: root.dispDuration > 0 ? parent.width * (root.dispTime / root.dispDuration) : 0
             height: parent.height
-            radius: 3
+            radius: parent.radius
             color: root.accent
-
-            Behavior on width { NumberAnimation { duration: 250; easing.type: Easing.OutQuad } }
+            width: root.dispDuration > 0
+              ? Math.max(0, Math.min(parent.width, parent.width * (root.dispTime / root.dispDuration)))
+              : 0
+            // Sliders are the one place the design allows easing; the poll
+            // tick only lands once a second and a hard jump reads as a stall.
+            Behavior on width { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
           }
 
           MouseArea {
             anchors.fill: parent
-            anchors.margins: -4
+            anchors.margins: -Style.space(4)
             cursorShape: Qt.PointingHandCursor
-            onClicked: function(mouse) {
-              if (width > 0) root.seekAbs(mouse.x / width)
-            }
+            onClicked: function(mouse) { if (width > 0) root.seekAbs(mouse.x / width) }
           }
         }
 
-        Text {
+        Column {
           anchors.left: parent.left
-          anchors.leftMargin: 14
-          anchors.top: seekBar.bottom
-          anchors.topMargin: 9
-          color: root.foreground
-          font.pixelSize: 13
-          font.family: Style.fontFamily
-          text: Model.fmtDuration(root.dispTime) + " / " + Model.fmtDuration(root.dispDuration)
+          anchors.top: seekTrack.bottom
+          anchors.topMargin: Style.space(8)
+          spacing: Style.space(1)
+
+          Text {
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            textFormat: Text.PlainText
+            text: Model.fmtDuration(root.dispTime) + " / " + Model.fmtDuration(root.dispDuration)
+          }
+          Text {
+            color: root.muted
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            textFormat: Text.PlainText
+            elide: Text.ElideRight
+            text: root.currentTitle
+          }
         }
 
         Row {
           anchors.right: parent.right
-          anchors.rightMargin: 14
-          anchors.top: seekBar.bottom
-          anchors.topMargin: 4
-          spacing: 14
+          anchors.top: seekTrack.bottom
+          anchors.topMargin: Style.space(4)
+          spacing: Style.space(6)
 
-          Item {
-            width: 36
-            height: 30
-            Text {
-              anchors.centerIn: parent
-              color: root.foreground
-              font.pixelSize: 20
-              font.family: Style.fontFamily
-              text: "󰒮"
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.seekRel(-30)
-              }
-            }
+          TransportButton {
+            glyphText: "󰒮"
+            tooltipText: "Back 10s · ←"
+            foreground: root.foreground
+            hasCursor: root.cursorOn("playing", "rewind")
+            onClicked: root.seekRel(-10)
+            onHovered: function(on) { if (on) root.setPanelCursor("playing", "rewind") }
           }
 
-          Item {
-            width: 36
-            height: 30
-            Text {
-              anchors.centerIn: parent
-              color: root.foreground
-              font.pixelSize: 20
-              font.family: Style.fontFamily
-              text: "󰒭"
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.seekRel(30)
-              }
-            }
+          TransportButton {
+            glyphText: root.isPaused ? "󰐊" : "󰏤"
+            glyphSize: Style.font.iconLarge
+            tooltipText: root.isPaused ? "Play · Space" : "Pause · Space"
+            foreground: root.foreground
+            hasCursor: root.cursorOn("playing", "play")
+            onClicked: root.togglePause()
+            onHovered: function(on) { if (on) root.setPanelCursor("playing", "play") }
           }
 
-          Item {
-            width: 36
-            height: 30
-            Text {
-              anchors.centerIn: parent
-              color: audio.muted && !root.mpvMode ? root.urgent : root.foreground
-              font.pixelSize: 22
-              font.family: Style.fontFamily
-              text: audio.muted && !root.mpvMode ? "󰖁" : "󰕾"
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: if (!root.mpvMode) audio.muted = !audio.muted
-              }
-            }
+          TransportButton {
+            glyphText: "󰒭"
+            tooltipText: "Forward 10s · →"
+            foreground: root.foreground
+            hasCursor: root.cursorOn("playing", "forward")
+            onClicked: root.seekRel(10)
+            onHovered: function(on) { if (on) root.setPanelCursor("playing", "forward") }
           }
 
-          Item {
-            width: 36
-            height: 30
-            Text {
-              anchors.centerIn: parent
-              color: root.urgent
-              font.pixelSize: 22
-              font.family: Style.fontFamily
-              text: "󰓛"
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.stop()
-              }
-            }
+          TransportButton {
+            visible: !root.mpvMode
+            glyphText: audio.muted ? "󰖁" : "󰕾"
+            tooltipText: audio.muted ? "Unmute · M" : "Mute · M"
+            foreground: audio.muted ? root.urgent : root.foreground
+            hasCursor: root.cursorOn("playing", "mute")
+            onClicked: audio.muted = !audio.muted
+            onHovered: function(on) { if (on) root.setPanelCursor("playing", "mute") }
+          }
+
+          TransportButton {
+            glyphText: "󰓛"
+            tooltipText: "Stop"
+            foreground: root.urgent
+            hasCursor: root.cursorOn("playing", "stop")
+            onClicked: root.stop()
+            onHovered: function(on) { if (on) root.setPanelCursor("playing", "stop") }
           }
         }
       }

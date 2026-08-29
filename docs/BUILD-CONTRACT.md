@@ -162,6 +162,21 @@ imageUrl(server, token, path, w, h)          → /photo/:/transcode?width=&heigh
 ```
 Plus `tests/api.test.mjs` (node:test) against captured-and-sanitized fixtures.
 
+## Image-URL handoff (settled after wave-1 component build)
+
+`Api.js` mappers emit RAW Plex paths in `thumbPath`/`artPath` (pure functions, no
+token). Components (`MediaRow`/`PosterCard`) bind `Image.source` to
+`itemData.thumbPath` DIRECTLY and know nothing about auth — so every PAGE resolves
+paths at fetch time, choosing the display size, before items reach a component:
+
+```js
+items = Api.mapItems(json).map(function(it) {
+  return Object.assign({}, it, { thumbPath: panel.imageUrl(it.thumbPath, w, h) })
+})
+```
+
+Keep the raw `artPath` alongside for detail-page backdrops (resolve at its own size).
+
 ## Wave-1 root layout (Agent A) — DESIGN.md screen inventory, phase 1 scope
 
 FloatingWindow (chromeless — the 34px header row DIES) → content Item margins
