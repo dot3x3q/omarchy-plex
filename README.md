@@ -114,15 +114,17 @@ Add this to `~/.config/hypr/hyprland.lua` to opt the player out (the
 same idiom Omarchy's stock rules use for mpv-style PiP and qemu):
 
 ```lua
-o.window({ class = "^org\\.quickshell$", title = "Omarchy Plex$" }, {
+o.window({ class = "^org\\.quickshell$", title = ".*Omarchy Plex$" }, {
   tag = "-default-opacity",
   opacity = "1 1",
 })
 ```
 
 Match by title, not class alone: the window's class is `org.quickshell`,
-shared with the entire shell. During playback the title becomes
-"<media> — Omarchy Plex", so the rule matches on the suffix.
+shared with the entire shell. The leading `.*` is required — Hyprland
+regexes must match the whole string, and during playback the title
+becomes "<media> — Omarchy Plex", so a bare `Omarchy Plex$` silently
+stops matching the moment something plays.
 
 
 ## Keyboard reference
