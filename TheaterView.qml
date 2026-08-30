@@ -108,6 +108,13 @@ Item {
 
     HoverHandler { id: stripHover }
 
+    // Collapsing widths on this strip key off their CONDITION, never off
+    // `visible`: visibility is hierarchical, so while the strip is faded out
+    // every child reads visible === false and a `visible ? w : 0` binding
+    // silently reclaims its width for the scrubber. The track then snaps to
+    // the narrower layout the instant the strip fades back in, and the
+    // slider's 140ms knob Behavior glides the playhead left to catch up —
+    // a visible false "seek" on every reveal.
     Text {
       id: theaterTitle
       visible: strip.showTitle
@@ -116,7 +123,7 @@ Item {
       anchors.verticalCenter: parent.verticalCenter
       // Never more than a third of the strip: the seek slider is the control
       // that actually needs the width, and a long episode title would eat it.
-      width: visible ? Math.min(implicitWidth, Math.max(0, strip.width * 0.3)) : 0
+      width: strip.showTitle ? Math.min(implicitWidth, Math.max(0, strip.width * 0.3)) : 0
       color: view.foreground
       font.family: view.fontFamily
       font.pixelSize: Style.font.body
@@ -457,7 +464,8 @@ Item {
       TransportButton {
         id: audioTrackButton
         visible: view.panel.audioPickerAvailable
-        width: visible ? controlSize : 0
+        // Condition, not `visible` — see the note above theaterTitle.
+        width: view.panel.audioPickerAvailable ? controlSize : 0
         glyphText: "\u{f05c5}"
         tooltipText: "Audio track · A"
         foreground: view.foreground
@@ -473,7 +481,7 @@ Item {
       TransportButton {
         id: subtitleTrackButton
         visible: view.panel.subtitlePickerAvailable
-        width: visible ? controlSize : 0
+        width: view.panel.subtitlePickerAvailable ? controlSize : 0
         glyphText: "\u{f0a16}"
         tooltipText: "Subtitles · S"
         foreground: view.foreground
@@ -492,7 +500,7 @@ Item {
       TransportButton {
         id: qualityButton
         visible: view.panel.qualityPickerAvailable
-        width: visible ? controlSize : 0
+        width: view.panel.qualityPickerAvailable ? controlSize : 0
         // nf-md-quality_high — check any replacement against the resolved mono
         // Nerd Font; a missing glyph renders as a tofu box.
         glyphText: "\u{f07fd}"

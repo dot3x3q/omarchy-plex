@@ -3351,9 +3351,14 @@ Item {
           Button {
             id: pipScreenButton
             visible: Quickshell.screens.length > 1
-            width: visible ? implicitWidth : 0
+            // Condition, not `visible`: while the strip is faded out the
+            // whole chain reads visible === false, and a width keyed on it
+            // hands this button's pixels to the scrubber — whose knob then
+            // animates a false "seek" at every fade edge (same note as
+            // theaterTitle in TheaterView.qml).
+            width: Quickshell.screens.length > 1 ? implicitWidth : 0
             anchors.right: pipPop.left
-            anchors.rightMargin: visible ? Style.space(2) : 0
+            anchors.rightMargin: Quickshell.screens.length > 1 ? Style.space(2) : 0
             anchors.verticalCenter: parent.verticalCenter
             iconText: "\u{f037a}"
             tooltipText: "Move to the next monitor · N"
@@ -3371,9 +3376,9 @@ Item {
           TransportButton {
             id: pipMute
             visible: !root.mpvMode
-            width: visible ? controlSize : 0
+            width: root.mpvMode ? 0 : controlSize
             anchors.right: pipScreenButton.left
-            anchors.rightMargin: visible ? Style.space(2) : 0
+            anchors.rightMargin: root.mpvMode ? 0 : Style.space(2)
             anchors.verticalCenter: parent.verticalCenter
             glyphText: root.audioMuted ? "󰖁" : "󰕾"
             tooltipText: (root.audioMuted ? "Unmute · M" : "Mute · M")
