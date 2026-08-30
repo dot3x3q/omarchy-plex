@@ -123,7 +123,13 @@ Item {
       anchors.verticalCenter: parent.verticalCenter
       // Never more than a third of the strip: the seek slider is the control
       // that actually needs the width, and a long episode title would eat it.
-      width: strip.showTitle ? Math.min(implicitWidth, Math.max(0, strip.width * 0.3)) : 0
+      // Measured via TextMetrics, not implicitWidth: with elide active,
+      // assigning a width that reads implicitWidth re-triggers the text
+      // layout and the binding loops (the shell log flags it on every
+      // theater entry).
+      width: strip.showTitle
+        ? Math.min(Math.ceil(titleMetrics.advanceWidth), Math.max(0, strip.width * 0.3))
+        : 0
       color: view.foreground
       font.family: view.fontFamily
       font.pixelSize: Style.font.body
@@ -131,6 +137,12 @@ Item {
       textFormat: Text.PlainText
       elide: Text.ElideRight
       text: view.panel.currentTitle
+    }
+
+    TextMetrics {
+      id: titleMetrics
+      font: theaterTitle.font
+      text: theaterTitle.text
     }
 
     // ---------- deck cluster, left of the timeline ----------
@@ -246,6 +258,9 @@ Item {
         // handling at all, so wrapping the button in one eats the click and
         // still does not deliver the scroll.
         WheelHandler {
+          // Explicit, as in the Spotify plugin: the default acceptedDevices
+          // is Mouse alone, which drops touchpad scrolling entirely.
+          acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
           onWheel: function(event) {
             view.panel.holdVolumePopup()
             view.panel.nudgeVolumeWheel(event.angleDelta.y > 0)

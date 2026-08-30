@@ -3132,6 +3132,18 @@ Item {
             pipKeyHost.forceActiveFocus()
             root.pokeTheaterControls()
           }
+
+          // Scroll anywhere over the picture is volume. This is the PiP's
+          // whole pointer answer to the theater's popup slider, which cannot
+          // live on this surface: the input mask stops at the card (see
+          // `mask` above), so a popup overhanging it would be visible but
+          // mouse-dead. The readout chip below the strip says the number.
+          // On the drag MouseArea rather than a WheelHandler on the card —
+          // the same proven wheel path as the theater's video surface.
+          onWheel: function(wheel) {
+            root.pokeTheaterControls()
+            root.nudgeVolumeWheel(wheel.angleDelta.y > 0)
+          }
           // A high-rate mouse delivers position events far faster than the
           // display swaps frames, and every margin write re-lays-out the card
           // AND recomputes the input-region mask — a compositor round trip.
@@ -3263,18 +3275,6 @@ Item {
           onReleased: root.saveWidth()
         }
 
-        // Scroll anywhere over the picture is volume. This is the PiP's whole
-        // pointer answer to the theater's popup slider, which cannot live on
-        // this surface: the input mask stops at the card (see `mask` above),
-        // so a popup overhanging it would be visible but mouse-dead. The chip
-        // below the handler does the readout instead.
-        WheelHandler {
-          onWheel: function(event) {
-            root.pokeTheaterControls()
-            root.nudgeVolumeWheel(event.angleDelta.y > 0)
-          }
-        }
-
         // ---------- the whisper of controls ----------
         // Everything the PiP offers: the deck cluster, scrub, volume, and the
         // way back to the real window — the theater's deck-left-of-timeline
@@ -3389,6 +3389,9 @@ Item {
             onHovered: function(on) { if (on) root.setPanelCursor("pip", "mute") }
 
             WheelHandler {
+              // Explicit, as in the Spotify plugin: the default acceptedDevices
+              // is Mouse alone, which drops touchpad scrolling entirely.
+              acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
               onWheel: function(event) { root.nudgeVolumeWheel(event.angleDelta.y > 0) }
             }
           }
@@ -4088,6 +4091,7 @@ Item {
             onHovered: function(on) { if (on) root.setPanelCursor("minibar", "mute") }
 
             WheelHandler {
+              acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
               onWheel: function(event) { root.nudgeVolumeWheel(event.angleDelta.y > 0) }
             }
           }
