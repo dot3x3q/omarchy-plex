@@ -106,6 +106,25 @@ your clicks everywhere except the card itself, and gets out of your way.
 When you drag it toward another monitor it pins at the border and paints a
 ghost outline where it'll drop — release and it's there, still playing.
 
+### Keeping the window fully opaque
+
+Omarchy's default window rules make every unfocused window slightly
+translucent. For most apps that looks great; for a movie it doesn't.
+Add this to `~/.config/hypr/hyprland.lua` to opt the player out (the
+same idiom Omarchy's stock rules use for mpv-style PiP and qemu):
+
+```lua
+o.window({ class = "^org\\.quickshell$", title = "Omarchy Plex$" }, {
+  tag = "-default-opacity",
+  opacity = "1 1",
+})
+```
+
+Match by title, not class alone: the window's class is `org.quickshell`,
+shared with the entire shell. During playback the title becomes
+"<media> — Omarchy Plex", so the rule matches on the suffix.
+
+
 ## Keyboard reference
 
 One cursor, shared by mouse and keyboard. Everything below has a mouse
