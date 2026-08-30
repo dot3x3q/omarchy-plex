@@ -3,6 +3,8 @@ MIT License
 Copyright (c) 2026 3x3q
 Copyright (c) 2026 Joshua Warren (original omarchy-plexmini, which this
 project grew out of)
+Copyright (c) 2026 Omarchy Spotify contributors (quickshell.spotify, from
+which TransportButton.qml and FastScrollHandler.qml are adapted)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
