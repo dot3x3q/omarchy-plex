@@ -65,6 +65,7 @@ Item {
       anchors.centerIn: parent
       visible: posterArt.status !== Image.Ready
       text: root.itemData && root.itemData.type === "show" ? "󰦔" : "󰎁"
+      textFormat: Text.PlainText
       color: Color.muted
       font.family: Style.font.family
       font.pixelSize: Style.font.iconLarge
@@ -91,6 +92,9 @@ Item {
     Text {
       width: parent.width
       text: root.itemData ? String(root.itemData.title || "Untitled") : "Untitled"
+      // Server-controlled strings: AutoText would promote HTML-looking
+      // titles to rich text inside the shared shell process.
+      textFormat: Text.PlainText
       color: Color.foreground
       font.family: Style.font.family
       font.pixelSize: Style.font.body
@@ -100,6 +104,7 @@ Item {
     Text {
       width: parent.width
       text: root.itemData ? String(root.itemData.caption || "") : ""
+      textFormat: Text.PlainText
       color: Color.muted
       font.family: Style.font.family
       font.pixelSize: Style.font.caption

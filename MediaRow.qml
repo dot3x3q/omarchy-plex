@@ -81,6 +81,7 @@ BorderSurface {
           if (type === "movie") return "󰎁"
           return "󰐊"
         }
+        textFormat: Text.PlainText
         color: Color.muted
         font.family: Style.font.family
         font.pixelSize: Style.font.iconLarge
@@ -108,6 +109,9 @@ BorderSurface {
       Text {
         width: parent.width
         text: root.itemData ? String(root.itemData.title || "Untitled") : "Untitled"
+        // Server-controlled strings: AutoText would promote HTML-looking
+        // titles to rich text inside the shared shell process.
+        textFormat: Text.PlainText
         color: Color.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.body
@@ -118,6 +122,7 @@ BorderSurface {
       Text {
         width: parent.width
         text: root.itemData ? String(root.itemData.sub || "") : ""
+        textFormat: Text.PlainText
         color: Color.muted
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
@@ -136,6 +141,7 @@ BorderSurface {
         anchors.verticalCenter: parent.verticalCenter
         visible: text !== ""
         text: root.itemData ? String(root.itemData.durationText || "") : ""
+        textFormat: Text.PlainText
         color: Color.muted
         font.family: Style.font.family
         font.pixelSize: Style.font.caption

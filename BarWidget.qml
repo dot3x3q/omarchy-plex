@@ -101,6 +101,9 @@ BarWidget {
           id: label
           anchors.verticalCenter: parent.verticalCenter
           text: root.mediaTitle
+          // Server-controlled string: AutoText would promote HTML-looking
+          // titles to rich text inside the shared shell process.
+          textFormat: Text.PlainText
           color: root.foreground
           font.family: root.widgetFontFamily
           font.pixelSize: Style.font.body
