@@ -132,7 +132,7 @@ Item {
       return false
     }
     if (!Model.validToken(root.token)) {
-      root.setStatus("Token looks wrong — Plex tokens are letters/digits, 20ish chars", true)
+      root.setStatus("Token looks wrong — paste only the X-Plex-Token value", true)
       return false
     }
     root.setStatus("", false)
