@@ -12,9 +12,10 @@ import "Model.js" as Model
 // stop touching the machine.
 //
 // Overlay strip anatomy follows the Spotify plugin's footer (MIT), squeezed
-// into ONE row: title, position, seek, duration, transport, volume — chrome
-// over a film is worth minimizing. Cursor region is "playing" for every
-// control on it.
+// into ONE row, deck order: title, transport (back · play · forward · stop),
+// position, seek, duration, then volume and the pickers. The same deck-left-
+// of-timeline order repeats on the PiP strip and the minibar — one layout to
+// learn, three surfaces. Cursor region is "playing" for every control on it.
 Item {
   id: view
 
@@ -57,6 +58,14 @@ Item {
       view.panel.beginWindowDrag()
     }
     onClicked: view.panel.pokeTheaterControls()
+    // Scroll anywhere over the picture is volume, the same gesture as on the
+    // PiP card. Deliberately no holdVolumePopup here: volumeAdjusting already
+    // flashes the readout for 1500ms per step, exactly as a keyboard nudge
+    // does, and a hold with no matching hover-out would pin the popup open.
+    onWheel: function(wheel) {
+      view.panel.pokeTheaterControls()
+      view.panel.nudgeVolumeWheel(wheel.angleDelta.y > 0)
+    }
   }
 
   // mpv renders into its own window, so in that backend the theater is a plate
@@ -117,24 +126,13 @@ Item {
       text: view.panel.currentTitle
     }
 
-    Text {
-      id: positionCaption
-      anchors.left: strip.showTitle ? theaterTitle.right : parent.left
-      anchors.leftMargin: Style.space(12)
-      anchors.verticalCenter: parent.verticalCenter
-      color: view.muted
-      font.family: view.fontFamily
-      font.pixelSize: Style.font.caption
-      textFormat: Text.PlainText
-      text: Model.fmtDuration(view.panel.seekDisplayTime)
-    }
-
-    // ---------- right-hand cluster, anchored right to left ----------
-
+    // ---------- deck cluster, left of the timeline ----------
+    // Back · play · forward · stop, reading in deck order before the scrubber
+    // the way every physical transport does.
     Row {
-      id: transportRow
-      anchors.right: parent.right
-      anchors.rightMargin: Style.space(10)
+      id: deckRow
+      anchors.left: theaterTitle.right
+      anchors.leftMargin: strip.showTitle ? Style.space(10) : 0
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(3)
 
@@ -174,6 +172,45 @@ Item {
           if (on) view.panel.setPanelCursor("playing", "forward")
         }
       }
+
+      // Stop ends the session and Forward gets clicked in bursts; the wider
+      // gap keeps a drifted triple-tap from landing on the one button in the
+      // cluster there is no undo for.
+      Item { width: Style.space(6); height: 1 }
+
+      TransportButton {
+        glyphText: "󰓛"
+        tooltipText: "Stop · X"
+        foreground: view.urgent
+        hasCursor: view.panel.cursorOn("playing", "stop")
+        onClicked: view.panel.stop()
+        onHovered: function(on) {
+          view.panel.pokeTheaterControls()
+          if (on) view.panel.setPanelCursor("playing", "stop")
+        }
+      }
+    }
+
+    Text {
+      id: positionCaption
+      anchors.left: deckRow.right
+      anchors.leftMargin: Style.space(12)
+      anchors.verticalCenter: parent.verticalCenter
+      color: view.muted
+      font.family: view.fontFamily
+      font.pixelSize: Style.font.caption
+      textFormat: Text.PlainText
+      text: Model.fmtDuration(view.panel.seekDisplayTime)
+    }
+
+    // ---------- right-hand cluster: volume and the pickers ----------
+
+    Row {
+      id: transportRow
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(10)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(3)
 
       // Volume lives in the internal player's AudioOutput; mpv owns its own.
       // This button is also the volume popup's anchor: click mutes, hover
@@ -469,18 +506,6 @@ Item {
         onHovered: function(on) {
           view.panel.pokeTheaterControls()
           if (on) view.panel.setPanelCursor("playing", "quality")
-        }
-      }
-
-      TransportButton {
-        glyphText: "󰓛"
-        tooltipText: "Stop"
-        foreground: view.urgent
-        hasCursor: view.panel.cursorOn("playing", "stop")
-        onClicked: view.panel.stop()
-        onHovered: function(on) {
-          view.panel.pokeTheaterControls()
-          if (on) view.panel.setPanelCursor("playing", "stop")
         }
       }
 

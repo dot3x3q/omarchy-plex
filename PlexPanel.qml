@@ -1435,9 +1435,11 @@ Item {
   // no cursor walk along the strip), so a key step brings the whole popup up
   // with the reading.
   //
-  // Theater only. The PiP strip has no mute button to hang it off — four
-  // controls is the entire budget on a 460px card — so there is nothing to
-  // anchor to on that surface.
+  // Theater only (volumePopupVisible requires `windowed`). The PiP strip has
+  // a mute button now, but the popup still cannot hang off it: the floaty's
+  // input mask stops at pipCard, so a popup overhanging the card would be
+  // visible but mouse-dead. That surface gets wheel-over-the-picture and a
+  // readout chip instead.
   property bool volumePopupHeld: false
 
   readonly property bool volumePopupVisible: root.inTheater && root.windowed
@@ -2734,13 +2736,15 @@ Item {
   // Minibar cursor actions, left to right as they sit on the bar. "seek" is a
   // drag target rather than a command, but it stays in the walk so Tab-then-l
   // reaches the slider the same way the pointer does.
-  readonly property var minibarActions: ["rewind", "play", "forward", "seek", "pip", "expand"]
+  readonly property var minibarActions: ["rewind", "play", "forward", "stop", "seek", "mute", "pip", "expand"]
 
   function activateMinibar(action) {
     var a = String(action || "")
     if (a === "rewind") { root.nudgeSeek(-10); return }
     if (a === "play") { root.togglePause(); return }
     if (a === "forward") { root.nudgeSeek(10); return }
+    if (a === "stop") { root.stop(); return }
+    if (a === "mute") { root.toggleMute(); return }
     if (a === "pip") { if (root.pipAvailable) root.toggleSurface(); return }
     if (a === "expand") { root.enterTheater(); return }
   }
@@ -2823,7 +2827,7 @@ Item {
       // j steps off the slider instead, down having nowhere else to go.
       if (root.cursorAction === "seek" && dx !== 0) { root.nudgeSeek(dx * 10); return }
       if (root.cursorAction === "seek" && dy > 0) {
-        root.setPanelCursor("minibar", "expand")
+        root.setPanelCursor("minibar", "mute")
         return
       }
       if (dy < 0) { root.enterRegion("page"); return }
@@ -3259,10 +3263,24 @@ Item {
           onReleased: root.saveWidth()
         }
 
+        // Scroll anywhere over the picture is volume. This is the PiP's whole
+        // pointer answer to the theater's popup slider, which cannot live on
+        // this surface: the input mask stops at the card (see `mask` above),
+        // so a popup overhanging it would be visible but mouse-dead. The chip
+        // below the handler does the readout instead.
+        WheelHandler {
+          onWheel: function(event) {
+            root.pokeTheaterControls()
+            root.nudgeVolumeWheel(event.angleDelta.y > 0)
+          }
+        }
+
         // ---------- the whisper of controls ----------
-        // Everything the PiP offers: scrub, play/pause, and the way back to the
-        // real window. Fades like the theater strip and on the same timer, so
-        // a key press wakes it even with the pointer parked elsewhere.
+        // Everything the PiP offers: the deck cluster, scrub, volume, and the
+        // way back to the real window — the theater's deck-left-of-timeline
+        // order, minus the pickers. Fades like the theater strip and on the
+        // same timer, so a key press wakes it even with the pointer parked
+        // elsewhere.
         BorderSurface {
           id: pipStrip
           anchors.left: parent.left
@@ -3278,18 +3296,40 @@ Item {
           visible: opacity > 0.01
           Behavior on opacity { NumberAnimation { duration: 120 } }
 
-          TransportButton {
-            id: pipPlay
+          Row {
+            id: pipDeck
             anchors.left: parent.left
             anchors.leftMargin: Style.space(4)
             anchors.verticalCenter: parent.verticalCenter
-            glyphText: root.isPaused ? "󰐊" : "󰏤"
-            glyphSize: Style.font.iconLarge
-            tooltipText: root.isPaused ? "Play · Space" : "Pause · Space"
-            foreground: root.foreground
-            hasCursor: root.cursorOn("pip", "play")
-            onClicked: root.togglePause()
-            onHovered: function(on) { if (on) root.setPanelCursor("pip", "play") }
+            spacing: Style.space(2)
+
+            TransportButton {
+              glyphText: "󰒮"
+              tooltipText: "Back 10s · ←"
+              foreground: root.foreground
+              hasCursor: root.cursorOn("pip", "rewind")
+              onClicked: root.nudgeSeek(-10)
+              onHovered: function(on) { if (on) root.setPanelCursor("pip", "rewind") }
+            }
+
+            TransportButton {
+              glyphText: root.isPaused ? "󰐊" : "󰏤"
+              glyphSize: Style.font.iconLarge
+              tooltipText: root.isPaused ? "Play · Space" : "Pause · Space"
+              foreground: root.foreground
+              hasCursor: root.cursorOn("pip", "play")
+              onClicked: root.togglePause()
+              onHovered: function(on) { if (on) root.setPanelCursor("pip", "play") }
+            }
+
+            TransportButton {
+              glyphText: "󰒭"
+              tooltipText: "Forward 10s · →"
+              foreground: root.foreground
+              hasCursor: root.cursorOn("pip", "forward")
+              onClicked: root.nudgeSeek(10)
+              onHovered: function(on) { if (on) root.setPanelCursor("pip", "forward") }
+            }
           }
 
           Button {
@@ -3324,11 +3364,35 @@ Item {
             onHovered: function(on) { if (on) root.setPanelCursor("pip", "screen") }
           }
 
+          // Volume on the strip: mute on click, wheel to adjust, the current
+          // percentage in the tooltip. No popup slider here — see the input-
+          // mask note on the card's WheelHandler — and none needed: the wheel
+          // works over the whole picture, and the real slider is one Esc away.
+          TransportButton {
+            id: pipMute
+            visible: !root.mpvMode
+            width: visible ? controlSize : 0
+            anchors.right: pipScreenButton.left
+            anchors.rightMargin: visible ? Style.space(2) : 0
+            anchors.verticalCenter: parent.verticalCenter
+            glyphText: root.audioMuted ? "󰖁" : "󰕾"
+            tooltipText: (root.audioMuted ? "Unmute · M" : "Mute · M")
+              + " · scroll for volume — " + root.volumePct + "%"
+            foreground: root.audioMuted ? root.urgent : root.foreground
+            hasCursor: root.cursorOn("pip", "mute")
+            onClicked: root.toggleMute()
+            onHovered: function(on) { if (on) root.setPanelCursor("pip", "mute") }
+
+            WheelHandler {
+              onWheel: function(event) { root.nudgeVolumeWheel(event.angleDelta.y > 0) }
+            }
+          }
+
           CursorSurface {
             id: pipSeekCursor
-            anchors.left: pipPlay.right
+            anchors.left: pipDeck.right
             anchors.leftMargin: Style.space(6)
-            anchors.right: pipScreenButton.left
+            anchors.right: pipMute.left
             anchors.rightMargin: Style.space(6)
             anchors.verticalCenter: parent.verticalCenter
             height: pipSeekSlider.implicitHeight
@@ -3357,6 +3421,37 @@ Item {
               onMoved: function(seconds) { root.previewSeek(seconds) }
               onReleased: function(seconds) { root.commitSeek(seconds) }
             }
+          }
+        }
+
+        // Wheel feedback. The theater flashes its popup readout on every
+        // volume step; this chip is the PiP's equivalent, riding the same
+        // volumeAdjusting flag so it appears and fades on the same 1500ms
+        // clock with zero extra state. Opaque like pipCard, and for the same
+        // reason: translucency over moving video reads as a rendering fault.
+        BorderSurface {
+          anchors.top: parent.top
+          anchors.right: parent.right
+          anchors.margins: Style.space(8)
+          width: volumeChipText.implicitWidth + Style.space(16)
+          height: Style.space(26)
+          radius: Style.cornerRadius
+          color: root.background
+          borderSpec: Border.controlSpec("normal", root.foreground, root.accent)
+
+          opacity: root.volumeAdjusting ? 1 : 0
+          visible: opacity > 0.01
+          Behavior on opacity { NumberAnimation { duration: 120 } }
+
+          Text {
+            id: volumeChipText
+            anchors.centerIn: parent
+            text: (root.audioMuted ? "muted · " : "") + root.volumePct + "%"
+            // Same accent-past-100 signal as the theater popup's readout.
+            color: root.volumePct > 100 ? root.accent : root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            textFormat: Text.PlainText
           }
         }
       }
@@ -3763,9 +3858,10 @@ Item {
 
         // ---------- now-playing minibar ----------
         // Spans the full browse width under both sidebar and pane, Spotify-footer
-        // style: artwork well, title + clock, transport, thin seek slider, and
-        // the way back into theater. Only on screen while a session is live and
-        // the video is not.
+        // style: artwork well, title + clock, the deck cluster, thin seek
+        // slider, volume, and the way back into theater — the same deck-left-
+        // of-timeline order as the theater strip and the PiP. Only on screen
+        // while a session is live and the video is not.
         PanelSeparator {
           id: minibarSeparator
           visible: root.minibarVisible
@@ -3840,7 +3936,7 @@ Item {
           Column {
             anchors.left: minibarArt.right
             anchors.leftMargin: Style.space(9)
-            anchors.right: minibarSeek.left
+            anchors.right: minibarTransport.left
             anchors.rightMargin: Style.space(8)
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(2)
@@ -3873,7 +3969,7 @@ Item {
             visible: !content.compact
             width: visible ? Math.max(Style.space(90), minibar.width * 0.22) : 0
             height: minibarSlider.implicitHeight
-            anchors.right: minibarTransport.left
+            anchors.right: minibarMute.left
             anchors.rightMargin: visible ? Style.space(8) : 0
             anchors.verticalCenter: parent.verticalCenter
             hasCursor: root.cursorOn("minibar", "seek")
@@ -3913,10 +4009,11 @@ Item {
             }
           }
 
+          // Deck cluster left of the scrubber, matching theater and the PiP.
           Row {
             id: minibarTransport
-            anchors.right: minibarPip.left
-            anchors.rightMargin: Style.space(4)
+            anchors.right: minibarSeek.left
+            anchors.rightMargin: Style.space(8)
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(2)
 
@@ -3946,6 +4043,47 @@ Item {
               hasCursor: root.cursorOn("minibar", "forward")
               onClicked: root.nudgeSeek(10)
               onHovered: function(on) { if (on) root.setPanelCursor("minibar", "forward") }
+            }
+
+            // Stop ends the session and Forward gets clicked in bursts; the
+            // wider gap keeps a drifted triple-tap off it. Same spacing rule
+            // as the theater deck.
+            Item { width: Style.space(6); height: 1 }
+
+            TransportButton {
+              glyphText: "󰓛"
+              tooltipText: "Stop"
+              foreground: root.urgent
+              hasCursor: root.cursorOn("minibar", "stop")
+              onClicked: root.stop()
+              onHovered: function(on) { if (on) root.setPanelCursor("minibar", "stop") }
+            }
+          }
+
+          // Volume: mute on click, wheel to adjust, percentage in the tooltip.
+          // Same treatment as the PiP strip's button — no popup slider on the
+          // bar; the full slider lives in theater.
+          TransportButton {
+            id: minibarMute
+            anchors.right: minibarPip.left
+            anchors.rightMargin: Style.space(2)
+            anchors.verticalCenter: parent.verticalCenter
+            glyphText: root.audioMuted ? "󰖁" : "󰕾"
+            // Muted rather than hidden under mpv, matching the PiP button one
+            // over: the keyboard walk stays sound and the tooltip says why.
+            // Volume still travels over mpv's IPC; only mute is mpv's own.
+            opacity: root.mpvMode ? 0.4 : 1
+            tooltipText: root.mpvMode
+              ? "Scroll for volume — mpv owns its own mute"
+              : (root.audioMuted ? "Unmute · M" : "Mute · M")
+                + " · scroll for volume — " + root.volumePct + "%"
+            foreground: root.audioMuted && !root.mpvMode ? root.urgent : root.foreground
+            hasCursor: root.cursorOn("minibar", "mute")
+            onClicked: root.toggleMute()
+            onHovered: function(on) { if (on) root.setPanelCursor("minibar", "mute") }
+
+            WheelHandler {
+              onWheel: function(event) { root.nudgeVolumeWheel(event.angleDelta.y > 0) }
             }
           }
 
