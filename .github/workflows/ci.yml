@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to the same branch supersedes the run already in flight.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Unit tests (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24, 26]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+
+      # The glob is load-bearing: the bare `node --test tests/` form fails with
+      # MODULE_NOT_FOUND on node v26. Keep it as `tests/*.test.mjs` everywhere.
+      - name: node --test
+        run: node --test tests/*.test.mjs
+
+  qml:
+    name: QML compile gate
+    runs-on: ubuntu-latest
+    # Arch, not Ubuntu, on purpose. This is an Omarchy plugin and Omarchy is
+    # Arch — the container gets the same Qt 6.11 the app actually runs under.
+    # Ubuntu's newest LTS still ships Qt 6.4, which predates
+    # `pragma ComponentBehavior: Bound` (Qt 6.5) and would fail every file here
+    # for a reason that has nothing to do with the change under review.
+    container: archlinux:latest
+    steps:
+      # Before checkout: actions/checkout wants git in the container, and a
+      # partial upgrade is unsupported on Arch, so -Syu rather than -S.
+      - name: Install Qt 6 declarative tools
+        run: pacman -Syu --noconfirm --needed git qt6-declarative
+
+      - uses: actions/checkout@v7
+
+      # qmlcachegen catches creation-time ERRORS that qmllint misses — most
+      # importantly duplicate signal handlers ("Property value set multiple
+      # times"), which silently kill the whole panel at load rather than
+      # failing loudly. See AGENTS.md "Compile gate".
+      #
+      # No -I import paths, deliberately: unresolved qs.Commons / Quickshell
+      # imports do not stop qmlcachegen from compiling, and the Omarchy shell
+      # tree those would point at is not installable in a plain Arch container.
+      # That also means this gate does NOT replace qmllint, which still has to
+      # be run locally against the shadow tree.
+      - name: qmlcachegen every QML file
+        run: |
+          status=0
+          for f in *.qml; do
+            if ! /usr/lib/qt6/qmlcachegen --resource-path "/$f" -o /tmp/qcg.cpp "$f"; then
+              echo "::error file=$f::qmlcachegen failed to compile $f"
+              status=1
+            fi
+          done
+          exit $status
