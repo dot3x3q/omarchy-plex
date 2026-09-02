@@ -36,8 +36,10 @@ test("validServer rejects paths and garbage", () => {
 
 test("validToken enforces charset and length", () => {
   assert.equal(M.validToken("eiBEXAMPLExxxxxxxxxx"), true)
+  assert.equal(M.validToken("token-with_under.score"), true)
   assert.equal(M.validToken("short1"), false)
-  assert.equal(M.validToken("has-dashes-123456"), false)
+  assert.equal(M.validToken("token with spaces"), false)
+  assert.equal(M.validToken("token&query=bad"), false)
   assert.equal(M.validToken(""), false)
 })
 

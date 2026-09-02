@@ -11,9 +11,9 @@ function validServer(s) {
   return /^https?:\/\/[A-Za-z0-9.\-_]+(:\d+)?$/.test(String(s || ""))
 }
 
-// Plex tokens are opaque base64ish strings around 20 chars, letters/digits.
+// Plex tokens may be legacy alphanumeric values or base64url/JWT-style values.
 function validToken(t) {
-  return /^[A-Za-z0-9]{10,}$/.test(String(t || ""))
+  return /^[A-Za-z0-9._-]{10,}$/.test(String(t || ""))
 }
 
 var MAX_ITEMS = 256
