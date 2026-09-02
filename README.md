@@ -1,5 +1,7 @@
 # omarchy-plex
 
+[![CI](https://github.com/dot3x3q/omarchy-plex/actions/workflows/ci.yml/badge.svg)](https://github.com/dot3x3q/omarchy-plex/actions/workflows/ci.yml)
+
 A Plex media player for [Omarchy](https://omarchy.org). Real window in the
 tiling tree, library browsing, poster grids, a proper theater view, and a
 picture-in-picture mode that can be resized and plopped on additional monitors.
@@ -176,6 +178,19 @@ lists, `Esc` closes.
   catches what the linter can't).
 - `node --test tests/*.test.mjs` — Api mappers, IO safety, and static
   contract pins over the QML.
+
+### Pull requests
+
+CI runs the unit tests on node 22/24/26 and compiles every `*.qml` with
+qmlcachegen, so a PR gets checked without needing me at a keyboard. Two things
+CI can't do for you, because they need Omarchy itself rather than a container:
+
+- run `qmllint` against the shell's `qs.Commons` / `qs.Ui` types, and
+- actually load the plugin on a compositor.
+
+So if a change touches QML behaviour rather than plain logic, say in the PR
+whether you ran it on a real Omarchy session. I'd rather know it's untested than
+assume it isn't.
 
 ## Removing
 
