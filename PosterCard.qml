@@ -71,6 +71,28 @@ Item {
       font.pixelSize: Style.font.iconLarge
     }
 
+    // Unwatched count in the corner, as stock Plex marks a show/season poster.
+    Rectangle {
+      anchors.top: parent.top
+      anchors.right: parent.right
+      anchors.margins: Style.space(2)
+      visible: root.itemData && String(root.itemData.badge || "") !== ""
+      width: Math.max(height, badgeText.implicitWidth + Style.space(10))
+      height: badgeText.implicitHeight + Style.space(4)
+      color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.85)
+
+      Text {
+        id: badgeText
+        anchors.centerIn: parent
+        text: root.itemData ? String(root.itemData.badge || "") : ""
+        textFormat: Text.PlainText
+        color: Color.foreground
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        font.bold: true
+      }
+    }
+
     Rectangle {
       anchors.left: parent.left
       anchors.bottom: parent.bottom
@@ -104,6 +126,19 @@ Item {
     Text {
       width: parent.width
       text: root.itemData ? String(root.itemData.caption || "") : ""
+      textFormat: Text.PlainText
+      color: Color.muted
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      elide: Text.ElideRight
+      visible: text !== ""
+    }
+
+    // Third line, only the recently-added TV shelf uses it (episode number
+    // under the episode title).
+    Text {
+      width: parent.width
+      text: root.itemData ? String(root.itemData.caption2 || "") : ""
       textFormat: Text.PlainText
       color: Color.muted
       font.family: Style.font.family

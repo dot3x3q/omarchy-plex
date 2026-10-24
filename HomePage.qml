@@ -24,8 +24,14 @@ Item {
   // The toggle behaves as one extra cursor slot at the end of section 0.
   readonly property int cwCursorCount: cwShown.length + (cwHasMore ? 1 : 0)
   property bool onDeckLoading: true
-  // libraryShelves[i] = { id, title, items: [], loading: bool }
+  // libraryShelves[i] = { id, title, type } — the shelf LIST, which only
+  // changes when the libraries do. Each shelf's contents live apart in
+  // shelfData[id] = { items: [], loading: bool }. They used to be one array,
+  // so every shelf that finished loading reassigned the Repeater's model,
+  // which destroys and rebuilds every shelf block: the column collapsed for a
+  // frame and the Flickable clamped the reader's scroll position to it.
   property var libraryShelves: []
+  property var shelfData: ({})
 
   property int cursorSection: 0
   property int cursorIndex: 0
@@ -37,6 +43,13 @@ Item {
 
   readonly property int shelfCardWidth: Style.space(120)
   readonly property int shelfCardHeight: Math.round(shelfCardWidth * 3 / 2) + Style.space(40)
+  // TV cards carry a third line (episode number under the episode title).
+  readonly property int showShelfCardHeight: page.shelfCardHeight + Math.ceil(Style.font.caption * 1.25) + Style.space(2)
+
+  function shelfState(shelf) {
+    var st = shelf ? page.shelfData[shelf.id] : null
+    return st ? st : { items: [], loading: true }
+  }
 
   function isCursorAt(section, index) {
     return page.cursorHere && page.cursorSection === section && page.cursorIndex === index
@@ -46,8 +59,7 @@ Item {
 
   function itemsFor(section) {
     if (section === 0) return page.cwShown
-    var shelf = page.libraryShelves[section - 1]
-    return shelf ? shelf.items : []
+    return page.shelfState(page.libraryShelves[section - 1]).items
   }
 
   function clampIndex(section, index) {
@@ -105,7 +117,15 @@ Item {
     var item = page.itemsFor(page.cursorSection)[page.cursorIndex]
     if (!item) return
     if (page.cursorSection === 0) page.panel.playItem(item.ratingKey, item.title)
-    else page.panel.navigate("detail", { ratingKey: item.ratingKey, title: item.title, subtitle: item.caption, type: item.type })
+    else page.openShelfItem(item)
+  }
+
+  // TV shelf cards say where they lead (targetKey/targetType): an episode card
+  // shows its show, so it opens the show. Movie cards open themselves.
+  function openShelfItem(item) {
+    var key = item.targetKey ? item.targetKey : item.ratingKey
+    var type = item.targetType ? item.targetType : item.type
+    page.panel.navigate("detail", { ratingKey: key, title: item.title, subtitle: item.caption, type: type })
   }
 
   function bulkMove(delta) {
@@ -181,16 +201,22 @@ Item {
     })
   }
 
-  function fetchShelf(idx, sectionId) {
-    page.panel.request(Api.recentlyAddedUrl("", sectionId, 24), function(doc) {
+  function fetchShelf(sectionId, type) {
+    var isShow = type === "show"
+    // TV goes through the grouped hub (one card per show, like stock Plex);
+    // a section's own /recentlyAdded would list anonymous episodes.
+    var url = isShow ? Api.recentlyAddedHubUrl("", sectionId, 2, 24) : Api.recentlyAddedUrl("", sectionId, 24)
+    page.panel.request(url, function(doc) {
       var raw = []
-      try { raw = Api.mapItems(doc) } catch (e) { raw = [] }
-      var shelves = page.libraryShelves.slice()
-      // Stale response guard: panel.libraries may have changed shape (or
-      // reordered) between firing this request and it landing.
-      if (idx >= shelves.length || shelves[idx].id !== sectionId) return
-      shelves[idx] = Object.assign({}, shelves[idx], { items: page.resolveShelf(raw), loading: false })
-      page.libraryShelves = shelves
+      try { raw = isShow ? Api.mapRecentShows(doc) : Api.mapItems(doc) } catch (e) { raw = [] }
+      // Stale response guard: the library may have gone between firing this
+      // request and it landing.
+      var still = false
+      for (var i = 0; i < page.libraryShelves.length; i++) if (page.libraryShelves[i].id === sectionId) still = true
+      if (!still) return
+      var data = Object.assign({}, page.shelfData)
+      data[sectionId] = { items: page.resolveShelf(raw), loading: false }
+      page.shelfData = data
       page.clampCursor()
     })
   }
@@ -198,9 +224,13 @@ Item {
   function rebuildShelves() {
     var libs = page.panel.libraries || []
     var shelves = []
-    for (var i = 0; i < libs.length; i++) shelves.push({ id: libs[i].id, title: libs[i].title, items: [], loading: true })
-    page.libraryShelves = shelves
-    for (var j = 0; j < libs.length; j++) page.fetchShelf(j, libs[j].id)
+    for (var i = 0; i < libs.length; i++) shelves.push({ id: libs[i].id, title: libs[i].title, type: libs[i].type })
+    // Only hand the Repeater a new list when the libraries really changed: a
+    // refresh re-sends the same sections, and reassigning would rebuild every
+    // shelf for nothing (see shelfData above).
+    if (JSON.stringify(shelves) !== JSON.stringify(page.libraryShelves)) page.libraryShelves = shelves
+    // Shelves already showing keep their posters while the refetch runs.
+    for (var j = 0; j < libs.length; j++) page.fetchShelf(libs[j].id, libs[j].type)
     page.clampCursor()
   }
 
@@ -330,14 +360,90 @@ Item {
           width: mainColumn.width
           spacing: Style.space(6)
           property alias shelfView: shelfList
+          readonly property var contents: page.shelfState(shelfBlock.modelData)
+          readonly property bool isShow: shelfBlock.modelData.type === "show"
+          readonly property int cardHeight: shelfBlock.isShow ? page.showShelfCardHeight : page.shelfCardHeight
 
-          Text {
-            color: Color.foreground
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-            font.bold: true
-            textFormat: Text.PlainText
-            text: "RECENTLY ADDED — " + String(shelfBlock.modelData.title || "").toUpperCase()
+          // Page left/right one shelf-width at a time, the way stock Plex puts
+          // chevrons top-right of each row — a mouse has no other way along a
+          // shelf without a horizontal wheel.
+          function pageShelf(dir) {
+            var maxX = Math.max(0, shelfList.contentWidth - shelfList.width)
+            var step = Math.max(page.shelfCardWidth, shelfList.width - page.shelfCardWidth)
+            shelfScroll.to = Math.max(0, Math.min(maxX, shelfList.contentX + dir * step))
+            shelfScroll.restart()
+          }
+
+          NumberAnimation {
+            id: shelfScroll
+            target: shelfList
+            property: "contentX"
+            duration: 260
+            easing.type: Easing.OutCubic
+          }
+
+          Item {
+            width: parent.width
+            height: Math.max(shelfTitle.implicitHeight, shelfArrows.implicitHeight)
+
+            Text {
+              id: shelfTitle
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              color: Color.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              textFormat: Text.PlainText
+              text: "RECENTLY ADDED — " + String(shelfBlock.modelData.title || "").toUpperCase()
+              font.underline: titleLink.containsMouse
+
+              // The title is the way to the whole list, as on stock Plex: the
+              // library page opens on its first sort, "Recently added".
+              MouseArea {
+                id: titleLink
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: page.panel.navigate("library", { sectionId: shelfBlock.modelData.id })
+              }
+            }
+
+            Row {
+              id: shelfArrows
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(2)
+              // Only once the row actually overflows; a short shelf has
+              // nowhere to go.
+              visible: shelfList.visible && shelfList.contentWidth > shelfList.width + 1
+
+              Button {
+                iconText: "󰅁"
+                iconSize: Style.font.iconLarge
+                foreground: Color.foreground
+                focusable: false
+                bordered: false
+                horizontalPadding: Style.space(5)
+                enabled: !shelfList.atXBeginning
+                opacity: enabled ? 1 : 0.35
+                tooltipText: "Scroll left"
+                onClicked: shelfBlock.pageShelf(-1)
+              }
+
+              Button {
+                iconText: "󰅂"
+                iconSize: Style.font.iconLarge
+                foreground: Color.foreground
+                focusable: false
+                bordered: false
+                horizontalPadding: Style.space(5)
+                enabled: !shelfList.atXEnd
+                opacity: enabled ? 1 : 0.35
+                tooltipText: "Scroll right"
+                onClicked: shelfBlock.pageShelf(1)
+              }
+            }
           }
 
           // Same layout-stability rule as the On Deck placeholder above: an
@@ -345,8 +451,8 @@ Item {
           // would collapse and then pop to full height. Reserve it up front.
           Item {
             width: parent.width
-            visible: shelfBlock.modelData.loading || shelfBlock.modelData.items.length === 0
-            height: shelfBlock.modelData.loading ? page.shelfCardHeight : Style.space(24)
+            visible: shelfBlock.contents.loading || shelfBlock.contents.items.length === 0
+            height: shelfBlock.contents.loading ? shelfBlock.cardHeight : Style.space(24)
 
             Text {
               anchors.left: parent.left
@@ -355,7 +461,7 @@ Item {
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
               textFormat: Text.PlainText
-              text: shelfBlock.modelData.loading
+              text: shelfBlock.contents.loading
                 ? "Loading Recently Added…"
                 : "Nothing added to " + shelfBlock.modelData.title + " yet."
             }
@@ -364,12 +470,12 @@ Item {
           ListView {
             id: shelfList
             width: parent.width
-            height: page.shelfCardHeight
-            visible: !shelfBlock.modelData.loading && shelfBlock.modelData.items.length > 0
+            height: shelfBlock.cardHeight
+            visible: !shelfBlock.contents.loading && shelfBlock.contents.items.length > 0
             orientation: ListView.Horizontal
             spacing: Style.space(8)
             clip: true
-            model: shelfBlock.modelData.items
+            model: shelfBlock.contents.items
 
             delegate: PosterCard {
               required property var modelData
@@ -377,7 +483,7 @@ Item {
               width: page.shelfCardWidth
               itemData: modelData
               cursorOn: page.isCursorAt(shelfBlock.index + 1, index)
-              onActivated: page.panel.navigate("detail", { ratingKey: modelData.ratingKey, title: modelData.title, subtitle: modelData.caption, type: modelData.type })
+              onActivated: page.openShelfItem(modelData)
               onHovered: function(on) {
                 if (on) {
                   page.cursorSection = shelfBlock.index + 1

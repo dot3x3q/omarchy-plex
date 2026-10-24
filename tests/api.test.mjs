@@ -20,7 +20,8 @@ vm.runInNewContext(
     "\nthis.A = { sectionsUrl, onDeckUrl, recentlyAddedUrl, libraryAllUrl, metadataUrl," +
     " childrenUrl, searchUrl, imageUrl, mapSections, mapItems, mapSearch, mapChildren," +
     " mapDetail, durationText: durationText, progressFor: progressFor, unwatchedFor: unwatchedFor," +
-    " mapStreams, selectedStreamId, partSelectionUrl, streamLabel }",
+    " mapStreams, selectedStreamId, partSelectionUrl, streamLabel,\n" +
+    " recentlyAddedHubUrl, mapRecentShows, ratingsFor, detailUrl, relatedUrl, mapRelated }",
   ctx
 )
 const A = ctx.A
@@ -515,4 +516,50 @@ test("partSelectionUrl sends allParts and treats 0 as an explicit 'no subtitles'
     "http://s:32400/library/parts/524?subtitleStreamID=0&allParts=1")
   assert.equal(A.partSelectionUrl("http://s:32400", 524, null, null),
     "http://s:32400/library/parts/524?allParts=1")
+})
+
+// ---- grouped TV shelf + movie-page extras (probed live 2026-10-23) ----
+
+test("recentlyAddedHubUrl asks the grouped hub for one section", () => {
+  assert.equal(A.recentlyAddedHubUrl("", "2", 2, 24),
+    "/hubs/home/recentlyAdded?type=2&sectionID=2&X-Plex-Container-Start=0&X-Plex-Container-Size=24")
+})
+
+test("mapRecentShows puts the show's poster and name on every card", () => {
+  const cards = A.mapRecentShows({ MediaContainer: { Metadata: [
+    { type: "show", ratingKey: "68239", title: "The Voice", childCount: 19, leafCount: 369, viewedLeafCount: 0, thumb: "/s/thumb" },
+    { type: "season", ratingKey: "70349", title: "Season 3", parentTitle: "Lupin", parentThumb: "/lupin/thumb", thumb: "/season/thumb", leafCount: 8 },
+    { type: "episode", ratingKey: "70366", title: "Who Are We?", grandparentTitle: "Shoresy", grandparentRatingKey: "69279",
+      grandparentThumb: "/shoresy/thumb", thumb: "/ep/thumb", parentIndex: 5, index: 6 },
+    { type: "movie", ratingKey: "1", title: "not on a TV shelf" }
+  ] } })
+  assert.equal(cards.length, 3)
+  assert.deepEqual([cards[0].title, cards[0].caption, cards[0].badge, cards[0].targetType], ["The Voice", "19 seasons", "369", "show"])
+  assert.deepEqual([cards[1].title, cards[1].caption, cards[1].thumbPath, cards[1].targetKey], ["Lupin", "Season 3", "/lupin/thumb", "70349"])
+  assert.deepEqual([cards[2].title, cards[2].caption, cards[2].caption2, cards[2].thumbPath, cards[2].targetKey, cards[2].targetType],
+    ["Shoresy", "Who Are We?", "S5 · E6", "/shoresy/thumb", "69279", "show"])
+})
+
+test("ratingsFor names sources by their image URI", () => {
+  assert.deepEqual(Array.from(A.ratingsFor({ Rating: [
+    { image: "imdb://image.rating", value: 7.8, type: "audience" },
+    { image: "rottentomatoes://image.rating.ripe", value: 9.2, type: "critic" },
+    { image: "rottentomatoes://image.rating.upright", value: 9.4, type: "audience" },
+    { image: "themoviedb://image.rating", value: 9.1, type: "audience" },
+    { image: "somethingnew://x", value: 5 }
+  ] })), ["IMDb 7.8", "Critics 92%", "Audience 94%", "TMDB 91%"])
+})
+
+test("detailUrl carries the movie-page includes", () => {
+  assert.equal(A.detailUrl("", "70294"), "/library/metadata/70294?includeOnDeck=1&includeExtras=1")
+  assert.equal(A.relatedUrl("", "70294"), "/hubs/metadata/70294/related")
+})
+
+test("mapRelated takes the first hub with items and captions it with the year", () => {
+  const out = A.mapRelated({ MediaContainer: { Hub: [
+    { hubIdentifier: "empty", Metadata: [] },
+    { hubIdentifier: "movie.similar", Metadata: [{ type: "movie", ratingKey: "68226", title: "Spider-Man", year: 2026, contentRating: "PG-13" }] }
+  ] } })
+  assert.equal(out.length, 1)
+  assert.equal(out[0].caption, "2026")
 })

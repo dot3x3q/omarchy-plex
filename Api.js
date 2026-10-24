@@ -50,6 +50,18 @@ function recentlyAddedUrl(server, sectionId, size) {
   return size ? url + "?X-Plex-Container-Start=0&X-Plex-Container-Size=" + size : url
 }
 
+// The hub stock Plex draws its "Recently Added in TV Shows" row from. Where
+// the section's /recentlyAdded lists bare EPISODES (a row of anonymous
+// screenshots titled "Episode 2"), this one groups them the way a person
+// reads it: one entry per show, as a show (a whole new show or a big batch),
+// a season (several new episodes of one season) or a single episode. Probed
+// live 2026-10-23; type=2 is Plex's show metadata type.
+function recentlyAddedHubUrl(server, sectionId, type, size) {
+  return server + "/hubs/home/recentlyAdded?type=" + encodeURIComponent(String(type)) +
+    "&sectionID=" + encodeURIComponent(String(sectionId)) +
+    "&X-Plex-Container-Start=0&X-Plex-Container-Size=" + size
+}
+
 // opts: { sort, start, size }. "addedAt:desc", "titleSort" and "year:desc" all
 // sort server-side, so no client-side re-sort is needed. titleSort strips
 // leading articles ("The 'Burbs" sorts as "'Burbs"), which is why a plain
@@ -397,5 +409,185 @@ function mapDetail(json) {
   item.contentRating = cap(m.contentRating, 32)
   item.genres = genres
   item.media = media
+  item.tagline = cap(m.tagline, MAX_FIELD)
+  item.studio = cap(m.studio, MAX_FIELD)
+  item.directors = tagList(m.Director, 4)
+  item.writers = tagList(m.Writer, 4)
+  item.ratings = ratingsFor(m)
+  // The hero's Video/Audio lines use Plex's SHORT displayTitle ("4K DoVi/HDR10
+  // (HEVC Main 10)"), not the picker's extendedDisplayTitle, which drags in
+  // whatever release-group name the file's track title carries.
+  item.videoText = ""
+  item.audioText = ""
+  item.subtitleCount = 0
+  var part = m.Media && m.Media[0] && m.Media[0].Part && m.Media[0].Part[0]
+  var raw = (part && part.Stream) || []
+  var firstAudio = ""
+  for (var k = 0; k < raw.length && k < MAX_ITEMS; k++) {
+    var st = raw[k]
+    if (!st) continue
+    var t = Number(st.streamType)
+    var label = cap(st.displayTitle || st.extendedDisplayTitle, MAX_FIELD)
+    if (t === STREAM_VIDEO && item.videoText === "") item.videoText = label
+    else if (t === STREAM_AUDIO) {
+      if (firstAudio === "") firstAudio = label
+      if (streamFlag(st.selected) && item.audioText === "") item.audioText = label
+    } else if (t === STREAM_SUBTITLE) item.subtitleCount++
+  }
+  if (item.audioText === "") item.audioText = firstAudio
+  item.cast = castFor(m.Role)
+  item.extras = extrasFor(m.Extras)
   return item
+}
+
+// ---- detail-page extras (movie page, the stock-Plex layout) ----
+// Cast, ratings and extras come back in the metadata request itself (see
+// detailUrl). Related does NOT ride along: includeRelated made that request
+// take ~1.5 s instead of ~30 ms (measured 2026-10-23), and the whole page
+// waited on it. relatedUrl fetches the same hubs separately, after the page
+// has drawn.
+
+function detailUrl(server, ratingKey) {
+  return metadataUrl(server, ratingKey) + "?includeOnDeck=1&includeExtras=1"
+}
+
+function relatedUrl(server, ratingKey) {
+  return server + "/hubs/metadata/" + encodeURIComponent(String(ratingKey)) + "/related"
+}
+
+// /hubs/metadata/{key}/related hands back { MediaContainer: { Hub: [...] } },
+// the same Hub list includeRelated nests under Metadata[0].Related.
+function mapRelated(json) {
+  return relatedFor(json && json.MediaContainer)
+}
+
+function tagList(tags, limit) {
+  var out = []
+  var list = tags || []
+  for (var i = 0; i < list.length && out.length < limit; i++)
+    if (list[i] && list[i].tag) out.push(cap(list[i].tag, MAX_FIELD))
+  return out
+}
+
+// Plex's Rating[] names its source only through an image URI:
+// imdb://image.rating, rottentomatoes://image.rating.ripe (critic; "rotten"
+// when bad), rottentomatoes://image.rating.upright (audience; "spilled" when
+// bad), themoviedb://image.rating. Values are 0-10; RT and TMDB are shown as
+// the percentages their own sites use.
+function ratingsFor(m) {
+  var out = []
+  var list = m.Rating || []
+  for (var i = 0; i < list.length && out.length < 6; i++) {
+    var r = list[i]
+    if (!r || r.value === undefined || r.value === null) continue
+    var img = String(r.image || "")
+    var v = Number(r.value)
+    if (!isFinite(v)) continue
+    var pct = Math.round(v * 10) + "%"
+    if (img.indexOf("imdb://") === 0) out.push("IMDb " + v.toFixed(1))
+    else if (img.indexOf("rottentomatoes://") === 0)
+      out.push((r.type === "critic" ? "Critics " : "Audience ") + pct)
+    else if (img.indexOf("themoviedb://") === 0) out.push("TMDB " + pct)
+  }
+  return out
+}
+
+// Role thumbs are absolute https URLs on metadata-static.plex.tv; the photo
+// transcoder fetches those itself, so they go through imageUrl like any
+// library path.
+function castFor(roles) {
+  var out = []
+  var list = roles || []
+  for (var i = 0; i < list.length && out.length < 30; i++) {
+    var r = list[i]
+    if (!r || !r.tag) continue
+    out.push({ name: cap(r.tag, MAX_FIELD), role: cap(r.role, MAX_FIELD), photoPath: cap(r.thumb, 512) })
+  }
+  return out
+}
+
+var EXTRA_KINDS = {
+  trailer: "Trailer", scene: "Scene", behindTheScenes: "Behind the Scenes",
+  interview: "Interview", deletedScene: "Deleted Scene", featurette: "Featurette",
+  short: "Short", clip: "Clip"
+}
+
+// Extras are `clip` metadata with their own ratingKey and a playable part, so
+// playItem() handles them unchanged.
+function extrasFor(extras) {
+  var out = []
+  var list = (extras && extras.Metadata) || []
+  for (var i = 0; i < list.length && out.length < 30; i++) {
+    var x = list[i]
+    if (!x || !x.ratingKey) continue
+    out.push({
+      ratingKey: keyOf(x.ratingKey),
+      title: cap(x.title, MAX_FIELD),
+      kind: EXTRA_KINDS[String(x.subtype || "")] || "Extra",
+      thumbPath: cap(x.thumb, 512),
+      durationText: x.duration ? durationText(x.duration) : ""
+    })
+  }
+  return out
+}
+
+// Related arrives as hubs (movie.similar is the "Related Movies" row); take
+// the first one that has items, filtered like every other list.
+function relatedFor(related) {
+  var hubs = (related && related.Hub) || []
+  for (var h = 0; h < hubs.length; h++) {
+    var items = mapMetadataList({ MediaContainer: hubs[h] })
+    // Stock Plex captions these with the year, not the content rating.
+    for (var i = 0; i < items.length; i++) items[i].caption = items[i].year
+    if (items.length > 0) return items.slice(0, 30)
+  }
+  return []
+}
+
+// One card per entry of recentlyAddedHubUrl, shaped like stock Plex's row:
+// always the SHOW's poster and name on top, then what is new underneath.
+//   show    -> "19 seasons"
+//   season  -> "Season 3"
+//   episode -> episode title, then "S5 · E6"
+// `badge` is the unwatched count Plex paints on a show/season poster's corner.
+// `target*` is where activating the card goes: a season opens that season, an
+// episode opens its show (an episode has no detail page of its own here).
+function mapRecentShows(json) {
+  var mc = json && json.MediaContainer
+  var meta = (mc && mc.Metadata) || []
+  var out = []
+  for (var i = 0; i < meta.length && out.length < MAX_ITEMS; i++) {
+    var m = meta[i]
+    if (!m || !ITEM_TYPES[m.type] || m.type === "movie") continue
+    var item = itemFromMetadata(m)
+    var leaf = Number(m.leafCount) || 0
+    var unwatched = Math.max(0, leaf - (Number(m.viewedLeafCount) || 0))
+    if (m.type === "show") {
+      var seasons = Number(m.childCount) || 0
+      item.caption = seasons > 0 ? seasons + (seasons === 1 ? " season" : " seasons") : ""
+      item.caption2 = ""
+      item.badge = unwatched > 0 ? String(unwatched) : ""
+      item.targetKey = item.ratingKey
+      item.targetType = "show"
+    } else if (m.type === "season") {
+      item.title = cap(m.parentTitle, MAX_FIELD)
+      item.thumbPath = cap(m.parentThumb || m.thumb, 512)
+      item.caption = cap(m.title, MAX_FIELD)
+      item.caption2 = ""
+      item.badge = unwatched > 0 ? String(unwatched) : ""
+      item.targetKey = item.ratingKey
+      item.targetType = "season"
+    } else {
+      item.title = cap(m.grandparentTitle, MAX_FIELD)
+      item.thumbPath = cap(m.grandparentThumb || m.parentThumb || m.thumb, 512)
+      item.caption = cap(m.title, MAX_FIELD)
+      item.caption2 = "S" + (m.parentIndex === undefined || m.parentIndex === null ? "?" : m.parentIndex) +
+        " · E" + (m.index === undefined || m.index === null ? "?" : m.index)
+      item.badge = ""
+      item.targetKey = keyOf(m.grandparentRatingKey) || item.ratingKey
+      item.targetType = m.grandparentRatingKey ? "show" : "episode"
+    }
+    out.push(item)
+  }
+  return out
 }
