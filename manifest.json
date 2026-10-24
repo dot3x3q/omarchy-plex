@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "dot3x3q.omarchy-plex",
   "name": "Omarchy Plex",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "3x3q",
   "description": "A full Plex player for Omarchy: sidebar library browsing, detail pages, theater + minibar playback, picture-in-picture floaty mode, audio/subtitle track selection, and keyboard-first navigation throughout.",
   "kinds": [
