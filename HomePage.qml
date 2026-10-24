@@ -24,9 +24,11 @@ Item {
   // The toggle behaves as one extra cursor slot at the end of section 0.
   readonly property int cwCursorCount: cwShown.length + (cwHasMore ? 1 : 0)
   property bool onDeckLoading: true
+  // A null response is a failed request, not an empty On Deck.
+  property bool onDeckFailed: false
   // libraryShelves[i] = { id, title, type } — the shelf LIST, which only
   // changes when the libraries do. Each shelf's contents live apart in
-  // shelfData[id] = { items: [], loading: bool }. They used to be one array,
+  // shelfData[id] = { items: [], loading: bool, failed: bool }. They used to be one array,
   // so every shelf that finished loading reassigned the Repeater's model,
   // which destroys and rebuilds every shelf block: the column collapsed for a
   // frame and the Flickable clamped the reader's scroll position to it.
@@ -48,7 +50,7 @@ Item {
 
   function shelfState(shelf) {
     var st = shelf ? page.shelfData[shelf.id] : null
-    return st ? st : { items: [], loading: true }
+    return st ? st : { items: [], loading: true, failed: false }
   }
 
   function isCursorAt(section, index) {
@@ -108,10 +110,17 @@ Item {
     page.scrollIntoView()
   }
 
+  // Collapsing from the bottom of a long list used to leave the highlighted
+  // toggle far below the fold; follow it.
+  function toggleExpanded() {
+    page.cwExpanded = !page.cwExpanded
+    page.clampCursor()
+    Qt.callLater(page.scrollIntoView)
+  }
+
   function activateCursor() {
     if (page.cursorSection === 0 && page.cwHasMore && page.cursorIndex === page.cwShown.length) {
-      page.cwExpanded = !page.cwExpanded
-      page.clampCursor()
+      page.toggleExpanded()
       return
     }
     var item = page.itemsFor(page.cursorSection)[page.cursorIndex]
@@ -122,10 +131,21 @@ Item {
 
   // TV shelf cards say where they lead (targetKey/targetType): an episode card
   // shows its show, so it opens the show. Movie cards open themselves.
+  // An episode card advertises ONE episode ("S2 · E5"), so it also hands the
+  // detail page that episode's season and key: the show used to open on the
+  // On Deck season instead, nowhere near what the card promised. The header
+  // keeps the show title and drops the episode title from the subtitle — the
+  // page is the show's, the cursor is what lands on the episode.
   function openShelfItem(item) {
     var key = item.targetKey ? item.targetKey : item.ratingKey
     var type = item.targetType ? item.targetType : item.type
-    page.panel.navigate("detail", { ratingKey: key, title: item.title, subtitle: item.caption, type: type })
+    var args = { ratingKey: key, title: item.title, subtitle: item.caption, type: type }
+    if (item.type === "episode" && type === "show") {
+      args.subtitle = "TV show"
+      args.seasonKey = String(item.seasonKey || "")
+      args.episodeKey = String(item.episodeKey || item.ratingKey || "")
+    }
+    page.panel.navigate("detail", args)
   }
 
   function bulkMove(delta) {
@@ -190,15 +210,43 @@ Item {
     return out
   }
 
+  // Callbacks outlive the page (every navigation rebuilds it); the bump in
+  // onDestruction turns a late response into a no-op.
+  property int fetchGen: 0
+
   function fetchOnDeck() {
     page.onDeckLoading = true
+    var gen = page.fetchGen
     page.panel.request(Api.onDeckUrl(""), function(doc) {
+      if (gen !== page.fetchGen) return
       var raw = []
       try { raw = Api.mapItems(doc) } catch (e) { raw = [] }
-      page.onDeckItems = page.resolveOnDeck(raw)
+      // A failed refresh keeps the rows already on screen.
+      page.onDeckFailed = doc === null || doc === undefined
+      if (!page.onDeckFailed || page.onDeckItems.length === 0) page.onDeckItems = page.resolveOnDeck(raw)
       page.onDeckLoading = false
       page.clampCursor()
+      page.maybeRestore()
     })
+  }
+
+  // seasonKey/episodeKey for episode cards, until Api.mapRecentShows carries
+  // them itself (the data batch adds both; this reads the raw hub only when
+  // the mapper did not). TODO(consolidate): drop once that lands.
+  function withEpisodeKeys(raw, doc) {
+    var meta = doc && doc.MediaContainer && doc.MediaContainer.Metadata ? doc.MediaContainer.Metadata : []
+    var parentOf = ({})
+    for (var i = 0; i < meta.length; i++)
+      if (meta[i] && meta[i].type === "episode" && meta[i].ratingKey !== undefined)
+        parentOf[String(meta[i].ratingKey)] = String(meta[i].parentRatingKey || "").replace(/[^A-Za-z0-9]/g, "")
+    var out = []
+    for (var j = 0; j < raw.length; j++) {
+      var it = raw[j]
+      if (it.type === "episode" && !it.seasonKey && parentOf[String(it.ratingKey)])
+        it = Object.assign({}, it, { seasonKey: parentOf[String(it.ratingKey)] })
+      out.push(it)
+    }
+    return out
   }
 
   function fetchShelf(sectionId, type) {
@@ -206,18 +254,25 @@ Item {
     // TV goes through the grouped hub (one card per show, like stock Plex);
     // a section's own /recentlyAdded would list anonymous episodes.
     var url = isShow ? Api.recentlyAddedHubUrl("", sectionId, 2, 24) : Api.recentlyAddedUrl("", sectionId, 24)
+    var gen = page.fetchGen
     page.panel.request(url, function(doc) {
+      if (gen !== page.fetchGen) return
       var raw = []
-      try { raw = isShow ? Api.mapRecentShows(doc) : Api.mapItems(doc) } catch (e) { raw = [] }
+      try { raw = isShow ? page.withEpisodeKeys(Api.mapRecentShows(doc), doc) : Api.mapItems(doc) } catch (e) { raw = [] }
       // Stale response guard: the library may have gone between firing this
       // request and it landing.
       var still = false
       for (var i = 0; i < page.libraryShelves.length; i++) if (page.libraryShelves[i].id === sectionId) still = true
       if (!still) return
       var data = Object.assign({}, page.shelfData)
-      data[sectionId] = { items: page.resolveShelf(raw), loading: false }
+      var failed = doc === null || doc === undefined
+      var prev = data[sectionId]
+      // A failed refresh keeps the posters already on screen.
+      var items = failed && prev && prev.items.length > 0 ? prev.items : page.resolveShelf(raw)
+      data[sectionId] = { items: items, loading: false, failed: failed }
       page.shelfData = data
       page.clampCursor()
+      page.maybeRestore()
     })
   }
 
@@ -239,7 +294,74 @@ Item {
     page.rebuildShelves()
   }
 
-  Component.onCompleted: page.reload()
+  // ---- scroll + cursor memory ----
+  // Restored ONCE, after On Deck and every shelf have landed. Restoring at
+  // onCompleted ran against placeholder heights: the Flickable clamped the
+  // target, and onContentYChanged wrote the clamped value straight back over
+  // the real one, so Back landed ~150 px high. Until the restore, nothing is
+  // remembered at all. In the meantime every landing re-applies the target
+  // as far as the content allows (the placeholders reserve near-final
+  // heights, so this is usually already right) — the TV hub takes ~1.4 s,
+  // and sitting at the top until then read as "Back lost my place".
+  property bool restoreDone: false
+  // A wheel during that window is the reader taking over; stop steering.
+  property bool userScrolled: false
+
+  function applyScrollTarget() {
+    if (page.userScrolled) return
+    var maxY = Math.max(0, homeFlick.contentHeight - homeFlick.height)
+    homeFlick.contentY = Math.min(maxY, page.panel.scrollFor("home"))
+  }
+
+  function maybeRestore() {
+    if (page.restoreDone) return
+    if (!page.onDeckLoading) page.cwExpanded = page.panel.scrollFor("home:cwExpanded") > 0
+    page.applyScrollTarget()
+    if (page.onDeckLoading) return
+    var libs = page.panel.libraries || []
+    if (libs.length > 0 && page.libraryShelves.length === 0) return
+    for (var i = 0; i < page.libraryShelves.length; i++)
+      if (page.shelfState(page.libraryShelves[i]).loading) return
+    // Everything has landed, but the Columns only re-lay out in the next
+    // polish pass, and a section swapping placeholder for rows passes
+    // through a shorter height on the way — the Flickable clamps contentY
+    // there. Settle first, then finish.
+    restoreSettle.restart()
+  }
+
+  Timer {
+    id: restoreSettle
+    interval: 60
+    onTriggered: page.finishRestore()
+  }
+
+  function finishRestore() {
+    if (page.restoreDone) return
+    page.applyScrollTarget()
+    page.restoreDone = true
+    page.cursorSection = Math.round(page.panel.scrollFor("home:cursorSection"))
+    page.cursorIndex = Math.round(page.panel.scrollFor("home:cursorIndex"))
+    page.clampCursor()
+    var block = page.cursorSection > 0 ? shelfRepeater.itemAt(page.cursorSection - 1) : null
+    if (block) block.shelfView.positionViewAtIndex(page.cursorIndex, ListView.Contain)
+  }
+
+  function saveView() {
+    if (!page.restoreDone) return
+    page.panel.rememberScroll("home", homeFlick.contentY)
+    page.panel.rememberScroll("home:cursorSection", page.cursorSection)
+    page.panel.rememberScroll("home:cursorIndex", page.cursorIndex)
+    page.panel.rememberScroll("home:cwExpanded", page.cwExpanded ? 1 : 0)
+  }
+
+  Component.onCompleted: {
+    page.reload()
+    Qt.callLater(page.maybeRestore)
+  }
+  Component.onDestruction: {
+    page.saveView()
+    page.fetchGen++
+  }
 
   // Libraries can still be in flight when this page first mounts (root's
   // open() kicks off loadLibraries() but never re-pokes an already-loaded
@@ -257,13 +379,18 @@ Item {
     clip: true
     boundsBehavior: Flickable.StopAtBounds
 
-    Component.onCompleted: homeFlick.contentY = page.panel.scrollFor("home")
-    onContentYChanged: page.panel.rememberScroll("home", contentY)
-    Component.onDestruction: page.panel.rememberScroll("home", homeFlick.contentY)
+    onContentYChanged: if (page.restoreDone) page.panel.rememberScroll("home", contentY)
+    // Re-steer through every relayout until the restore finishes; a
+    // transient short layout clamps contentY and this puts it back.
+    onContentHeightChanged: if (!page.restoreDone) page.applyScrollTarget()
 
     // parent: keeps the handler on the viewport rather than inside
     // contentItem, where it scrolls away after the first screen.
-    FastScrollHandler { parent: homeFlick; flickable: homeFlick }
+    FastScrollHandler {
+      parent: homeFlick
+      flickable: homeFlick
+      onScrolled: if (!page.restoreDone) page.userScrolled = true
+    }
 
     Column {
       id: mainColumn
@@ -286,11 +413,14 @@ Item {
 
         // A one-line-tall loading section lets the shelves paint near the top
         // and then get shoved off-screen when the rows land. The placeholder
-        // reserves roughly three rows so sections fill in place.
+        // reserves the CAPPED list's full height (five rows plus the toggle),
+        // so the common case fills in place and nothing below it moves.
         Item {
           width: parent.width
           visible: page.onDeckLoading || page.onDeckItems.length === 0
-          height: page.onDeckLoading ? Style.space(180) : Style.space(24)
+          height: page.onDeckLoading
+            ? page.cwCap * Style.space(56) + page.cwCap * Style.space(4) + cwToggle.implicitHeight
+            : Style.space(24)
 
           Text {
             anchors.centerIn: parent
@@ -300,7 +430,9 @@ Item {
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
             textFormat: Text.PlainText
-            text: page.onDeckLoading ? "Loading On Deck…" : "Nothing in progress. Search to start something."
+            text: page.onDeckLoading ? "Loading On Deck…"
+              : (page.onDeckFailed ? "Couldn't load On Deck — R to retry"
+                : "Nothing in progress. Search to start something.")
           }
         }
 
@@ -339,7 +471,7 @@ Item {
             focusable: false
             bordered: false
             hasCursor: page.isCursorAt(0, page.cwShown.length)
-            onClicked: { page.cwExpanded = !page.cwExpanded; page.clampCursor() }
+            onClicked: page.toggleExpanded()
             onHovered: function(on) {
               if (on) {
                 page.cursorSection = 0
@@ -366,24 +498,6 @@ Item {
           readonly property bool isShow: shelfBlock.modelData.type === "show"
           readonly property int cardHeight: shelfBlock.isShow ? page.showShelfCardHeight : page.shelfCardHeight
 
-          // Page left/right one shelf-width at a time, the way stock Plex puts
-          // chevrons top-right of each row — a mouse has no other way along a
-          // shelf without a horizontal wheel.
-          function pageShelf(dir) {
-            var maxX = Math.max(0, shelfList.contentWidth - shelfList.width)
-            var step = Math.max(page.shelfCardWidth, shelfList.width - page.shelfCardWidth)
-            shelfScroll.to = Math.max(0, Math.min(maxX, shelfList.contentX + dir * step))
-            shelfScroll.restart()
-          }
-
-          NumberAnimation {
-            id: shelfScroll
-            target: shelfList
-            property: "contentX"
-            duration: 260
-            easing.type: Easing.OutCubic
-          }
-
           Item {
             width: parent.width
             height: Math.max(shelfTitle.implicitHeight, shelfArrows.implicitHeight)
@@ -392,59 +506,40 @@ Item {
               id: shelfTitle
               anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
+              // A long library name used to run under the arrows.
+              width: Math.min(implicitWidth, parent.width - (shelfArrows.visible ? shelfArrows.width + Style.space(8) : 0))
+              elide: Text.ElideRight
               color: Color.foreground
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
               font.bold: true
               textFormat: Text.PlainText
               text: "RECENTLY ADDED — " + String(shelfBlock.modelData.title || "").toUpperCase()
-              font.underline: titleLink.containsMouse
+              // The underline is this link's hover state, so it follows the
+              // shared cursor like every other highlight: hovering claims the
+              // pointer region (page cursor hides), leaving gives it back.
+              font.underline: page.panel.cursorOn("pointer", "shelf-title:" + shelfBlock.modelData.id)
 
               // The title is the way to the whole list, as on stock Plex: the
               // library page opens on its first sort, "Recently added".
               MouseArea {
-                id: titleLink
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
+                onEntered: page.panel.claimPointer("shelf-title:" + shelfBlock.modelData.id)
+                onExited: page.panel.releasePointer("shelf-title:" + shelfBlock.modelData.id)
                 onClicked: page.panel.navigate("library", { sectionId: shelfBlock.modelData.id })
               }
             }
 
-            Row {
+            ShelfArrows {
               id: shelfArrows
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(2)
-              // Only once the row actually overflows; a short shelf has
-              // nowhere to go.
-              visible: shelfList.visible && shelfList.contentWidth > shelfList.width + 1
-
-              Button {
-                iconText: "󰅁"
-                iconSize: Style.font.iconLarge
-                foreground: Color.foreground
-                focusable: false
-                bordered: false
-                horizontalPadding: Style.space(5)
-                enabled: !shelfList.atXBeginning
-                opacity: enabled ? 1 : 0.35
-                tooltipText: "Scroll left"
-                onClicked: shelfBlock.pageShelf(-1)
-              }
-
-              Button {
-                iconText: "󰅂"
-                iconSize: Style.font.iconLarge
-                foreground: Color.foreground
-                focusable: false
-                bordered: false
-                horizontalPadding: Style.space(5)
-                enabled: !shelfList.atXEnd
-                opacity: enabled ? 1 : 0.35
-                tooltipText: "Scroll right"
-                onClicked: shelfBlock.pageShelf(1)
-              }
+              list: shelfList
+              panel: page.panel
+              key: "shelf:" + shelfBlock.modelData.id
+              cardWidth: page.shelfCardWidth
             }
           }
 
@@ -465,7 +560,8 @@ Item {
               textFormat: Text.PlainText
               text: shelfBlock.contents.loading
                 ? "Loading Recently Added…"
-                : "Nothing added to " + shelfBlock.modelData.title + " yet."
+                : (shelfBlock.contents.failed ? "Couldn't load Recently Added — R to retry"
+                  : "Nothing added to " + shelfBlock.modelData.title + " yet.")
             }
           }
 
