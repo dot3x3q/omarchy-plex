@@ -117,9 +117,20 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        try { root.applyConfig(String(text || "")) }
+        var raw = String(text || "")
+        try { root.applyConfig(raw) }
         catch (e) { /* first run or rejected file */ }
-        if (!root.configured()) { legacyConfigRead.running = true; return }
+        if (!root.configured()) {
+          // Only an ABSENT new config may be spoken for by the pre-rename one,
+          // the same rule positionRead follows. A present-but-invalid file (a
+          // JSON typo, a token that fails validToken) used to fall through to
+          // here too, and adoption then SAVED the old config over it: one bad
+          // keystroke in config.json silently reverted you to a months-old
+          // server and token. A bad file now parks you on setup, saying why.
+          if (raw === "") legacyConfigRead.running = true
+          else root.setStatus("~/.config/omarchy-plex/config.json could not be read — fix it here and Connect", true)
+          return
+        }
         // Opened in the moments after a shell restart, before this read
         // finished: open() saw no config and parked the window on setup.
         // A valid config arriving now means it never belonged there.
@@ -128,17 +139,35 @@ Item {
     }
   }
 
-  function saveConfig() {
+  // With no arguments this writes what the root already holds (the legacy
+  // adoption path). The Settings page passes its STAGED form values instead:
+  // they are validated first and only reach root.server/token/backend once
+  // they pass, so a half-typed URL or token never drives a live request, and
+  // a rejected form leaves the working config exactly as it was.
+  function saveConfig(server, token, backend) {
+    var s = server === undefined ? root.server : String(server)
+    var t = token === undefined ? root.token : String(token)
+    var b = backend === undefined ? root.backend : (backend === "mpv" ? "mpv" : "internal")
     // Validate visibly instead of silently mangling; nothing user-controlled
     // is ever interpolated into shell source.
-    if (!Model.validServer(root.server)) {
+    if (!Model.validServer(s)) {
       root.setStatus("Server must look like http://host:32400", true)
       return false
     }
-    if (!Model.validToken(root.token)) {
+    if (!Model.validToken(t)) {
       root.setStatus("Token looks wrong — paste only the X-Plex-Token value", true)
       return false
     }
+    // Switching engines under a live session unloads the native player while
+    // `mode` stays "playing": a ghost session nothing can stop. Refusing is
+    // simpler and more honest than tearing down someone's film from Settings.
+    if (b !== root.backend && root.mode === "playing") {
+      root.setStatus("Stop playback before switching the playback backend", true)
+      return false
+    }
+    root.server = s
+    root.token = t
+    root.backend = b
     root.setStatus("", false)
     saveProcess.running = true
     return true
@@ -196,13 +225,19 @@ Item {
 
   function configured() { return root.server !== "" && root.token !== "" }
 
-  // Settings page calls this once saveConfig() has accepted the form.
+  // Settings page calls this once saveConfig() has accepted the form, and
+  // configRead calls it when a config lands after open() parked on setup.
+  // `mode` is the ENGINE's state: only setup/error belong to this function.
+  // Forcing "list" unconditionally used to strand a live session (Connect
+  // mid-film flipped mode under the player, so nothing could stop it).
+  // Focus goes through focusPrimary so the window still opens into
+  // type-to-search when the config arrives late.
   function configApplied() {
-    root.mode = "list"
+    if (root.mode === "setup" || root.mode === "error") root.mode = "list"
     root.setStatus("", false)
     root.loadLibraries()
     root.navigate("home", ({}))
-    keyHost.forceActiveFocus()
+    root.focusPrimary()
   }
 
   // ---- state ----
