@@ -22,7 +22,7 @@ vm.runInNewContext(
     " mapDetail, durationText: durationText, progressFor: progressFor, unwatchedFor: unwatchedFor," +
     " mapStreams, selectedStreamId, partSelectionUrl, streamLabel,\n" +
     " recentlyAddedHubUrl, mapRecentShows, ratingsFor, detailUrl, relatedUrl, mapRelated,\n" +
-    " extrasFor, castFor, keyOf }",
+    " extrasFor, castFor, keyOf, partsFor }",
   ctx
 )
 const A = ctx.A
@@ -682,4 +682,99 @@ test("castFor keeps absolute https thumbs verbatim and tolerates a missing one",
   assert.equal(out[1].photoPath, "https://image.tmdb.org/t/p/original/8LpZ95uYfhjdx0wTSGB0HMOQUTB.jpg")
   assert.deepEqual([out[2].name, out[2].role, out[2].photoPath], ["No Photo", "", ""])
   assert.equal(A.castFor(undefined).length, 0)
+})
+
+// ---- multi-part and multi-version items (probed live 2026-10-23) ----
+//
+// Trimmed from the live responses: `file` (an absolute server path) is
+// dropped, streams cut to the fields read. 3732 is one Media of two .mkv
+// parts; 7324 (The Sound of Music) the same as CD1/CD2; 393 is two Media
+// versions, a 4K remux first and a 1080p mp4 second.
+const twoPart = { MediaContainer: { Metadata: [{
+  ratingKey: "3732", type: "movie", title: "Lupin the Third: Jigen's Gravestone", duration: 3158528,
+  Media: [{ id: 8886, duration: 3158528, videoResolution: "1080", container: "mkv",
+    Part: [
+      { id: 8886, key: "/library/parts/8886/1678830492/file.mkv", duration: 1585708, container: "mkv",
+        Stream: [{ id: 1, streamType: 1, displayTitle: "1080p" },
+          { id: 2, streamType: 2, selected: true, displayTitle: "Русский (FLAC Stereo)" }] },
+      { id: 8887, key: "/library/parts/8887/1678830499/file.mkv", duration: 1572820, container: "mkv",
+        Stream: [{ id: 3, streamType: 1, displayTitle: "1080p" },
+          { id: 4, streamType: 2, selected: true, displayTitle: "Русский (FLAC Stereo)" }] }
+    ] }]
+}] } }
+
+const cdParts = { MediaContainer: { Metadata: [{
+  ratingKey: "7324", type: "movie", title: "The Sound of Music", duration: 10351488,
+  Media: [{ id: 17399, duration: 10351488, Part: [
+    { id: 17400, key: "/library/parts/17400/1678012411/file.mkv", duration: 6160064 },
+    { id: 17401, key: "/library/parts/17401/1678012412/file.mkv", duration: 4191424 }
+  ] }]
+}] } }
+
+const twoVersions = { MediaContainer: { Metadata: [{
+  ratingKey: "393", type: "movie", title: "Anchorman: The Legend of Ron Burgundy",
+  Media: [
+    { id: 857, videoResolution: "4k", container: "mkv", videoCodec: "hevc", width: 3840, height: 2160,
+      Part: [{ id: 857, key: "/library/parts/857/1720083513/file.mkv", duration: 5644736, Stream: [
+        { id: 10, streamType: 1, displayTitle: "4K DoVi/HDR10", extendedDisplayTitle: "4K DoVi/HDR10 (HEVC Main 10)" },
+        { id: 11, streamType: 2, selected: true, displayTitle: "English (DTS-HD MA 5.1)" },
+        { id: 12, streamType: 2, displayTitle: "English (AC3 5.1)" },
+        { id: 13, streamType: 3, codec: "pgs", displayTitle: "English" },
+        { id: 14, streamType: 3, codec: "pgs", displayTitle: "Deutsch" }
+      ] }] },
+    { id: 18960, videoResolution: "1080", container: "mp4", videoCodec: "h264", width: 1920, height: 1072,
+      Part: [{ id: 18962, key: "/library/parts/18962/1668693432/file.mp4", duration: 5575677, Stream: [
+        { id: 20, streamType: 1, displayTitle: "1080p" },
+        { id: 21, streamType: 2, selected: true, displayTitle: "Unknown (AAC 5.1)" },
+        { id: 22, streamType: 3, displayTitle: "English" }
+      ] }] }
+  ]
+}] } }
+
+test("partsFor lists every part of the first Media in play order", () => {
+  assert.deepEqual(plain(A.partsFor(twoPart)), [
+    { key: "/library/parts/8886/1678830492/file.mkv", duration: 1585708, id: "8886" },
+    { key: "/library/parts/8887/1678830499/file.mkv", duration: 1572820, id: "8887" }
+  ])
+  const cd = A.partsFor(cdParts)
+  assert.equal(cd.length, 2)
+  assert.equal(cd[0].duration + cd[1].duration, 10351488) // Media.duration is the sum
+})
+
+test("partsFor reads only the first version of a multi-version item", () => {
+  assert.deepEqual(plain(A.partsFor(twoVersions)),
+    [{ key: "/library/parts/857/1720083513/file.mkv", duration: 5644736, id: "857" }])
+})
+
+test("partsFor drops keys that are not server-relative paths, and tolerates junk", () => {
+  const bad = { MediaContainer: { Metadata: [{ Media: [{ Part: [
+    { id: 1, key: "//evil.example/x.mkv" }, { id: 2, key: "https://evil.example/x.mkv" },
+    { id: 3, key: "library/parts/3/file.mkv" }, { id: 4, key: "/library/parts/4/a b.mkv" },
+    { id: 5, key: "/library/parts/5/file.mkv\n%0" }, { id: 6, key: "/" + "x".repeat(600) },
+    { id: 7 }, null, { id: "8/../x", key: "/library/parts/8/file.mkv" }
+  ] }] }] } }
+  assert.deepEqual(plain(A.partsFor(bad)), [{ key: "/library/parts/8/file.mkv", duration: 0, id: "8x" }])
+  assert.equal(A.partsFor(null).length, 0)
+  assert.equal(A.partsFor({ MediaContainer: { Metadata: [{ type: "show" }] } }).length, 0)
+})
+
+test("mapDetail describes the first version's first part, not a later one", () => {
+  const d = A.mapDetail(twoVersions)
+  assert.equal(d.media.videoResolution, "4k")
+  assert.equal(d.videoText, "4K DoVi/HDR10") // short displayTitle, not the extended one
+  assert.equal(d.audioText, "English (DTS-HD MA 5.1)")
+  assert.equal(d.subtitleCount, 2) // the 1080p version's subtitle is not counted
+  // Multi-part: the second part repeats the streams and must not double them.
+  const p = A.mapDetail(twoPart)
+  assert.equal(p.videoText, "1080p")
+  assert.equal(p.audioText, "Русский (FLAC Stereo)")
+  assert.equal(p.subtitleCount, 0)
+})
+
+test("mapDetail falls back to the first audio stream when none is selected", () => {
+  const d = A.mapDetail({ MediaContainer: { Metadata: [{ type: "movie", ratingKey: "1",
+    Media: [{ Part: [{ Stream: [{ streamType: 2, displayTitle: "日本語 (AAC Stereo)" },
+      { streamType: 2, displayTitle: "English (AAC Stereo)" }] }] }] }] } })
+  assert.equal(d.audioText, "日本語 (AAC Stereo)")
+  assert.equal(d.videoText, "")
 })

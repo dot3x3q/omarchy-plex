@@ -334,9 +334,9 @@ function mapStream(s, ordinal, isSubtitle) {
 }
 
 // Returns { partId, video[], audio[], subtitle[] } for the FIRST part of the
-// first Media. Multi-part items (a film split across two files) would want a
-// part picker of their own; `allParts=1` on the selection PUT at least keeps
-// the halves in step. Tolerant by construction:
+// first Media. On the multi-part items probed (3732, 7324) every part carries
+// the same stream list, and `allParts=1` on the selection PUT keeps the
+// halves in step. Tolerant by construction:
 // a show or season carries no Media at all and must come back as empty lists
 // rather than throwing.
 function mapStreams(json) {
@@ -391,6 +391,47 @@ function partSelectionUrl(server, partId, audioStreamId, subtitleStreamId) {
   return server + "/library/parts/" + encodeURIComponent(String(partId)) + "?" + params.join("&")
 }
 
+// ---- multi-part and multi-version items ----
+//
+// Both exist on the live server (probed 2026-10-23). MULTI-PART: one Media
+// whose Part[] holds several files that play back to back — 3732 (part1/
+// part2 .mkv) and 7324 The Sound of Music (CD1/CD2). Media.duration is the
+// sum; each Part has its own id, key and duration. MULTI-VERSION: several
+// Media entries for one item, each a complete copy — 393 carries a 4K remux
+// and a 1080p mp4 (which, on this server, is in fact a different film merged
+// into the item). Plex lists the version it would pick first, so everything
+// here reads Media[0], and Media[0].Part[0] where one part is enough.
+function firstMedia(m) {
+  return (m && m.Media && m.Media[0]) || null
+}
+
+function firstPart(m) {
+  var media = firstMedia(m)
+  return (media && media.Part && media.Part[0]) || null
+}
+
+// Every part of the first Media, in play order, for a player that has to
+// stitch them (an mpv EDL). A part key is a server-relative path; anything
+// that is not one ("//host/...", an absolute URL, a key with whitespace or
+// control characters that would break an EDL line) is dropped rather than
+// handed to a player. Capped like every other path, and at MAX_ITEMS parts.
+function partsFor(json) {
+  var mc = json && json.MediaContainer
+  var m = mc && mc.Metadata && mc.Metadata[0]
+  var media = firstMedia(m)
+  var list = (media && media.Part) || []
+  var out = []
+  for (var i = 0; i < list.length && out.length < MAX_ITEMS; i++) {
+    var p = list[i]
+    if (!p) continue
+    var key = String(p.key === undefined || p.key === null ? "" : p.key)
+    if (key.length > 512) continue
+    if (key.charAt(0) !== "/" || key.charAt(1) === "/" || /[\s\x00-\x1f\x7f]/.test(key)) continue
+    out.push({ key: key, duration: Number(p.duration) || 0, id: keyOf(p.id) })
+  }
+  return out
+}
+
 // Detail page: base item shape plus the extras a hero/season list needs.
 // rating: movies carry a top-level critic `rating`; shows never do (only
 // `audienceRating` + a `Rating[]` array) — fall back so the hero always has a
@@ -404,8 +445,8 @@ function mapDetail(json) {
   var Genre = m.Genre || []
   for (var i = 0; i < Genre.length; i++) if (Genre[i] && Genre[i].tag) genres.push(cap(Genre[i].tag, MAX_FIELD))
   var media = null
-  if (m.Media && m.Media[0]) {
-    var md = m.Media[0]
+  var md = firstMedia(m)
+  if (md) {
     media = {
       videoResolution: cap(md.videoResolution, 16),
       container: cap(md.container, 16),
@@ -429,11 +470,13 @@ function mapDetail(json) {
   item.ratings = ratingsFor(m)
   // The hero's Video/Audio lines use Plex's SHORT displayTitle ("4K DoVi/HDR10
   // (HEVC Main 10)"), not the picker's extendedDisplayTitle, which drags in
-  // whatever release-group name the file's track title carries.
+  // whatever release-group name the file's track title carries. Read from the
+  // FIRST Media's FIRST Part only: the other parts of a multi-part file repeat
+  // the same streams, and a second version would describe a different file.
   item.videoText = ""
   item.audioText = ""
   item.subtitleCount = 0
-  var part = m.Media && m.Media[0] && m.Media[0].Part && m.Media[0].Part[0]
+  var part = firstPart(m)
   var raw = (part && part.Stream) || []
   var firstAudio = ""
   for (var k = 0; k < raw.length && k < MAX_ITEMS; k++) {
