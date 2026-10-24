@@ -87,8 +87,11 @@ Item {
 
   function scrollIntoView() { resultsList.positionViewAtIndex(page.cursorIndex, ListView.Contain) }
 
-  // Nothing for this page to refetch on its own — results are root-owned.
-  function reload() {}
+  // Results are root-owned; R re-runs the query (the retry the failure
+  // message offers).
+  function reload() {
+    if (page.query !== "") page.panel.search(page.query)
+  }
 
   Text {
     anchors.centerIn: parent
@@ -102,7 +105,8 @@ Item {
     textFormat: Text.PlainText
     text: page.query === ""
       ? "Type to search your whole server."
-      : (page.searching ? "Searching…" : "No results.")
+      : (page.searching ? "Searching…"
+        : (page.panel.searchFailed ? "Couldn't search — R to retry" : "No results."))
   }
 
   // While a refinement is in flight over existing results, say so — the

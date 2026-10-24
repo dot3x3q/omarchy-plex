@@ -1142,6 +1142,8 @@ Item {
   // it from its query changing, which also fired when the page was merely
   // rebuilt by Back — a "Searching…" that never cleared.
   property bool searching: false
+  // The last finished search failed (null doc) rather than found nothing.
+  property bool searchFailed: false
   // A NEW query (not a rebuilt page) is what resets the results list's
   // scroll and cursor; SearchPage listens for this instead of onQueryChanged.
   signal searchStarted()
@@ -1166,6 +1168,7 @@ Item {
     root.request(Api.searchUrl("", query), function(doc) {
       if (gen !== root.searchGen) return
       root.searching = false
+      root.searchFailed = doc === null || doc === undefined
       var out = []
       try { out = Api.mapSearch(doc) } catch (e) { out = [] }
       root.searchResults = out
