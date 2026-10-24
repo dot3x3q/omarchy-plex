@@ -119,7 +119,11 @@ Item {
       onStreamFinished: {
         try { root.applyConfig(String(text || "")) }
         catch (e) { /* first run or rejected file */ }
-        if (!root.configured()) legacyConfigRead.running = true
+        if (!root.configured()) { legacyConfigRead.running = true; return }
+        // Opened in the moments after a shell restart, before this read
+        // finished: open() saw no config and parked the window on setup.
+        // A valid config arriving now means it never belonged there.
+        if (root.opened && root.mode === "setup") root.configApplied()
       }
     }
   }
@@ -960,7 +964,10 @@ Item {
       // --fail leaves stdout empty on any HTTP error, so a parse failure and
       // a transport failure land in the same place: cb(null).
       try { parsed = JSON.parse(String(body || "")) } catch (e) { parsed = null }
-      cb(parsed)
+      // A callback whose page has since been destroyed throws (its `page` id
+      // resolves to null). Without the catch the pump below never ran, and
+      // the queue sat stalled until some unrelated request came along.
+      try { cb(parsed) } catch (e) { console.warn("omarchy-plex: request callback threw:", e) }
     }
     root.pumpRequests()
   }
@@ -1127,18 +1134,42 @@ Item {
       root.resumeSec = parsed.viewOffsetSec
       root.currentThumbPath = root.metadataThumb(jsonText)
       root.stashStreams(jsonText)
-      var mediaUrl = root.server + partKey
+      var mediaUrl = root.directPlayUrl(partKey)
       // Only QtMultimedia needs the token on the URL: its media loader cannot
       // send an HTTP header at all, which is the documented exception the
       // artwork URLs share. Both mpv engines carry it in a header instead, so
       // in native mode this direct-play URL is clean — no token in the string
       // handed to the demuxer, none in any log line that quotes it.
-      if (root.backend !== "mpv" && !root.nativeMode)
-        mediaUrl += "?X-Plex-Token=" + root.token
       playSource(mediaUrl, resolve.title)
     } catch (e) {
       fail("Could not resolve media")
     }
+  }
+
+  // ---- where the token may go on a media URL ----
+  //
+  // FFmpeg (under both mpv engines) re-sends `http-header-fields` on EVERY
+  // redirect hop. Extras' parts (/services/iva/assets/…) 302 to a third-party
+  // CDN (internetvideoarchive.net), so a header there hands the account token
+  // to a stranger — reproduced 2026-10-23 with a two-host harness. A query
+  // parameter does not survive the redirect (the Location is a fresh URL), so:
+  // header only for Plex's own media paths, query param for everything else.
+  function tokenHeaderAllowed(url) {
+    var u = String(url || "")
+    if (u.indexOf(root.server + "/") !== 0) return false
+    var path = u.slice(root.server.length)
+    return path.indexOf("/library/") === 0 || path.indexOf("/video/") === 0
+  }
+
+  // Direct-play URL for a part key. QtMultimedia cannot send headers at all,
+  // so it always gets the token as a query param (the documented exception
+  // the artwork URLs share); the mpv engines get it as a header when
+  // tokenHeaderAllowed, otherwise as a query param too.
+  function directPlayUrl(partKey) {
+    var url = root.server + String(partKey || "")
+    var headerEngine = root.backend === "mpv" || root.nativeMode
+    if (headerEngine && root.tokenHeaderAllowed(url)) return url
+    return url + (url.indexOf("?") >= 0 ? "&" : "?") + "X-Plex-Token=" + root.token
   }
 
   // Model.parsePlaybackMetadata deliberately only knows about playback (it is
@@ -1221,7 +1252,7 @@ Item {
       // Residual risk, accepted for a single-user desktop: the token header
       // is visible in mpv's argv (/proc/PID/cmdline). mpv cannot read
       // headers from a file; rotating the token closes any exposure window.
-      mpvProc.command = ["mpv",
+      var args = ["mpv",
         "--no-config", "--no-ytdl",
         "--hwdec=auto", "--vo=gpu-next",
         "--really-quiet", "--keep-open=no",
@@ -1230,11 +1261,15 @@ Item {
         "--volume-max=200", "--volume=" + root.volumePct,
         "--start=" + Math.max(0, root.resumeSec) + ".5",
         "--input-ipc-server=" + root.ipcSock,
-        "--http-header-fields=X-Plex-Token: " + root.token,
         // bottom-right miniplayer placement instead of centre-screen
         "--autofit=" + root.videoWidth + "x" + root.videoHeight,
-        "--geometry=-" + (root.marginRight + 14) + "-" + (root.marginBottom + 130),
-        root.pendingMpvUrl]
+        "--geometry=-" + (root.marginRight + 14) + "-" + (root.marginBottom + 130)]
+      // Header only toward Plex's own media paths — see tokenHeaderAllowed.
+      if (root.tokenHeaderAllowed(root.pendingMpvUrl))
+        args.push("--http-header-fields=X-Plex-Token: " + root.token)
+      args.push(root.pendingMpvUrl)
+      // Assigned whole: pushing onto mpvProc.command would edit a copy.
+      mpvProc.command = args
       root.resumeSec = 0
       mpvProc.gen = root.playGen
       mpvProc.running = true
@@ -2202,11 +2237,9 @@ Item {
     root.triedTranscode = false
     root.playGen++
     root.clearSeekPreview()
-    // Same URL construction as applyMetadata, including the reason only the
-    // QtMultimedia path appends a token: its media loader cannot send headers.
-    var url = root.server + root.currentPartKey
-    if (root.backend !== "mpv" && !root.nativeMode)
-      url += "?X-Plex-Token=" + root.token
+    // Same URL construction as applyMetadata (one helper, so the two can
+    // never drift again — they did once, over extras' `?`).
+    var url = root.directPlayUrl(root.currentPartKey)
     if (root.backend === "mpv") root.startMpv(url)
     else root.startInternal(url)
   }
@@ -2401,7 +2434,9 @@ Item {
     var arm = root.pendingNativeArm
     if (!v || !arm || root.currentMediaUrl === "") return
     root.pendingNativeArm = null
-    v.httpHeaders = ["X-Plex-Token: " + root.token]
+    // Set on EVERY load, never left over: the property persists in the core,
+    // so an extra played after a film would otherwise inherit the header.
+    v.httpHeaders = root.tokenHeaderAllowed(root.currentMediaUrl) ? ["X-Plex-Token: " + root.token] : []
     v.volume = root.volumePct
     v.paused = false
     v.loadUrl(root.currentMediaUrl, Math.max(0, Number(arm.pos) || 0))
@@ -2692,6 +2727,15 @@ Item {
     escapeCloseTimer.stop()
     root.escapeCloseArmed = false
     if (root.statusText === "Press Esc again to close") root.setStatus("", false)
+  }
+
+  // Mouse side button ("back", Qt.BackButton — the thumb button nearer the
+  // wrist on most mice). Same walk as Esc, minus Esc's last step: a back
+  // button should never arm closing the window.
+  function mouseBack() {
+    if (root.trackPopup !== "") { root.closeTrackPopup(); return }
+    if (root.inTheater) { root.exitTheater(); return }
+    if (root.navStack.length > 0 || root.currentPage !== "home") root.goBack()
   }
 
   function escapePressed() {
@@ -3170,15 +3214,20 @@ Item {
                 pipDrag.grabX, pipDrag.grabY)
             }
           }
-          // A bare click on the picture is a focus grab, not a move: the
+          // A bare click on the picture is play/pause, not a move: the
           // handoff (and its state write) belongs to gestures that actually
           // moved. handlePipDrop falls back to a plain snap when the drop
-          // landed on the screen it started from.
+          // landed on the screen it started from. "Bare" is judged by the
+          // drag threshold rather than `moved`, because a hand on a mouse
+          // jitters a pixel or two between press and release.
           onReleased: function(mouse) {
             root.pipDragging = false
             root.pipDropScreen = null
-            if (!pipDrag.moved) return
             var p = mapToItem(null, mouse.x, mouse.y)
+            if (Math.abs(p.x - pipDrag.pressX) < root.dragThreshold
+                && Math.abs(p.y - pipDrag.pressY) < root.dragThreshold)
+              root.togglePause()
+            if (!pipDrag.moved) return
             root.handlePipDrop(p.x, p.y, pipDrag.grabX, pipDrag.grabY)
           }
         }
@@ -4152,6 +4201,23 @@ Item {
       // No threshold here: a press on an 8px edge band is unambiguous, and a
       // click that never moves simply ends the compositor's gesture immediately.
       // Hyprland's Super+RMB keeps working regardless; this is the mouse-only path.
+      //
+      // Mouse side button ("back", Qt.BackButton). Topmost, so it sees the
+      // press before anything below can filter it — a TapHandler on `content`
+      // only fired once a freshly opened page had settled, most likely because
+      // a page's Flickable/ListView intercepts presses meant for its children
+      // while it is still laying out. It accepts NO other button, so left and
+      // right clicks fall straight through to whatever is underneath, and with
+      // hover off and no cursorShape it never touches the pointer. Acts on
+      // press: the release can be lost if the page under it is swapped out.
+      MouseArea {
+        anchors.fill: parent
+        z: 101
+        acceptedButtons: Qt.BackButton
+        hoverEnabled: false
+        onPressed: root.mouseBack()
+      }
+
       Item {
         id: resizeEdges
         anchors.fill: parent

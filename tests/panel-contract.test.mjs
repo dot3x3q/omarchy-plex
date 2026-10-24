@@ -90,3 +90,19 @@ test("an open track picker owns the keyboard before Esc's layered walk", () => {
   assert.match(qml, /root\.windowed && !ctrl && !alt && key === Qt\.Key_A/)
   assert.doesNotMatch(theater, /audioPickerAvailable[\s\S]{0,80}pipStrip/)
 })
+
+// FFmpeg re-sends http-header-fields on every redirect hop, and extras
+// (/services/iva/…) 302 to a third-party CDN. The token header must only ever
+// be attached behind tokenHeaderAllowed, and both direct-play call sites must
+// share one URL builder (they drifted once, over extras' `?`).
+test("media token header is gated by origin and path", () => {
+  const headerSites = qml.match(/X-Plex-Token: " \+ root\.token/g) || []
+  // curl pool header (Plex API only), native httpHeaders, mpv argv.
+  assert.equal(headerSites.length, 3)
+  assert.match(qml, /tokenHeaderAllowed\(root\.currentMediaUrl\) \? \["X-Plex-Token: " \+ root\.token\] : \[\]/)
+  assert.match(qml, /if \(root\.tokenHeaderAllowed\(root\.pendingMpvUrl\)\)\s*args\.push\("--http-header-fields=X-Plex-Token: "/)
+  const allowed = qml.slice(qml.indexOf("function tokenHeaderAllowed"), qml.indexOf("function directPlayUrl"))
+  assert.match(allowed, /path\.indexOf\("\/library\/"\) === 0 \|\| path\.indexOf\("\/video\/"\) === 0/)
+  assert.equal((qml.match(/root\.directPlayUrl\(/g) || []).length, 2)
+  assert.doesNotMatch(qml, /root\.server \+ (partKey|root\.currentPartKey)\b/)
+})

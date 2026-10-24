@@ -34,7 +34,7 @@ Item {
   // It is also the theater half of drag-anywhere: the window has no chrome to
   // grab, and a full-bleed video is the largest bare surface in the app. Past
   // the threshold the compositor takes the gesture over; below it, a click is
-  // still just a click that pokes the controls awake.
+  // play/pause, like every other video player (and it wakes the controls).
   MouseArea {
     id: videoSurface
     anchors.fill: parent
@@ -57,7 +57,12 @@ Item {
       videoSurface.handedOff = true
       view.panel.beginWindowDrag()
     }
-    onClicked: view.panel.pokeTheaterControls()
+    onClicked: {
+      // A drag that the compositor took over can still deliver a release here.
+      if (videoSurface.handedOff) return
+      view.panel.togglePause()
+      view.panel.pokeTheaterControls()
+    }
     // Scroll anywhere over the picture is volume, the same gesture as on the
     // PiP card. Deliberately no holdVolumePopup here: volumeAdjusting already
     // flashes the readout for 1500ms per step, exactly as a keyboard nudge
