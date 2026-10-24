@@ -105,6 +105,29 @@ All three tried sorts are honored server-side (no client re-sort needed):
   before digits before letters.
 - `sort=year:desc` — newest release year first.
 
+## `/hubs/home/recentlyAdded?type=2&sectionID={id}` — the grouped TV shelf
+
+Probed 2026-10-23. A TV section's own `/recentlyAdded` lists bare episodes, so
+a home shelf built on it is a row of screenshots titled "Episode 2". This hub
+is what stock Plex's "Recently Added in TV Shows" row uses: one entry per show,
+typed `show` (whole show new; `childCount` seasons), `season` (`parentTitle` =
+show, `parentThumb` = show poster, `leafCount` new episodes) or `episode`
+(`grandparentTitle`/`grandparentThumb`/`grandparentRatingKey` = the show).
+`Api.mapRecentShows` turns each into a card with the show's poster and name.
+
+## Movie-page includes — `?includeExtras=1&includeRelated=1`
+
+Same `/library/metadata/{ratingKey}` call (`Api.detailUrl`). Adds `Extras.Metadata[]`
+(type `clip`, `subtype` trailer/scene/…, own `ratingKey`; the part key is
+`/services/iva/assets/…/video.mp4?fmt=4&bitrate=5000`, which 302s to an
+external CDN and already carries a `?`) and `Related.Hub[]` (`movie.similar`).
+`Role[]` (cast, `thumb` is an absolute metadata-static.plex.tv URL),
+`Director[]`, `studio` and `Rating[]` are present without any include.
+`Rating[]` names its source only through `image`: `imdb://image.rating`,
+`rottentomatoes://image.rating.ripe|rotten` (critic),
+`rottentomatoes://image.rating.upright|spilled` (audience),
+`themoviedb://image.rating`; values are 0–10.
+
 ## `/library/metadata/{ratingKey}` — one per type
 
 **Movie** — top-level `rating` (critic) *and* `audienceRating` both present:
