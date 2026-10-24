@@ -95,7 +95,10 @@ Config lands in `~/.config/omarchy-plex/config.json`, chmod 600, written
 atomically. The token travels in request headers wherever technically
 possible; the exceptions (image URLs, QtMultimedia media URLs — neither can
 send headers) are documented in `docs/DESIGN.md`. The native module sends it
-header-only, which is one more reason to build it.
+header-only, which is one more reason to build it. API calls hand curl the
+header through a config on stdin (`curl -K -`), never on its command line,
+where any local process could read it from `/proc`; the external mpv
+backend's `--http-header-fields` is the one command-line exception left.
 
 ## The two surfaces
 
@@ -176,8 +179,9 @@ lists, `Esc` closes.
   server.
 - `AGENTS.md` — dev-loop commands (lint, tests, the compile gate that
   catches what the linter can't).
-- `node --test tests/*.test.mjs` — Api mappers, IO safety, and static
-  contract pins over the QML.
+- `node --test tests/*.test.mjs` — Api mappers, the request pool
+  (`Pool.js`), the panel's real shell scripts run in a throwaway HOME
+  (`Io.js`), and static contract pins over the QML.
 
 ### Pull requests
 

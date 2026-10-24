@@ -297,5 +297,6 @@ step toward it.
   min/max width would keep sliding sideways.
   `saveWidth()` now stages the margins too: both grips can move `marginRight`
   (the left one indirectly, via `clampMargins` when growing past the screen),
-  and a resize was persisting a fresh width beside a stale margin. One posSave
-  run, because Quickshell latches argv at start and drops a second launch.
+  and a resize was persisting a fresh width beside a stale margin. (Overlapping
+  saves are fine: Quickshell does not drop a launch aimed at a running Process,
+  it re-runs it once with the newest command when the current run exits.)
