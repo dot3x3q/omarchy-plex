@@ -254,10 +254,10 @@ Item {
   // must reach fail() — the old 250 ms window swallowed it and left the panel
   // "playing" a dead stream.
   property int failedGen: -1
-  // Which rungs of the direct ↔ transcode ladder the current item has been
-  // on, so a failure tries the other one exactly once whichever it began on.
-  property bool directTried: false
-  property bool transcodeTried: false
+  // Which rungs of the direct ↔ transcode ladder have FAILED for the current
+  // item, so a failure tries the other one once, whichever it began on.
+  property bool directFailed: false
+  property bool transcodeFailed: false
   property bool userStop: false
   property bool scrobbled: false
   property int tickCount: 0
@@ -1274,12 +1274,15 @@ Item {
       var partKey = parsed.partKey
       // Switching items mid-session: the outgoing one gets its "stopped"
       // report while its key and position are still the current ones.
-      if (root.mode === "playing" && root.currentRatingKey !== "")
+      if (root.mode === "playing" && root.currentRatingKey !== ""
+          && root.currentRatingKey !== String(ratingKey))
         root.sendTimeline("stopped", root.seekDisplayTime, root.reportDuration)
       root.currentRatingKey = String(ratingKey)
       root.lastKnownDuration = 0
-      root.directTried = false
-      root.transcodeTried = false
+      root.directFailed = false
+      root.transcodeFailed = false
+      root.partIndex = 0
+      root.partStartSec = 0
       root.sessionId = "" + Date.now()
       // A saved quality tier applies from the first frame. It used to be read
       // only by the picker: every item started on direct play regardless, the
@@ -1386,8 +1389,6 @@ Item {
   // start; `transcode` picks the server's transcoder over direct play.
   function launchStream(transcode, atSec) {
     root.triedTranscode = transcode === true
-    if (root.triedTranscode) root.transcodeTried = true
-    else root.directTried = true
     root.playGen++
     root.clearSeekPreview()
     var at = Math.max(0, Math.round(Number(atSec) || 0))
@@ -3076,24 +3077,27 @@ Item {
       root.failPlayback("Playback failed")
       return
     }
-    // An item that STARTED on a quality tier never tried direct play, and the
-    // ladder only ever went direct → transcode. Give it the other rung before
-    // giving up, or a tier the server cannot transcode would leave the film
-    // unplayable with the quality picker (the way back to Original) gone.
-    if (root.triedTranscode && !root.directTried) {
-      root.setStatus("Transcode failed — trying direct play…", false)
-      root.launchStream(false, Math.max(root.streamLocalStart, Math.round(root.seekDisplayTime)))
-      return
-    }
-    if (root.triedTranscode || root.transcodeTried) {
-      root.failPlayback("Direct play and transcode both failed")
-      return
-    }
-    root.setStatus("Direct play failed — transcoding…", false)
     // Rejoin where it died. A stream that failed mid-film used to restart the
     // transcode at 0:00; one that failed during its load reports its own start
     // position (streamLocalStart), so a resume point is never lost either.
-    root.launchStream(true, Math.max(root.streamLocalStart, Math.round(root.seekDisplayTime)))
+    var at = Math.max(root.streamLocalStart, Math.round(root.seekDisplayTime))
+    if (root.triedTranscode) root.transcodeFailed = true
+    else root.directFailed = true
+    if (root.directFailed && root.transcodeFailed) {
+      root.failPlayback("Direct play and transcode both failed")
+      return
+    }
+    // The ladder used to run one way only, direct → transcode. An item that
+    // STARTS on a quality tier begins on the transcoder, so a tier the server
+    // cannot transcode needs the other direction too, or the film would be
+    // unplayable with the quality picker (the way back to Original) gone.
+    if (root.triedTranscode) {
+      root.setStatus("Transcode failed — trying direct play…", false)
+      root.launchStream(false, at)
+    } else {
+      root.setStatus("Direct play failed — transcoding…", false)
+      root.launchStream(true, at)
+    }
   }
 
   function sendTimeline(state, atSec, durSec) {
