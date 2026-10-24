@@ -190,3 +190,16 @@ test("external mpv: commands queue, polling survives close, relay honours stop",
   assert.match(qml, /id: mpvProc[\s\S]{0,600}onRunningChanged:[\s\S]{0,300}root\.failPlayback\(/)
   assert.match(qml, /if \(!root\.mpvInstalled\) \{\s*root\.failPlayback\(/)
 })
+
+test("native PiP handoffs: screen settled before the flip, mute carried, no loading skip", () => {
+  // The compositor's answer lands BEFORE the flip, not 30 ms after the map.
+  assert.match(qml, /id: pipHostQuery[\s\S]{0,700}root\.adoptPipScreenByName\(String\(text \|\| ""\)\)\s*root\.completeEnterPip\(\)/)
+  const enter = qml.slice(qml.indexOf("function enterPip()"), qml.indexOf("function completeEnterPip()"))
+  assert.doesNotMatch(enter, /root\.windowed = false/)
+  // Every handoff carries mute.
+  assert.match(qml, /function handoffArm\(\)[\s\S]{0,400}muted: root\.audioMuted/)
+  assert.match(qml, /v\.muted = arm\.muted === true/)
+  // A bounce while the player is still loading must not be skipped.
+  const bounce = qml.slice(qml.indexOf("function bouncePipPlayer"), qml.indexOf("function armNativePlayback"))
+  assert.doesNotMatch(bounce, /duration > 0/)
+})

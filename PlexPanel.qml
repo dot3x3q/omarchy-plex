@@ -422,14 +422,19 @@ Item {
   // into the card exactly as the VideoOutput does.
   readonly property bool pipAvailable: root.mode === "playing" && !root.mpvMode
 
+  // Entering is two-step: ask the compositor which output the window is on,
+  // THEN flip. The flip used to happen first and the answer land ~30 ms after
+  // the PiP had mapped, so the correction reassigned window.screen under a
+  // native player that was still loading — a recreated surface under a load
+  // in flight, and a dead or black PiP. Asked first, the screen is set while
+  // the PiP is still unmapped, which costs nothing.
+  property bool pipEntering: false
+
   function enterPip() {
-    if (!root.pipAvailable || !root.windowed) return
+    if (!root.pipAvailable || !root.windowed || root.pipEntering) return
     // The PiP cannot host or dismiss the picker popups; one left open would
     // pin the strip over the video for the rest of the session.
     root.closeTrackPopup()
-    // The PiP *is* the theater on the floaty surface, so popping back later
-    // lands on the picture rather than the minibar.
-    root.theater = true
     // Bind the surface to the output the REAL WINDOW is on before it maps.
     // Setting `screen` while the window is unmapped is free — there is no
     // surface to tear down yet, Quickshell just records it — and it is half
@@ -446,17 +451,36 @@ Item {
     // appWindow.screen is Qt's OPINION of the window's output, and on Wayland
     // that is a default rather than a fact: a window tiled on monitor three
     // still spawns its PiP on monitor one. The compositor is the only
-    // authority on where a toplevel lives, so ask it; the answer lands after
-    // the PiP maps, and reassigning screen then flows through onScreenChanged
-    // -> bouncePipPlayer like any other move.
+    // authority on where a toplevel lives, so ask it, and finish entering
+    // when it answers (or after a short grace if hyprctl/jq are missing).
+    root.pipEntering = true
     pipHostQuery.running = true
+    pipEnterGrace.restart()
+  }
+
+  Timer {
+    id: pipEnterGrace
+    interval: 600
+    repeat: false
+    onTriggered: root.completeEnterPip()
+  }
+
+  function completeEnterPip() {
+    if (!root.pipEntering) return
+    root.pipEntering = false
+    pipEnterGrace.stop()
+    // Anything could have happened in the wait: Stop, the item ending.
+    if (!root.pipAvailable || !root.windowed) return
+    // The PiP *is* the theater on the floaty surface, so popping back later
+    // lands on the picture rather than the minibar.
+    root.theater = true
     // The theater's native item dies with this flip (per-surface players —
     // see the crash note at the native block); capture what its successor in
     // the PiP must resume, and idle the outgoing core NOW — its destruction
     // races the window teardown, and a lost race leaks a playing audio thread
     // (NativeVideoHost.onDestruction is the second line of defense).
     if (root.nativeMode && root.mode === "playing") {
-      root.pendingNativeArm = { pos: root.engineSeekTime, paused: root.isPaused }
+      root.pendingNativeArm = root.handoffArm()
       if (root.nativeVideo) root.nativeVideo.stop()
     }
     root.windowed = false
@@ -468,13 +492,28 @@ Item {
   function exitPip() {
     if (root.windowed) return
     if (root.nativeMode && root.mode === "playing") {
-      root.pendingNativeArm = { pos: root.engineSeekTime, paused: root.isPaused }
+      root.pendingNativeArm = root.handoffArm()
       if (root.nativeVideo) root.nativeVideo.stop()
     }
     root.windowed = true
     root.savePosition()
     root.enterTheater() // no-op unless a session is still live
     root.focusPrimary()
+  }
+
+  // What a replacement native player must reproduce: position (in the live
+  // stream's own time), pause and mute. Mute used to be dropped, so every
+  // handoff — theater ↔ PiP, a monitor move, an unlock — came back loud.
+  //
+  // Pause has one exception. Unlocking resumes a film the lock paused, but
+  // that unpause is an async property write on the OLD item while the PiP's
+  // re-shown surface bounces the player in the same moment — and the bounce
+  // read the still-paused state, so the PiP came back paused. Inside that
+  // window the handoff records what the unlock is about to do instead.
+  function handoffArm() {
+    var paused = root.isPaused
+    if (root.unlockResuming && !root.sessionLocked) paused = false
+    return { pos: root.engineSeekTime, paused: paused, muted: root.audioMuted }
   }
 
   function toggleSurface() {
@@ -615,7 +654,9 @@ Item {
 
   function adoptPipScreenByName(name) {
     var wanted = String(name || "").trim()
-    if (wanted === "" || root.windowed) return
+    // While entering, the PiP is not mapped yet and this is the free,
+    // pre-map assignment completeEnterPip is waiting for.
+    if (wanted === "" || (root.windowed && !root.pipEntering)) return
     var list = Quickshell.screens
     if (!list) return
     for (var i = 0; i < list.length; i++) {
@@ -641,7 +682,10 @@ Item {
       + "hyprctl -j monitors | jq -r --argjson m \"${m:-null}\" 'first(.[] | select(.id==$m) | .name) // empty'"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.adoptPipScreenByName(String(text || ""))
+      onStreamFinished: {
+        root.adoptPipScreenByName(String(text || ""))
+        root.completeEnterPip()
+      }
     }
   }
 
@@ -842,10 +886,22 @@ Item {
       else if (root.nativeMode) { if (root.nativeVideo) root.nativeVideo.paused = true }
       else player.pause()
     } else if (root.wasPlayingBeforeLock) {
+      // See handoffArm: the PiP's surface comes back with the unlock and may
+      // bounce the native player before this unpause has landed.
+      root.unlockResuming = true
+      unlockResumeWindow.restart()
       if (root.backend === "mpv") mpvSend('{"command":["set_property","pause",false]}')
       else if (root.nativeMode) { if (root.nativeVideo) root.nativeVideo.paused = false }
       else player.play()
     }
+  }
+  property bool unlockResuming: false
+  Timer {
+    id: unlockResumeWindow
+    // Long enough to cover the re-shown surface's async screen assignment.
+    interval: 1500
+    repeat: false
+    onTriggered: root.unlockResuming = false
   }
   Timer {
     id: lockServiceResolve
@@ -2730,6 +2786,10 @@ Item {
   // fresh play (from startNative racing its own Loader activation) or a
   // surface handoff (position and pause state captured before the flip).
   property var pendingNativeArm: null
+  // Which PiP screen the native player was last armed on, and when — so the
+  // surface's own first-map screenChanged does not reload a fresh player.
+  property var nativeArmScreen: null
+  property double nativeArmAt: 0
   // True once the native item has reported fileLoaded for its latest load.
   property bool nativeLoaded: false
   // QtMultimedia's equivalent: its position and duration outlive a source
@@ -2755,8 +2815,19 @@ Item {
     // duration yet has no position worth capturing.
     if (root.pendingNativeArm !== null) return
     var v = root.nativeVideo
-    if (!v || !(v.duration > 0)) return
-    root.pendingNativeArm = { pos: root.engineSeekTime, paused: root.isPaused }
+    if (!v) return
+    // The first-map signal again, after the arm was consumed: the screen is
+    // the one this player was just armed on, moments ago. Reloading would be
+    // harmless but wasted. A real move is to a DIFFERENT screen, and a
+    // re-show (unlock) comes long after the arm, so both still bounce.
+    if (root.sameScreen(window.screen, root.nativeArmScreen)
+        && Date.now() - root.nativeArmAt < 1000) return
+    // Deliberately NOT skipped while the player is still loading (duration
+    // 0). That guard used to be here, and a second move inside a load — `n`
+    // pressed twice on three monitors — left the player on a dead surface:
+    // black PiP, no way back. While loading, engineSeekTime is the arm's own
+    // start position, which is exactly what the replacement should load.
+    root.pendingNativeArm = root.handoffArm()
     v.stop()
     root.pipPlayerBounce = true
     Qt.callLater(function() { root.pipPlayerBounce = false })
@@ -2773,10 +2844,13 @@ Item {
     // start position instead — see engineTime.
     root.nativeLoaded = false
     root.streamLocalStart = Math.max(0, Number(arm.pos) || 0)
+    root.nativeArmScreen = root.windowed ? null : window.screen
+    root.nativeArmAt = Date.now()
     // Set on EVERY load, never left over: the property persists in the core,
     // so an extra played after a film would otherwise inherit the header.
     v.httpHeaders = root.mediaHeaderAllowed(root.currentMediaUrl) ? ["X-Plex-Token: " + root.token] : []
     v.volume = root.volumePct
+    v.muted = arm.muted === true
     v.paused = false
     v.loadUrl(root.currentMediaUrl, Math.max(0, Number(arm.pos) || 0))
     // mpv applies a pause set during load before the first frame, so a
@@ -2789,7 +2863,7 @@ Item {
     // resume point rides loadUrl as mpv's `start` property, applied before the
     // first frame, so the resumeRetry ladder below has nothing to do here.
     root.currentMediaUrl = url
-    root.pendingNativeArm = { pos: root.resumeSec, paused: false }
+    root.pendingNativeArm = { pos: root.resumeSec, paused: false, muted: root.audioMuted }
     root.resumeSec = 0
     root.setStatus("", false)
     // Setting mode activates this surface's Loader; if the item already
