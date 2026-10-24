@@ -116,6 +116,10 @@ All three tried sorts are honored server-side (no client re-sort needed):
 
 ## `/hubs/home/recentlyAdded?type=2&sectionID={id}` — the grouped TV shelf
 
+Slow: Plex builds this on every request, 1.8–2.7 s on the owner's server
+(2026-10-24, no warm-up) against ~0.1 s for a section's `/recentlyAdded`. Home
+therefore draws cached rows first (HomeCache.js) and refreshes behind them.
+
 Probed 2026-10-23. A TV section's own `/recentlyAdded` lists bare episodes, so
 a home shelf built on it is a row of screenshots titled "Episode 2". This hub
 is what stock Plex's "Recently Added in TV Shows" row uses: one entry per show,
