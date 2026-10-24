@@ -106,3 +106,33 @@ test("media token header is gated by origin and path", () => {
   assert.equal((qml.match(/root\.directPlayUrl\(/g) || []).length, 2)
   assert.doesNotMatch(qml, /root\.server \+ (partKey|root\.currentPartKey)\b/)
 })
+
+// /proc/PID/cmdline is world-readable on this box (no hidepid), so a token in
+// curl's argv is a token published for the life of the request. Every curl
+// reads its auth header from a `-K -` config on stdin instead; the only argv
+// exception left is the external mpv backend, which cannot read headers any
+// other way.
+test("curl argv never carries the Plex token", () => {
+  const hAt = qml.indexOf("readonly property var plexHeaders")
+  const headers = qml.slice(hAt, qml.indexOf("]", hAt) + 1)
+  assert.match(headers, /"-K", "-"/)
+  assert.doesNotMatch(headers, /token/i)
+  // Every command array that starts with curl: no token, and its Process feeds
+  // the config. Commands are built as ["curl", ...].concat(...) expressions.
+  const curlSites = [...qml.matchAll(/(\w+)\.command = \["curl"[\s\S]*?\n\s*\1\.running = true/g)]
+  const poolSite = qml.slice(qml.indexOf("function pumpRequests"), qml.indexOf("function slotDone"))
+  assert.ok(curlSites.length >= 3, "found the per-call curl sites")
+  for (const [block] of [...curlSites, [poolSite]]) {
+    assert.doesNotMatch(block, /root\.token/, block.slice(0, 60))
+    assert.match(block, /root\.plexHeaders/, block.slice(0, 60))
+  }
+  // Each curl Process writes the config in onStarted.
+  for (const id of ["req0", "req1", "req2", "req3", "timelinePost", "scrobblePost", "trackPut"]) {
+    const at = qml.indexOf("id: " + id + "\n")
+    assert.ok(at > 0, id)
+    assert.match(qml.slice(at, at + 400), new RegExp("onStarted: [^\\n]*root\\.feedCurlAuth\\(" + id + "\\)"), id)
+  }
+  // The config line itself cannot be broken out of: validToken's alphabet has
+  // no quote, backslash or newline.
+  assert.match(qml, /function curlAuthConfig\(\) \{\s*return "header = \\"X-Plex-Token: " \+ root\.token \+ "\\"\\n"/)
+})

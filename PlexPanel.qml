@@ -8,6 +8,7 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "Api.js" as Api
+import "Pool.js" as Pool
 
 // Omarchy Plex panel entry point.
 // Hosted by omarchy-shell; summoned with:
@@ -903,130 +904,163 @@ Item {
   // process lists, server logs, and cross-host redirects. No redirect
   // following: Plex does not redirect API calls, and following one would
   // forward credentials.
+  //
+  // And the header itself never rides curl's ARGV. /proc/PID/cmdline is
+  // readable by every process on the box (no hidepid here), so a `-H
+  // "X-Plex-Token: …"` argument publishes the token for as long as curl runs.
+  // Every curl gets `-K -` instead — read a config file from stdin — and
+  // writes the header there in onStarted, then closes stdin so curl stops
+  // waiting for more config. saveProcess has always moved the token this way.
+  // The one remaining argv exception is the external mpv backend's
+  // --http-header-fields (mpv cannot read headers from anywhere else).
 
   readonly property var plexHeaders: [
+    "-K", "-",
     "-H", "Accept: application/json",
-    "-H", "X-Plex-Token: " + root.token,
     "-H", "X-Plex-Client-Identifier: " + root.pluginId
   ]
+
+  // curl config syntax: one long option per line. validToken() restricts the
+  // token to [A-Za-z0-9._-], so it cannot close the quotes or start a line.
+  function curlAuthConfig() {
+    return "header = \"X-Plex-Token: " + root.token + "\"\n"
+  }
+
+  // The onStarted half of `-K -`, shared by every curl Process. Closing stdin
+  // (stdinEnabled = false; Quickshell calls closeWriteChannel, which flushes
+  // first) is what lets curl stop reading config and start the transfer.
+  // Callers set stdinEnabled back to true before the next run — or in
+  // onExited, for the ones Quickshell may re-run on its own (see posSave).
+  function feedCurlAuth(proc) {
+    proc.write(root.curlAuthConfig())
+    proc.stdinEnabled = false
+  }
 
   // Four curl slots and a FIFO queue. A home page fans out one request per
   // library, and an unbounded fan-out gets the server rate-limiting and the
   // process table churning; four in flight stays civil and still saturates a
-  // LAN Plex.
-  property var reqQueue: []
+  // LAN Plex. The bookkeeping lives in Pool.js so it can be unit-tested; the
+  // Processes below only report their events into it.
+  readonly property var reqPool: Pool.createPool(4)
   readonly property var reqSlots: [req0, req1, req2, req3]
 
-  function request(path, cb) {
-    if (!root.configured()) { if (cb) cb(null); return }
-    var queue = root.reqQueue.slice()
-    queue.push({ path: String(path || ""), cb: cb })
-    root.reqQueue = queue
+  // request(path, cb[, opts]). Every existing caller passes two arguments and
+  // keeps its old behaviour exactly: an untagged job is never dropped. opts:
+  //   page — the page name the result is for ("home", "detail", …). A QUEUED
+  //          job whose page is no longer the one on screen is dropped instead
+  //          of run, so the page you are looking at gets the four slots rather
+  //          than waiting behind a fan-out from one you already left. Its
+  //          callback is not called: the page that would receive it is gone.
+  //   tag  — any string; cancelRequests(tag) drops that tag's queued jobs at
+  //          once (a page's Component.onDestruction, say).
+  //   raw  — hand cb the body string instead of the parsed JSON.
+  function request(path, cb, opts) {
+    var o = opts && typeof opts === "object" ? opts : ({})
+    if (!root.configured()) {
+      if (cb) cb(o.raw === true ? "" : null)
+      return
+    }
+    Pool.enqueue(root.reqPool, {
+      path: String(path || ""),
+      cb: cb,
+      page: o.page !== undefined && o.page !== null ? String(o.page) : "",
+      tag: o.tag !== undefined && o.tag !== null ? String(o.tag) : "",
+      raw: o.raw === true
+    })
     root.pumpRequests()
   }
 
+  function cancelRequests(tag) {
+    var t = String(tag || "")
+    if (t === "") return 0
+    return Pool.dropQueued(root.reqPool, function(job) { return job.tag === t })
+  }
+
+  function requestStale(job) {
+    return job.page !== "" && job.page !== root.currentPage
+  }
+
   function pumpRequests() {
-    for (var i = 0; i < root.reqSlots.length; i++) {
-      if (root.reqQueue.length === 0) return
-      var slot = root.reqSlots[i]
-      if (slot.busy) continue
-      var queue = root.reqQueue.slice()
-      var job = queue.shift()
-      root.reqQueue = queue
-      slot.busy = true
-      slot.streamDone = false
-      slot.exitDone = false
-      slot.body = ""
-      slot.cb = job.cb
-      // Command fully set BEFORE running: Quickshell latches argv at start
-      // and silently ignores writes to a running Process.
+    Pool.pump(root.reqPool, function(job) { return root.requestStale(job) }, function(index, job) {
+      var slot = root.reqSlots[index]
+      // A queued re-run would fire on the old process's exit with whatever
+      // command is current, so a slot is only ever launched from idle — the
+      // pool guarantees that by settling on stream AND exit first.
+      slot.stdinEnabled = true
       slot.command = ["curl", "-s", "--fail", "--max-time", "10", "--max-filesize", "4194304"]
         .concat(root.plexHeaders)
         .concat([root.server + job.path])
       slot.running = true
-    }
+    })
   }
 
-  // A slot frees up only once BOTH its stdout stream has ended and the
-  // process has exited. Quickshell emits streamFinished when the child closes
-  // stdout, which can happen before it actually exits — handing that slot a
-  // new command right then would have it silently dropped and the queue would
-  // wedge with jobs that never run.
-  function slotSettled(slot) {
-    if (!slot.streamDone || !slot.exitDone) return
-    var cb = slot.cb
-    var body = slot.body
-    slot.cb = null
-    slot.body = ""
-    slot.busy = false
-    if (cb) {
-      var parsed = null
-      // --fail leaves stdout empty on any HTTP error, so a parse failure and
-      // a transport failure land in the same place: cb(null).
-      try { parsed = JSON.parse(String(body || "")) } catch (e) { parsed = null }
-      // A callback whose page has since been destroyed throws (its `page` id
-      // resolves to null). Without the catch the pump below never ran, and
-      // the queue sat stalled until some unrelated request came along.
-      try { cb(parsed) } catch (e) { console.warn("omarchy-plex: request callback threw:", e) }
+  function slotDone(done) {
+    if (done) {
+      var err = Pool.deliver(done)
+      if (err) console.warn("omarchy-plex: request callback threw:", err)
     }
     root.pumpRequests()
   }
 
+  // Quickshell drops `running` to false AFTER `exited` on a normal finish, and
+  // with no `exited` at all when the process failed to start. So a busy slot
+  // whose exit never arrived, seen here, is a start failure.
+  function slotStopped(index) {
+    var slot = root.reqSlots[index]
+    if (slot.running) return
+    var state = root.reqPool.slots[index]
+    if (!state || !state.busy || state.exitDone) return
+    console.warn("omarchy-plex: request process failed to start")
+    root.slotDone(Pool.startFailed(root.reqPool, index))
+  }
+
   Process {
     id: req0
-    property var cb: null
-    property string body: ""
-    property bool busy: false
-    property bool streamDone: false
-    property bool exitDone: false
     running: false
+    stdinEnabled: true
+    onStarted: root.feedCurlAuth(req0)
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: { req0.body = String(text || ""); req0.streamDone = true; root.slotSettled(req0) }
+      onStreamFinished: root.slotDone(Pool.streamFinished(root.reqPool, 0, text))
     }
-    onExited: { req0.exitDone = true; root.slotSettled(req0) }
+    onExited: root.slotDone(Pool.exited(root.reqPool, 0))
+    onRunningChanged: root.slotStopped(0)
   }
   Process {
     id: req1
-    property var cb: null
-    property string body: ""
-    property bool busy: false
-    property bool streamDone: false
-    property bool exitDone: false
     running: false
+    stdinEnabled: true
+    onStarted: root.feedCurlAuth(req1)
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: { req1.body = String(text || ""); req1.streamDone = true; root.slotSettled(req1) }
+      onStreamFinished: root.slotDone(Pool.streamFinished(root.reqPool, 1, text))
     }
-    onExited: { req1.exitDone = true; root.slotSettled(req1) }
+    onExited: root.slotDone(Pool.exited(root.reqPool, 1))
+    onRunningChanged: root.slotStopped(1)
   }
   Process {
     id: req2
-    property var cb: null
-    property string body: ""
-    property bool busy: false
-    property bool streamDone: false
-    property bool exitDone: false
     running: false
+    stdinEnabled: true
+    onStarted: root.feedCurlAuth(req2)
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: { req2.body = String(text || ""); req2.streamDone = true; root.slotSettled(req2) }
+      onStreamFinished: root.slotDone(Pool.streamFinished(root.reqPool, 2, text))
     }
-    onExited: { req2.exitDone = true; root.slotSettled(req2) }
+    onExited: root.slotDone(Pool.exited(root.reqPool, 2))
+    onRunningChanged: root.slotStopped(2)
   }
   Process {
     id: req3
-    property var cb: null
-    property string body: ""
-    property bool busy: false
-    property bool streamDone: false
-    property bool exitDone: false
     running: false
+    stdinEnabled: true
+    onStarted: root.feedCurlAuth(req3)
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: { req3.body = String(text || ""); req3.streamDone = true; root.slotSettled(req3) }
+      onStreamFinished: root.slotDone(Pool.streamFinished(root.reqPool, 3, text))
     }
-    onExited: { req3.exitDone = true; root.slotSettled(req3) }
+    onExited: root.slotDone(Pool.exited(root.reqPool, 3))
+    onRunningChanged: root.slotStopped(3)
   }
 
   // Artwork is the one documented exception to headers-only auth: QML's Image
@@ -2069,7 +2103,10 @@ Item {
   Process {
     id: trackPut
     running: false
+    stdinEnabled: true
+    onStarted: root.feedCurlAuth(trackPut)
     onExited: {
+      trackPut.stdinEnabled = true
       var restart = root.restartAfterPut
       root.restartAfterPut = false
       if (root.trackPutQueued) {
@@ -2598,14 +2635,24 @@ Item {
     scrobblePost.running = true
   }
 
+  // Both of these can be asked to run while a previous post is still in
+  // flight (a stop right after a 10 s tick). Quickshell then re-runs the
+  // Process with the latest command as soon as the first exits, so stdin has
+  // to be re-enabled in onExited for that queued run to get its config too.
   Process {
     id: timelinePost
     running: false
+    stdinEnabled: true
+    onStarted: root.feedCurlAuth(timelinePost)
+    onExited: timelinePost.stdinEnabled = true
   }
 
   Process {
     id: scrobblePost
     running: false
+    stdinEnabled: true
+    onStarted: root.feedCurlAuth(scrobblePost)
+    onExited: scrobblePost.stdinEnabled = true
   }
 
   Process {
@@ -2613,7 +2660,9 @@ Item {
     property string ratingKey: ""
     property string title: ""
     running: false
-    onStarted: root.currentTitle = title
+    stdinEnabled: true
+    onStarted: { root.currentTitle = title; root.feedCurlAuth(resolve) }
+    onExited: resolve.stdinEnabled = true
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.applyMetadata(String(text || ""))
