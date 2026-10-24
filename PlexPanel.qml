@@ -86,7 +86,16 @@ Item {
     readonly property string fontFamily: root.fontFamily
   }
 
-  property int videoWidth: 460
+  // The width the user asked for (resize grips, window.json) and the width the
+  // card actually gets. The card's height is width × 9/16, and the old cap was
+  // the screen's WIDTH alone, so on an ultrawide — or after moving a big card
+  // to a smaller or portrait monitor — the card ran off the top of the screen
+  // with its strip unreachable. pipMaxWidth caps by whichever of the screen's
+  // width and its height × 16/9 is smaller, less the resting inset each side.
+  // Kept apart from the preference so moving back to the big screen restores
+  // the size you chose; re-capped automatically when the PiP changes screen.
+  property int pipWidthPref: 460
+  readonly property int videoWidth: Math.max(280, Math.min(root.pipWidthPref, root.pipMaxWidth))
   readonly property int videoHeight: Math.round(videoWidth * 9 / 16)
   function tint(a) { return Qt.rgba(root.accent.r, root.accent.g, root.accent.b, a) }
 
@@ -579,6 +588,12 @@ Item {
   readonly property int pipAreaHeight: root.pipScreen && root.pipScreen.height > 0
     ? root.pipScreen.height : (window.height > 0 ? window.height : 0)
 
+  // See pipWidthPref. 3800 with no screen known yet, the old load-time ceiling.
+  readonly property int pipMaxWidth: root.pipAreaWidth > 0 && root.pipAreaHeight > 0
+    ? Math.max(280, Math.floor(Math.min(root.pipAreaWidth, root.pipAreaHeight * 16 / 9)
+      - root.pipInset * 2))
+    : 3800
+
   // Margins measure the PiP CARD's distance from its screen's edges, not the
   // surface's — the layer surface is full-screen and never moves.
   function clampMargins() {
@@ -760,7 +775,7 @@ Item {
   function stageWindowState() {
     posSave.right = "" + Math.round(root.marginRight)
     posSave.bottom = "" + Math.round(root.marginBottom)
-    posSave.width = "" + root.videoWidth
+    posSave.width = "" + root.pipWidthPref
     posSave.windowed = root.windowed ? "true" : "false"
   }
 
@@ -821,7 +836,7 @@ Item {
     var doc = JSON.parse(raw)
     if (doc.right !== undefined) root.marginRight = Math.max(0, doc.right | 0)
     if (doc.bottom !== undefined) root.marginBottom = Math.max(0, doc.bottom | 0)
-    if (doc.width !== undefined) root.videoWidth = Math.max(280, Math.min(3800, doc.width | 0))
+    if (doc.width !== undefined) root.pipWidthPref = Math.max(280, Math.min(3800, doc.width | 0))
     if (doc.volume !== undefined) root.volumePct = Math.max(0, Math.min(200, doc.volume | 0))
     // Only a value the tier list actually offers is accepted. This one ends up
     // substituted into a transcode URL, so "clamp it" is not good enough — an
@@ -3796,9 +3811,7 @@ Item {
             // frame. The release below persists the settled width once.
             // Cap at the surface, not a constant — any fixed pixel ceiling that
             // suits a laptop reads as "not very big" on a 4K monitor.
-            root.videoWidth = Math.max(280, Math.min(
-              (window.screen ? window.screen.width : 3800) - Style.space(28),
-              startW + (sx - gx)))
+            root.pipWidthPref = Math.max(280, Math.min(root.pipMaxWidth, startW + (sx - gx)))
           }
           onReleased: root.saveWidth()
         }
@@ -3826,10 +3839,8 @@ Item {
             var gx = mapToItem(null, mouse.x, mouse.y).x
             // Dragging RIGHT (gx > sx) grows the card. Same clamp as the left
             // grip; no save per frame, for the same reason.
-            var next = Math.max(280, Math.min(
-              (window.screen ? window.screen.width : 3800) - Style.space(28),
-              startW + (gx - sx)))
-            root.videoWidth = next
+            var next = Math.max(280, Math.min(root.pipMaxWidth, startW + (gx - sx)))
+            root.pipWidthPref = next
             // Give back exactly the width that was granted, so the right edge
             // lands under the pointer and the left edge does not move. Assigning
             // videoWidth above already ran clampMargins against the OLD margin;

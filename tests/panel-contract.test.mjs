@@ -211,3 +211,9 @@ test("wheel volume ignores horizontal scroll and accumulates whole notches", () 
   assert.match(wheel, /if \(dy === 0\) return/)
   assert.match(wheel, /\/ 120\)/)
 })
+
+test("the PiP card is capped by screen height as well as width", () => {
+  assert.match(qml, /readonly property int videoWidth: Math\.max\(280, Math\.min\(root\.pipWidthPref, root\.pipMaxWidth\)\)/)
+  assert.match(qml, /Math\.min\(root\.pipAreaWidth, root\.pipAreaHeight \* 16 \/ 9\)/)
+  assert.doesNotMatch(qml, /root\.videoWidth = /)
+})
