@@ -87,3 +87,9 @@ MpvVideo {
 `httpHeaders` is the security improvement over the external-mpv backend: that one
 passes the Plex token in argv, where it is readable from `/proc/PID/cmdline`.
 Here it never leaves the process.
+
+## Removing
+
+`install.sh` installs into `/usr/lib/qt6/qml/PlexMpv`, a system-wide Qt6 QML
+import path. To back it out: `sudo rm -rf /usr/lib/qt6/qml/PlexMpv`. The panel
+falls back to QtMultimedia on its own.

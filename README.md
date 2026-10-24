@@ -199,8 +199,15 @@ assume it isn't.
 ## Removing
 
 ```bash
-rm -rf ~/.config/omarchy-plex ~/.local/state/omarchy-plex
+rm -rf ~/.config/omarchy-plex ~/.local/state/omarchy-plex ~/.cache/omarchy-plex
 rm ~/.config/omarchy/plugins/dot3x3q.omarchy-plex
+```
+
+If you built the optional native module, it lives in a system-wide Qt QML
+path; remove it too:
+
+```bash
+sudo rm -rf /usr/lib/qt6/qml/PlexMpv
 ```
 
 ## Credit
