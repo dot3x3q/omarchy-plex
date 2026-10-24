@@ -43,7 +43,14 @@ Item {
 
   // ---- pagination ----
   readonly property int pageSize: 60
+  // `items` is the data; `gridModel` is what the GridView watches, holding one
+  // placeholder row per item. Reassigning a JS array as a view's model is a model
+  // RESET: the GridView throws every delegate away and snaps contentY back to
+  // the top. That was the "scrolling slowly, hit the bottom, get thrown to the
+  // top" bug — every next page reset the view. ListModel.append() inserts rows
+  // instead, so the grid grows under the reader without moving.
   property var items: []
+  ListModel { id: gridModel }
   property int nextStart: 0
   property int totalCount: -1
   property bool loading: false
@@ -73,6 +80,7 @@ Item {
     root.fetchGen++
     root.loading = false
     root.items = []
+    gridModel.clear()
     root.nextStart = 0
     root.totalCount = -1
     root.hasMore = true
@@ -109,6 +117,7 @@ Item {
         return Object.assign({}, it, { thumbPath: panel.imageUrl(it.thumbPath, thumbW, thumbH) })
       })
       root.items = root.items.concat(batch)
+      for (var b = 0; b < batch.length; b++) gridModel.append({ slot: 0 })
       root.nextStart = root.nextStart + root.pageSize
       root.totalCount = total
       root.hasMore = batch.length >= root.pageSize && (total < 0 || root.items.length < total)
@@ -274,15 +283,18 @@ Item {
     highlightFollowsCurrentItem: false
     cellWidth: root.cellW
     cellHeight: root.cellH
-    model: root.items
+    model: gridModel
     onContentYChanged: root.maybeLoadMore()
-    onWidthChanged: root.maybeLoadMore()
-    onHeightChanged: root.maybeLoadMore()
+    // Deferred, not direct: the "Loading more…" footer's bottomMargin depends
+    // on `loading`, so a fetch started from inside a height change resizes the
+    // grid again mid-binding — Qt reported it as a bottomMargin binding loop.
+    onWidthChanged: Qt.callLater(root.maybeLoadMore)
+    onHeightChanged: Qt.callLater(root.maybeLoadMore)
 
     delegate: Item {
       id: cell
-      required property var modelData
       required property int index
+      readonly property var modelData: root.items[cell.index]
       width: gridView.cellWidth
       height: gridView.cellHeight
 
