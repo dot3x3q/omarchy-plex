@@ -178,3 +178,15 @@ test("stop and failure capture the position before the engine is torn down", () 
   assert.match(qml, /root\.nativeVideo && root\.nativeLoaded \? root\.nativeVideo\.timePos : root\.streamLocalStart/)
   assert.match(qml, /function startMpv[\s\S]{0,700}root\.mpvTime = 0\s*root\.mpvDuration = 0/)
 })
+
+test("external mpv: commands queue, polling survives close, relay honours stop", () => {
+  const send = qml.slice(qml.indexOf("function mpvSend"), qml.indexOf("id: mpvCtl"))
+  assert.match(send, /q\.push\(String\(payload\)\)/)
+  assert.match(send, /if \(mpvCtl\.running \|\| root\.mpvQueue\.length === 0\) return/)
+  const close = qml.slice(qml.indexOf("function close()"), qml.indexOf("// ---- Plex API ----"))
+  assert.match(close, /if \(root\.backend !== "mpv" \|\| root\.mode !== "playing"\) pollTimer\.stop\(\)/)
+  assert.match(qml, /id: mpvRelay[\s\S]{0,700}if \(root\.mode !== "playing" \|\| mpvRelay\.gen !== root\.playGen/)
+  // A launch that never started must end the session, not leave it "playing".
+  assert.match(qml, /id: mpvProc[\s\S]{0,600}onRunningChanged:[\s\S]{0,300}root\.failPlayback\(/)
+  assert.match(qml, /if \(!root\.mpvInstalled\) \{\s*root\.failPlayback\(/)
+})

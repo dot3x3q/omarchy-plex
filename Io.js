@@ -71,3 +71,6 @@ var mpvQuitScript =
 // to stdout, one JSON object per line.
 var mpvSendScript =
   "printf '%s\\n' \"$2\" | socat - UNIX-CONNECT:\"$1\""
+
+// No arguments. Exit status says whether an mpv binary is on PATH.
+var mpvProbeScript = "command -v mpv >/dev/null 2>&1"

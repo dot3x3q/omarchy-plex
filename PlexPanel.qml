@@ -252,6 +252,7 @@ Item {
   property bool userStop: false
   property bool scrobbled: false
   property int tickCount: 0
+  property double lastTimelineMs: 0
   property int resumeSec: 0
   property int playGen: 0 // guards mpv exit handler against item switches
   // Where the CURRENT stream was asked to start, in seconds. Kept after the
@@ -915,10 +916,15 @@ Item {
       player.pause()
     }
     if (root.mode === "playing") sendTimeline("paused")
-    // A closed panel has nothing to poll for: on mpv this timer spawns a
-    // sh+socat every second, and both backends keep posting timeline pings
-    // for a session nobody is watching. open() restarts it.
-    pollTimer.stop()
+    // In-window engines: a closed panel has paused its film and has nothing to
+    // poll for. open() restarts the timer.
+    //
+    // External mpv is different: its window outlives the panel, and a viewer
+    // can simply press play in it. Stopping the timer there meant everything
+    // watched after closing the panel was never reported — no timeline, no
+    // resume point, no scrobble. So the timer keeps running under mpv, at a
+    // gentler cadence while closed (it costs a sh+socat per tick).
+    if (root.backend !== "mpv" || root.mode !== "playing") pollTimer.stop()
     root.opened = false
   }
 
@@ -1212,6 +1218,7 @@ Item {
       root.userStop = false
       root.scrobbled = false
       root.tickCount = 0
+      root.lastTimelineMs = Date.now()
       root.resumeSec = parsed.viewOffsetSec
       root.currentThumbPath = root.metadataThumb(jsonText)
       root.stashStreams(jsonText)
@@ -1395,6 +1402,7 @@ Item {
     if (root.mode !== "playing") return
     if (root.chainActive && root.partIndex < root.mediaParts.length - 1) {
       root.launchStream(root.triedTranscode, root.partStartAt(root.partIndex + 1))
+      pollTimer.restart()
       return
     }
     root.finishPlayback()
@@ -1443,16 +1451,39 @@ Item {
     root.mpvTime = 0
     root.mpvDuration = 0
     root.mpvPaused = false
+    // Without mpv the launch below would fail to start, and a Process that
+    // fails to start emits no `exited` — the session sat in mode "playing"
+    // forever with nothing to stop. Quickshell would also log the whole argv,
+    // token header included. Say what is wrong instead.
+    if (!root.mpvInstalled) {
+      root.failPlayback("mpv is not installed — install it, or switch the backend to Internal in Settings")
+      return
+    }
     mpvQuit.running = true
     root.pendingMpvUrl = url
+    mpvRelay.gen = root.playGen
     mpvRelay.restart()
+  }
+
+  // Probed once at load; assumed present until the probe says otherwise.
+  property bool mpvInstalled: true
+  Process {
+    id: mpvProbe
+    running: true
+    command: ["sh", "-c", Io.mpvProbeScript]
+    onExited: function(exitCode) { root.mpvInstalled = exitCode === 0 }
   }
 
   Timer {
     id: mpvRelay
     interval: 300
     repeat: false
+    // The playGen this launch belongs to. A stop() — or a newer item — inside
+    // the 300 ms socket-release wait used to be followed by the launch anyway,
+    // opening an mpv window for a session that had already ended.
+    property int gen: 0
     onTriggered: {
+      if (root.mode !== "playing" || mpvRelay.gen !== root.playGen || root.backend !== "mpv") return
       // The old process can outlive its socket quit for more than 300 ms;
       // defer instead of dropping the replacement launch.
       if (mpvProc.running) { restart(); return }
@@ -1481,6 +1512,7 @@ Item {
       mpvProc.command = args
       root.resumeSec = 0
       mpvProc.gen = root.playGen
+      mpvProc.exitSeen = false
       mpvProc.running = true
     }
   }
@@ -1488,12 +1520,26 @@ Item {
   Process {
     id: mpvProc
     property int gen: 0
+    property bool exitSeen: true
     running: false
+    // A launch that never started (mpv vanished after the probe) drops
+    // `running` without an `exited`; without this the session stays
+    // "playing" with nothing behind it.
+    onRunningChanged: {
+      if (mpvProc.running || mpvProc.exitSeen) return
+      mpvProc.exitSeen = true
+      if (mpvProc.gen !== root.playGen || root.mode !== "playing" || root.backend !== "mpv") return
+      root.failPlayback("mpv failed to start")
+    }
     onExited: function(exitCode) {
+      mpvProc.exitSeen = true
       // A newer playSource supersedes this exit; ignore it.
       if (mpvProc.gen !== root.playGen || root.backend !== "mpv") return
       if (root.mode !== "playing") return
-      pollTimer.stop()
+      // No pollTimer.stop() here: both routes below keep or end the session
+      // themselves (finishPlayback stops it), and the transcode fallback used
+      // to inherit a stopped timer — a whole transcoded film with no timeline
+      // reports and no scrobble.
       if (root.userStop || exitCode === 0) {
         // mpv exits 0 both at EOF and when its window is closed, so in a chain
         // only an exit within a few seconds of the part's end means "next part".
@@ -1513,19 +1559,47 @@ Item {
     command: ["sh", "-c", Io.mpvQuitScript, "sh", root.ipcSock]
   }
 
+  // A FIFO in front of the one mpvCtl Process. Quickshell re-runs a busy
+  // Process only once, with whatever command is newest when it exits, so
+  // every command sent while one socat was in flight but the last was
+  // silently lost: a pause pressed during a poll tick, a seek during a volume
+  // push. Commands now queue, and everything queued goes out in one socat run
+  // (mpv's IPC takes newline-separated commands and answers each in order).
+  // Payloads are fixed JSON templates plus numbers only, and travel as $2.
+  property var mpvQueue: []
+  readonly property int mpvQueueLimit: 64
+
   function mpvSend(payload) {
-    // Command fully built BEFORE running (Quickshell ignores later writes).
-    // Payloads here are fixed JSON templates plus numbers only.
-    mpvCtl.command = ["sh", "-c", Io.mpvSendScript, "sh", root.ipcSock, String(payload)]
+    var q = root.mpvQueue.slice()
+    q.push(String(payload))
+    // A dead socket can leave socat failing fast; never let polls pile up.
+    while (q.length > root.mpvQueueLimit) q.shift()
+    root.mpvQueue = q
+    root.pumpMpv()
+  }
+
+  function pumpMpv() {
+    if (mpvCtl.running || root.mpvQueue.length === 0) return
+    var batch = root.mpvQueue.join("\n")
+    root.mpvQueue = []
+    mpvCtl.gen = root.playGen
+    mpvCtl.command = ["sh", "-c", Io.mpvSendScript, "sh", root.ipcSock, batch]
     mpvCtl.running = true
   }
 
   Process {
     id: mpvCtl
+    // The playGen the in-flight batch was sent under: replies about the
+    // previous file must not repopulate the numbers startMpv just zeroed.
+    property int gen: 0
     running: false
+    // Fires after `exited` on a normal finish and alone on a start failure,
+    // so it is the one place the queue can always move on from.
+    onRunningChanged: if (!mpvCtl.running) Qt.callLater(root.pumpMpv)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (mpvCtl.gen !== root.playGen) return
         // Newline-delimited JSON-IPC: one reply per line, request_id tags
         // which property each numeric reply describes.
         var lines = String(text || "").split("\n")
@@ -1546,7 +1620,7 @@ Item {
   // reports a timeline update; crossing 90% scrobbles once.
   Timer {
     id: pollTimer
-    interval: 1000
+    interval: root.opened ? 1000 : 3000
     repeat: true
     triggeredOnStart: false
     onTriggered: {
@@ -1567,7 +1641,11 @@ Item {
         root.scrobbled = true
         sendScrobble()
       }
-      if (root.tickCount % 10 === 0) {
+      // By the clock rather than a tick count, so the slower closed-panel
+      // cadence still reports every ten seconds or so.
+      var now = Date.now()
+      if (now - root.lastTimelineMs >= 9500) {
+        root.lastTimelineMs = now
         var paused = root.backend === "mpv"
           ? root.mpvPaused
           : (root.nativeMode ? root.isPaused
