@@ -576,6 +576,22 @@ function relatedFor(related) {
 // `badge` is the unwatched count Plex paints on a show/season poster's corner.
 // `target*` is where activating the card goes: a season opens that season, an
 // episode opens its show (an episode has no detail page of its own here).
+// `seasonKey`/`episodeKey` say where inside the show to land: an episode card
+// carries its own season and episode keys, a season card its own key. Every
+// card carries both fields ("" when not applicable) so a ListModel built from
+// the list has the same roles on every row.
+//
+// Two hub fields that look useful and are not (verified live 2026-10-23):
+// a season entry's leafCount is the season's TOTAL episode count, not how many
+// are new, and every season entry carries parentIndex: 1 whatever the season.
+// Nothing below reads either for meaning: the badge is total minus watched,
+// which is exactly what stock Plex paints, and the season label comes from the
+// season's own index/title.
+function seasonLabel(index, title) {
+  if (index === 0 || index === "0") return "Specials"
+  return cap(title, MAX_FIELD)
+}
+
 function mapRecentShows(json) {
   var mc = json && json.MediaContainer
   var meta = (mc && mc.Metadata) || []
@@ -593,23 +609,31 @@ function mapRecentShows(json) {
       item.badge = unwatched > 0 ? String(unwatched) : ""
       item.targetKey = item.ratingKey
       item.targetType = "show"
+      item.seasonKey = ""
+      item.episodeKey = ""
     } else if (m.type === "season") {
       item.title = cap(m.parentTitle, MAX_FIELD)
       item.thumbPath = cap(m.parentThumb || m.thumb, 512)
-      item.caption = cap(m.title, MAX_FIELD)
+      item.caption = seasonLabel(m.index, m.title)
       item.caption2 = ""
       item.badge = unwatched > 0 ? String(unwatched) : ""
       item.targetKey = item.ratingKey
       item.targetType = "season"
+      item.seasonKey = item.ratingKey
+      item.episodeKey = ""
     } else {
       item.title = cap(m.grandparentTitle, MAX_FIELD)
       item.thumbPath = cap(m.grandparentThumb || m.parentThumb || m.thumb, 512)
       item.caption = cap(m.title, MAX_FIELD)
-      item.caption2 = "S" + (m.parentIndex === undefined || m.parentIndex === null ? "?" : m.parentIndex) +
+      var specials = m.parentIndex === 0 || m.parentIndex === "0"
+      item.caption2 = (specials ? "Specials" : "S" + (m.parentIndex === undefined || m.parentIndex === null ? "?" : m.parentIndex)) +
         " · E" + (m.index === undefined || m.index === null ? "?" : m.index)
       item.badge = ""
-      item.targetKey = keyOf(m.grandparentRatingKey) || item.ratingKey
-      item.targetType = m.grandparentRatingKey ? "show" : "episode"
+      var showKey = keyOf(m.grandparentRatingKey)
+      item.targetKey = showKey || item.ratingKey
+      item.targetType = showKey ? "show" : "episode"
+      item.seasonKey = keyOf(m.parentRatingKey)
+      item.episodeKey = item.ratingKey
     }
     out.push(item)
   }

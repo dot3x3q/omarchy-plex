@@ -541,6 +541,59 @@ test("mapRecentShows puts the show's poster and name on every card", () => {
     ["Shoresy", "Who Are We?", "S5 · E6", "/shoresy/thumb", "69279", "show"])
 })
 
+test("mapRecentShows: episode cards carry the season and episode to land on", () => {
+  // Trimmed from the live hub: Shoresy S5E6.
+  const [ep] = A.mapRecentShows({ MediaContainer: { Metadata: [
+    { type: "episode", ratingKey: "70366", title: "Who Are We?", parentRatingKey: "69793",
+      grandparentRatingKey: "69279", grandparentTitle: "Shoresy", parentTitle: "Season 5", parentIndex: 5, index: 6 }
+  ] } })
+  assert.deepEqual([ep.targetKey, ep.targetType, ep.seasonKey, ep.episodeKey], ["69279", "show", "69793", "70366"])
+})
+
+test("mapRecentShows: every card has seasonKey/episodeKey, so model roles match", () => {
+  const cards = A.mapRecentShows({ MediaContainer: { Metadata: [
+    { type: "show", ratingKey: "68239", title: "The Voice", childCount: 19, leafCount: 369 },
+    { type: "season", ratingKey: "70349", title: "Season 3", index: 3, parentIndex: 1, parentTitle: "Lupin", leafCount: 8 }
+  ] } })
+  assert.deepEqual([cards[0].seasonKey, cards[0].episodeKey], ["", ""])
+  assert.deepEqual([cards[1].seasonKey, cards[1].episodeKey], ["70349", ""])
+})
+
+test("mapRecentShows ignores a season entry's bogus parentIndex and counts total-minus-watched", () => {
+  // Live: every season entry says parentIndex 1; leafCount is the season's
+  // total, not "new". Euphoria S3: 8 episodes, 2 watched -> badge 6.
+  const [s] = A.mapRecentShows({ MediaContainer: { Metadata: [
+    { type: "season", ratingKey: "67208", title: "Season 3", index: 3, parentIndex: 1,
+      parentTitle: "Euphoria (US)", parentRatingKey: "13305", leafCount: 8, viewedLeafCount: 2 }
+  ] } })
+  assert.equal(s.caption, "Season 3")
+  assert.equal(s.badge, "6")
+})
+
+test("mapRecentShows: no badge when viewedLeafCount exceeds leafCount", () => {
+  const cards = A.mapRecentShows({ MediaContainer: { Metadata: [
+    { type: "season", ratingKey: "1", title: "Season 1", index: 1, leafCount: 3, viewedLeafCount: 5 },
+    { type: "show", ratingKey: "2", title: "Show", leafCount: 3, viewedLeafCount: 4 }
+  ] } })
+  assert.deepEqual([cards[0].badge, cards[1].badge], ["", ""])
+})
+
+test("mapRecentShows: Season 0 reads Specials", () => {
+  const cards = A.mapRecentShows({ MediaContainer: { Metadata: [
+    { type: "season", ratingKey: "8296", title: "Season 0", index: 0, parentTitle: "1883", leafCount: 1 },
+    { type: "episode", ratingKey: "9", title: "Making Of", grandparentRatingKey: "8295", parentRatingKey: "8296", parentIndex: 0, index: 1 }
+  ] } })
+  assert.equal(cards[0].caption, "Specials")
+  assert.equal(cards[1].caption2, "Specials · E1")
+})
+
+test("mapRecentShows: an episode with no grandparentRatingKey targets itself", () => {
+  const [ep] = A.mapRecentShows({ MediaContainer: { Metadata: [
+    { type: "episode", ratingKey: "555", title: "Orphan", parentIndex: 1, index: 2 }
+  ] } })
+  assert.deepEqual([ep.targetKey, ep.targetType, ep.seasonKey, ep.episodeKey], ["555", "episode", "", "555"])
+})
+
 test("ratingsFor names sources by their image URI", () => {
   assert.deepEqual(Array.from(A.ratingsFor({ Rating: [
     { image: "imdb://image.rating", value: 7.8, type: "audience" },
