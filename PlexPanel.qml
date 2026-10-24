@@ -410,6 +410,15 @@ Item {
     root.cursorAction = action === undefined || action === null ? "" : String(action)
   }
 
+  // Pointer-only controls (shelf arrows, the library sort button, a shelf
+  // title link) have no slot in any keyboard walk, but the kit Button paints
+  // its own hover — so hovering one lit it NEXT TO the page cursor, two
+  // highlights at once. They claim this pseudo-region instead: the page
+  // cursor hides while the pointer is on them, and comes back where it was
+  // when the pointer leaves. Keyboard input from here resumes in the page.
+  function claimPointer(key) { root.setPanelCursor("pointer", key) }
+  function releasePointer(key) { if (root.cursorOn("pointer", key)) root.setPanelCursor("page", "") }
+
   function cursorOn(region, action) {
     return root.cursorRegion === String(region)
       && root.cursorAction === String(action === undefined || action === null ? "" : action)
@@ -2882,7 +2891,7 @@ Item {
     // keyboard-discoverable; the minibar only while it is on screen.
     if (root.minibarVisible) order.push("minibar")
     if (root.headerActions.length > 0) order.push("header")
-    var at = order.indexOf(root.cursorRegion)
+    var at = order.indexOf(root.cursorRegion === "pointer" ? "page" : root.cursorRegion)
     if (at < 0) at = 0
     at = ((at + dir) % order.length + order.length) % order.length
     // Skip the search box when it is not on screen (setup, playing).
@@ -2916,6 +2925,9 @@ Item {
   }
 
   function moveCursor(dx, dy) {
+    // A key pressed while the pointer rests on a pointer-only control acts on
+    // the page, and must make the page's cursor visible again to do it.
+    if (root.cursorRegion === "pointer") root.setPanelCursor("page", "")
     if (root.cursorRegion === "sidebar") {
       if (dx > 0) { root.enterRegion("page"); return }
       if (dy === 0) return
@@ -2964,6 +2976,7 @@ Item {
   }
 
   function activateCursor() {
+    if (root.cursorRegion === "pointer") root.setPanelCursor("page", "")
     if (root.cursorRegion === "sidebar") { root.activateSidebar(root.cursorAction); return }
     if (root.cursorRegion === "minibar") { root.activateMinibar(root.cursorAction); return }
     if (root.cursorRegion === "header") { root.activateHeader(root.cursorAction); return }
@@ -3104,6 +3117,15 @@ Item {
     if (key === Qt.Key_PageUp) { root.pageStep(-1); return true }
     if (key === Qt.Key_PageDown) { root.pageStep(1); return true }
     if (!ctrl && !alt && text === "r") { root.refresh(); return true }
+    // Page-owned single letters (Library's "s" = sort). Same implicit gate
+    // as every other letter here: a focused text field eats it first.
+    if (!ctrl && !alt && text !== "") {
+      var pageItem = pageLoader.item
+      if (pageItem && typeof pageItem.handlePageKey === "function" && pageItem.handlePageKey(text)) {
+        if (root.cursorRegion === "pointer") root.setPanelCursor("page", "")
+        return true
+      }
+    }
     // A no-op unless a session is live: enterPip() guards on pipAvailable.
     if (!ctrl && !alt && text === "p") { root.toggleSurface(); return true }
     return false
