@@ -675,7 +675,11 @@ Item {
       preferredHighlightEnd: height
       highlightRangeMode: ListView.ApplyRange
 
-      FastScrollHandler { flickable: pickerList }
+      // parent: the ListView itself, not its contentItem (where a child
+      // declared here would otherwise land): parented to the content, the
+      // handler scrolled away with the rows and stopped catching the wheel
+      // once the list moved past its first screen.
+      FastScrollHandler { parent: pickerList; flickable: pickerList }
 
       delegate: Button {
         required property var modelData
