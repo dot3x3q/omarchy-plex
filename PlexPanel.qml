@@ -1804,8 +1804,41 @@ Item {
   // exactly and snapping it would only make 95 and 105 unreachable.
   function setVolumeSnapped(pct) { root.setVolumePct(root.snapVolumePct(pct)) }
 
-  function nudgeVolumeWheel(up) {
-    root.setVolumeSnapped(root.volumePct + (up ? root.volumeWheelStep : -root.volumeWheelStep))
+  // Wheel input in, volume steps out. Every wheel handler passes its raw
+  // angleDelta.y here.
+  //
+  // It used to be "y > 0 ? up : down", once per event. Two things wrong with
+  // that: a purely horizontal scroll (y === 0, a tilt wheel or a sideways
+  // touchpad swipe) counted as DOWN; and a touchpad, which reports a swipe as
+  // a stream of small deltas rather than 120-unit notches, stepped 10% on
+  // every one of them — a casual two-finger flick took the volume 60-100%.
+  // Now: y = 0 is ignored, and deltas accumulate until they make up a whole
+  // notch (120 units, Qt's definition of one wheel click). A mouse wheel
+  // still steps exactly once per click.
+  property real wheelVolumeAccum: 0
+
+  function wheelVolume(angleDeltaY) {
+    var dy = Number(angleDeltaY) || 0
+    if (dy === 0) return
+    // A reversal starts a fresh notch rather than first paying back the
+    // partial one in the other direction.
+    if (root.wheelVolumeAccum !== 0 && (dy > 0) !== (root.wheelVolumeAccum > 0))
+      root.wheelVolumeAccum = 0
+    root.wheelVolumeAccum += dy
+    wheelVolumeIdle.restart()
+    var steps = root.wheelVolumeAccum > 0
+      ? Math.floor(root.wheelVolumeAccum / 120) : Math.ceil(root.wheelVolumeAccum / 120)
+    if (steps === 0) return
+    root.wheelVolumeAccum -= steps * 120
+    root.setVolumeSnapped(root.volumePct + steps * root.volumeWheelStep)
+  }
+
+  // A partial notch left over from one gesture should not tip the next one.
+  Timer {
+    id: wheelVolumeIdle
+    interval: 400
+    repeat: false
+    onTriggered: root.wheelVolumeAccum = 0
   }
 
   // ---- the volume popup ----
@@ -3669,7 +3702,7 @@ Item {
           // the same proven wheel path as the theater's video surface.
           onWheel: function(wheel) {
             root.pokeTheaterControls()
-            root.nudgeVolumeWheel(wheel.angleDelta.y > 0)
+            root.wheelVolume(wheel.angleDelta.y)
           }
           // A high-rate mouse delivers position events far faster than the
           // display swaps frames, and every margin write re-lays-out the card
@@ -3924,7 +3957,7 @@ Item {
               // Explicit, as in the Spotify plugin: the default acceptedDevices
               // is Mouse alone, which drops touchpad scrolling entirely.
               acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-              onWheel: function(event) { root.nudgeVolumeWheel(event.angleDelta.y > 0) }
+              onWheel: function(event) { root.wheelVolume(event.angleDelta.y) }
             }
           }
 
@@ -4624,7 +4657,7 @@ Item {
 
             WheelHandler {
               acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-              onWheel: function(event) { root.nudgeVolumeWheel(event.angleDelta.y > 0) }
+              onWheel: function(event) { root.wheelVolume(event.angleDelta.y) }
             }
           }
 

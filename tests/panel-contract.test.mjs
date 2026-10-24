@@ -203,3 +203,11 @@ test("native PiP handoffs: screen settled before the flip, mute carried, no load
   const bounce = qml.slice(qml.indexOf("function bouncePipPlayer"), qml.indexOf("function armNativePlayback"))
   assert.doesNotMatch(bounce, /duration > 0/)
 })
+
+test("wheel volume ignores horizontal scroll and accumulates whole notches", () => {
+  assert.doesNotMatch(qml + theater, /angleDelta\.y > 0/)
+  assert.doesNotMatch(qml + theater, /nudgeVolumeWheel/)
+  const wheel = qml.slice(qml.indexOf("function wheelVolume"), qml.indexOf("id: wheelVolumeIdle"))
+  assert.match(wheel, /if \(dy === 0\) return/)
+  assert.match(wheel, /\/ 120\)/)
+})

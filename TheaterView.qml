@@ -69,7 +69,7 @@ Item {
     // does, and a hold with no matching hover-out would pin the popup open.
     onWheel: function(wheel) {
       view.panel.pokeTheaterControls()
-      view.panel.nudgeVolumeWheel(wheel.angleDelta.y > 0)
+      view.panel.wheelVolume(wheel.angleDelta.y)
     }
   }
 
@@ -268,7 +268,7 @@ Item {
           acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
           onWheel: function(event) {
             view.panel.holdVolumePopup()
-            view.panel.nudgeVolumeWheel(event.angleDelta.y > 0)
+            view.panel.wheelVolume(event.angleDelta.y)
           }
         }
 
@@ -465,7 +465,7 @@ Item {
               }
               onWheel: function(wheel) {
                 view.panel.holdVolumePopup()
-                view.panel.nudgeVolumeWheel(wheel.angleDelta.y > 0)
+                view.panel.wheelVolume(wheel.angleDelta.y)
               }
 
               PanelToolTip {
