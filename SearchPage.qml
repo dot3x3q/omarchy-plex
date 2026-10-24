@@ -11,24 +11,29 @@ Item {
 
   readonly property bool cursorHere: panel.cursorRegion === "page"
   readonly property string query: String((panel.pageParams && panel.pageParams.query) || "")
-  // The root carries no "request in flight" flag, so this page infers one: a
-  // new non-empty query arms "searching", and any searchResults update clears
-  // it. A slow stale request landing after a faster newer one is an accepted
-  // race; fixing it needs request-generation tracking in root.search().
-  property bool searching: false
+  // Root-owned and generation-checked (PlexPanel search()). Inferring it here
+  // from onQueryChanged broke on Back: the rebuilt page saw its query
+  // "change", armed Searching… with no request behind it, and zeroed the
+  // remembered scroll.
+  readonly property bool searching: page.panel.searching === true
   property int cursorIndex: 0
+  // The cursor survives Back the same way the scroll does; restoring only
+  // contentY left the highlight on row 0, off-screen.
+  onCursorIndexChanged: page.panel.rememberScroll("search:cursor", page.cursorIndex)
 
-  onQueryChanged: {
-    if (page.query !== "") page.searching = true
-    // A new query is a new list: stale cursor/scroll positions point at
-    // rows that are about to be replaced.
-    page.cursorIndex = 0
-    if (typeof resultsList !== "undefined" && resultsList !== null) resultsList.contentY = 0
+  Component.onCompleted: {
+    var n = page.resolvedResults.length
+    page.cursorIndex = n > 0 ? Math.min(n - 1, Math.round(page.panel.scrollFor("search:cursor"))) : 0
   }
 
+  // A new query is a new list: stale cursor/scroll positions point at rows
+  // that are about to be replaced. Only a real search() says so.
   Connections {
     target: page.panel
-    function onSearchResultsChanged() { page.searching = false }
+    function onSearchStarted() {
+      page.cursorIndex = 0
+      resultsList.contentY = 0
+    }
   }
 
   // Image-URL handoff: resolve thumbPath per row at fetch/render time
@@ -69,10 +74,12 @@ Item {
     else page.panel.navigate("detail", { ratingKey: it.ratingKey, title: it.title, subtitle: it.caption, type: it.type })
   }
 
+  // PageUp/PageDown clamp at the ends. Wrapping is right for a single step
+  // (above), but a five-row jump that lands back at the top reads as lost.
   function bulkMove(delta) {
     var items = page.resolvedResults
     if (items.length === 0) return
-    page.cursorIndex = ((page.cursorIndex + delta) % items.length + items.length) % items.length
+    page.cursorIndex = Math.max(0, Math.min(items.length - 1, page.cursorIndex + delta))
     page.scrollIntoView()
   }
   function pageUp() { page.bulkMove(-5) }

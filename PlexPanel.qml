@@ -307,21 +307,42 @@ Item {
   property var pageParams: ({})
   readonly property int navStackLimit: 32
 
+  // Swaps the live page. The order is the whole point: the old page is
+  // destroyed FIRST, while pageParams still describe it, so its
+  // Component.onDestruction banks scroll/cursor under its own key; then the
+  // params change; then the new page is built already holding its own params.
+  // The Loader builds synchronously, so setting currentPage before
+  // pageParams (the old order) constructed every new page with the PREVIOUS
+  // page's params and then re-fed it the right ones — Search saw its query
+  // "change", armed "Searching…" forever and zeroed its remembered scroll.
+  // Setting params first instead would let the outgoing page react to
+  // params that are not its own. `active` false→true destroys and rebuilds
+  // synchronously (verified offscreen), which also gives detail→detail and
+  // library→library a fresh page instead of a reused one reloading in place.
+  function showPage(page, params) {
+    pageLoader.active = false
+    root.pageParams = params
+    root.currentPage = page
+    pageLoader.active = true
+  }
+
   function navigate(page, params) {
     var next = String(page || "home")
     var args = params === undefined || params === null ? ({}) : params
     if (next === root.currentPage) {
-      // Same page, new arguments: replace rather than stack a history entry,
-      // or every debounced keystroke in the search box becomes a back step.
-      root.pageParams = args
-      return
+      // Search alone coalesces: every debounced keystroke replaces the
+      // query rather than stacking a back step. Coalescing every same-page
+      // move used to swallow detail→detail (Related), so Back skipped the
+      // movie you came from.
+      if (next === "search") { root.pageParams = args; return }
+      // Re-opening exactly where you are (Home from Home) is not history.
+      if (JSON.stringify(args) === JSON.stringify(root.pageParams)) return
     }
     var stack = root.navStack.slice()
     stack.push({ page: root.currentPage, params: root.pageParams })
     while (stack.length > root.navStackLimit) stack.shift()
     root.navStack = stack
-    root.currentPage = next
-    root.pageParams = args
+    root.showPage(next, args)
     // A banner describes the page that raised it; carrying "No results for X"
     // onto Home reads as a stuck error.
     root.setStatus("", false)
@@ -332,8 +353,7 @@ Item {
     root.setStatus("", false)
     if (root.navStack.length === 0) {
       if (root.currentPage !== "home") {
-        root.currentPage = "home"
-        root.pageParams = ({})
+        root.showPage("home", ({}))
         root.setPanelCursor("page", "")
       }
       return
@@ -341,8 +361,8 @@ Item {
     var stack = root.navStack.slice()
     var prev = stack.pop()
     root.navStack = stack
-    root.currentPage = String(prev.page || "home")
-    root.pageParams = prev.params === undefined || prev.params === null ? ({}) : prev.params
+    root.showPage(String(prev.page || "home"),
+      prev.params === undefined || prev.params === null ? ({}) : prev.params)
     root.setPanelCursor("page", "")
   }
 
@@ -1108,19 +1128,35 @@ Item {
   // slots, a slow response for "jo" can land after the fast one for "john
   // wick" and silently replace the newer results.
   property int searchGen: 0
+  // The one source of truth for "a search is in flight": set here, cleared
+  // only by the callback of the CURRENT generation. SearchPage used to infer
+  // it from its query changing, which also fired when the page was merely
+  // rebuilt by Back — a "Searching…" that never cleared.
+  property bool searching: false
+  // A NEW query (not a rebuilt page) is what resets the results list's
+  // scroll and cursor; SearchPage listens for this instead of onQueryChanged.
+  signal searchStarted()
 
   function search(q) {
     var query = String(q === undefined || q === null ? "" : q).trim()
     root.searchGen++
     if (query === "") {
+      root.searching = false
       root.searchResults = []
       if (root.currentPage === "search") root.goBack()
       return
     }
     var gen = root.searchGen
+    root.searching = true
+    // Fresh list: a page built by the navigate below must not restore the
+    // previous query's position.
+    root.rememberScroll("search", 0)
+    root.rememberScroll("search:cursor", 0)
     root.navigate("search", { query: query })
+    root.searchStarted()
     root.request(Api.searchUrl("", query), function(doc) {
       if (gen !== root.searchGen) return
+      root.searching = false
       var out = []
       try { out = Api.mapSearch(doc) } catch (e) { out = [] }
       root.searchResults = out
@@ -2775,7 +2811,12 @@ Item {
 
   function escapePressed() {
     if (searchInput.activeFocus && searchInput.text !== "") {
+      // A programmatic text change never fires textEdited, so the debounce
+      // never ran and "Results for john" sat under an empty box — three Escs
+      // to get out. Clear the query for real, now.
       searchInput.text = ""
+      searchDebounce.stop()
+      root.search("")
       root.disarmEscapeClose()
       return
     }

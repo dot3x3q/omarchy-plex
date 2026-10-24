@@ -490,7 +490,15 @@ Item {
   function pageDown() { page.pageStep(1) }
 
   Component.onCompleted: page.load()
-  Component.onDestruction: page.saveScroll()
+  // Every navigation now rebuilds the page (PlexPanel showPage), so a
+  // response for a page already left is routine. Bumping the generations on
+  // the way out makes those callbacks return at their gen check instead of
+  // calling into a torn-down context.
+  Component.onDestruction: {
+    page.saveScroll()
+    page.loadGen += 1
+    page.seasonGen += 1
+  }
   // Drilling from one detail page to another reuses this instance (the Loader
   // only sees currentPage), so the params change is the reload trigger.
   onRatingKeyChanged: if (page.ratingKey !== page.loadedKey) page.load()

@@ -6,11 +6,10 @@ import qs.Ui
 import "Api.js" as Api
 
 // Poster-grid browser for one library section (panel.pageParams.sectionId).
-// The root panel's page Loader keeps this SAME instance alive across two
-// library sections in a row (its sourceComponent only changes when
-// currentPage itself changes, not pageParams — see PlexPanel.qml
-// pageComponent()), so section switches are driven by watching
-// panel.pageParams, not by Component.onCompleted alone.
+// PlexPanel.showPage() rebuilds the page on every navigation, so a section
+// switch normally arrives as a fresh instance. trySync() still watches
+// panel.pageParams so an in-place params change (if one ever returns) keeps
+// working rather than showing the wrong library.
 Item {
   id: root
 
@@ -227,7 +226,11 @@ Item {
 
   Component.onCompleted: root.trySync()
   onWidthChanged: root.trySync()
-  Component.onDestruction: panel.rememberScroll(root.scrollKey, gridView.contentY)
+  Component.onDestruction: {
+    panel.rememberScroll(root.scrollKey, gridView.contentY)
+    // Responses for a page already left return at their gen check.
+    root.fetchGen++
+  }
 
   Connections {
     target: root.panel
