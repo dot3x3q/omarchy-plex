@@ -217,3 +217,9 @@ test("the PiP card is capped by screen height as well as width", () => {
   assert.match(qml, /Math\.min\(root\.pipAreaWidth, root\.pipAreaHeight \* 16 \/ 9\)/)
   assert.doesNotMatch(qml, /root\.videoWidth = /)
 })
+
+test("native is only chosen on an OpenGL scene graph", () => {
+  assert.match(qml, /readonly property bool nativeReady: nativeProbe\.status === Loader\.Ready && root\.sceneIsGl/)
+  assert.match(qml, /root\.sceneGraphicsApi === GraphicsInfo\.OpenGL/)
+  assert.match(qml, /Quickshell\.env\("QSG_RHI_BACKEND"\)/)
+})

@@ -2833,7 +2833,21 @@ Item {
   // mpv_render_context_render → pthread_mutex_lock, SIGSEGV, taking the whole
   // shell with it. So each surface owns its own item and a surface switch is a
   // deliberate reload-at-position handoff.
-  readonly property bool nativeReady: nativeProbe.status === Loader.Ready
+  //
+  // The probe proves the module LOADS, not that it can draw: under
+  // QSG_RHI_BACKEND=vulkan (which omarchy issue #7268 steers some NVIDIA users
+  // toward) it loads fine and renders a black rectangle over playing audio.
+  // So native also needs the scene graph to be OpenGL. The environment answers
+  // that at startup; GraphicsInfo.api answers it for certain once the window
+  // has been exposed (it reads Unknown before), and wins when it has.
+  readonly property string rhiBackendEnv: String(Quickshell.env("QSG_RHI_BACKEND") || "").toLowerCase()
+  readonly property bool envAllowsGl: (root.rhiBackendEnv === "" || root.rhiBackendEnv === "opengl"
+      || root.rhiBackendEnv === "gl")
+    && String(Quickshell.env("QT_QUICK_BACKEND") || "").toLowerCase() !== "software"
+  property int sceneGraphicsApi: GraphicsInfo.Unknown
+  readonly property bool sceneIsGl: root.sceneGraphicsApi === GraphicsInfo.Unknown
+    ? root.envAllowsGl : root.sceneGraphicsApi === GraphicsInfo.OpenGL
+  readonly property bool nativeReady: nativeProbe.status === Loader.Ready && root.sceneIsGl
   readonly property var nativeVideo: root.windowed ? theaterNativeLoader.item : pipNativeLoader.item
   readonly property bool nativeMode: root.backend === "internal" && root.nativeReady
 
@@ -4157,6 +4171,12 @@ Item {
       Item {
         id: theaterSlot
         anchors.fill: parent
+
+        // Which RHI the window's scene graph actually runs on; see nativeReady.
+        // Latched once known, so a window that is hidden again (Unknown) does
+        // not flip the engine choice back.
+        readonly property int graphicsApi: GraphicsInfo.api
+        onGraphicsApiChanged: if (graphicsApi !== GraphicsInfo.Unknown) root.sceneGraphicsApi = graphicsApi
 
         // This surface's OWN native player — never reparented (the crash
         // note at the native block is the whole story). Created only while
