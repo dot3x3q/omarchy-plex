@@ -21,7 +21,8 @@ vm.runInNewContext(
     " childrenUrl, searchUrl, imageUrl, mapSections, mapItems, mapSearch, mapChildren," +
     " mapDetail, durationText: durationText, progressFor: progressFor, unwatchedFor: unwatchedFor," +
     " mapStreams, selectedStreamId, partSelectionUrl, streamLabel,\n" +
-    " recentlyAddedHubUrl, mapRecentShows, ratingsFor, detailUrl, relatedUrl, mapRelated }",
+    " recentlyAddedHubUrl, mapRecentShows, ratingsFor, detailUrl, relatedUrl, mapRelated,\n" +
+    " extrasFor, castFor, keyOf }",
   ctx
 )
 const A = ctx.A
@@ -562,4 +563,57 @@ test("mapRelated takes the first hub with items and captions it with the year", 
   ] } })
   assert.equal(out.length, 1)
   assert.equal(out[0].caption, "2026")
+})
+
+// ---- extras (probed live 2026-10-23: ~110 movies, 345 extras) ----
+//
+// Only three subtypes occurred: trailer/1, behindTheScenes/5 and
+// sceneOrSample/6 (about 40% of all extras). Trimmed from Red Riding Hood
+// (68770); the iva part key is what every probed extra plays from.
+const extrasFixture = { size: 4, Metadata: [
+  { ratingKey: "68771", key: "/library/metadata/68771", type: "clip", title: "Red Riding Hood",
+    subtype: "trailer", extraType: 1, duration: 148000, index: 1,
+    thumb: "/library/metadata/68771/thumb/1644437853",
+    Media: [{ Part: [{ id: 88917, duration: 148000, container: "mp4",
+      key: "/services/iva/assets/855429/video.mp4?fmt=4&bitrate=2500" }] }] },
+  { ratingKey: "68780", type: "clip", title: "A Look Inside", subtype: "behindTheScenes", extraType: 5, duration: 211000 },
+  { ratingKey: "68781", type: "clip", title: "The Wolf Attacks", subtype: "sceneOrSample", extraType: 6, duration: 95000 },
+  { ratingKey: "68782", type: "clip", title: "Something new", subtype: "somethingPlexAddsLater", extraType: 99 }
+] }
+
+test("extrasFor labels the subtypes Plex really sends", () => {
+  const out = A.extrasFor(extrasFixture)
+  assert.deepEqual(plain(out.map(x => x.kind)), ["Trailer", "Behind the Scenes", "Scene", "Extra"])
+  assert.equal(out[0].ratingKey, "68771")
+  assert.equal(out[0].durationText, "2m")
+  assert.equal(out[3].durationText, "") // no duration: blank, not "0m"
+})
+
+test("extrasFor falls back to the numeric extraType when subtype is missing", () => {
+  const out = A.extrasFor({ Metadata: [
+    { ratingKey: "1", extraType: 2 }, { ratingKey: "2", extraType: 10 },
+    { ratingKey: "3", extraType: "6" }, { ratingKey: "4", extraType: 0 },
+    { ratingKey: "5", subtype: "hasOwnProperty" }, { title: "no key, dropped" }
+  ] })
+  assert.deepEqual(plain(out.map(x => x.kind)), ["Deleted Scene", "Featurette", "Scene", "Extra", "Extra"])
+})
+
+// ---- cast ----
+
+test("castFor keeps absolute https thumbs verbatim and tolerates a missing one", () => {
+  // Trimmed from 68770's Role[]; about 30% of live Role entries carry no thumb,
+  // and a few point at image.tmdb.org rather than metadata-static.plex.tv.
+  const out = A.castFor([
+    { id: 22272, tag: "Amanda Seyfried", role: "Valerie",
+      thumb: "https://metadata-static.plex.tv/7/people/7d5d6ae6317c5c60442ab896c1026b51.jpg" },
+    { id: 1, tag: "Someone", role: "Villager",
+      thumb: "https://image.tmdb.org/t/p/original/8LpZ95uYfhjdx0wTSGB0HMOQUTB.jpg" },
+    { id: 2, tag: "No Photo" },
+    { id: 3, role: "no tag, dropped" }
+  ])
+  assert.equal(out.length, 3)
+  assert.equal(out[0].photoPath, "https://metadata-static.plex.tv/7/people/7d5d6ae6317c5c60442ab896c1026b51.jpg")
+  assert.equal(out[1].photoPath, "https://image.tmdb.org/t/p/original/8LpZ95uYfhjdx0wTSGB0HMOQUTB.jpg")
+  assert.deepEqual([out[2].name, out[2].role, out[2].photoPath], ["No Photo", "", ""])
+  assert.equal(A.castFor(undefined).length, 0)
 })

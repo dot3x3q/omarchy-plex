@@ -506,14 +506,38 @@ function castFor(roles) {
   return out
 }
 
+// Extras label by `subtype` first, then by the numeric `extraType`. Probed
+// live 2026-10-23 across ~110 movies and 345 extras: only three subtypes ever
+// occur — trailer (extraType 1), behindTheScenes (5) and sceneOrSample (6),
+// the last being about 40% of all extras. The rest of both tables is Plex's
+// enum as documented, kept so a library with deleted scenes or interviews
+// still reads right; "scene" and "clip" are not subtypes Plex sends.
 var EXTRA_KINDS = {
-  trailer: "Trailer", scene: "Scene", behindTheScenes: "Behind the Scenes",
-  interview: "Interview", deletedScene: "Deleted Scene", featurette: "Featurette",
-  short: "Short", clip: "Clip"
+  trailer: "Trailer", deletedScene: "Deleted Scene", interview: "Interview",
+  musicVideo: "Music Video", behindTheScenes: "Behind the Scenes",
+  sceneOrSample: "Scene", liveMusicVideo: "Live Music Video",
+  lyricMusicVideo: "Lyric Video", concert: "Concert", featurette: "Featurette",
+  short: "Short", other: "Extra"
+}
+
+var EXTRA_TYPES = {
+  1: "Trailer", 2: "Deleted Scene", 3: "Interview", 4: "Music Video",
+  5: "Behind the Scenes", 6: "Scene", 7: "Live Music Video", 8: "Lyric Video",
+  9: "Concert", 10: "Featurette", 11: "Short", 12: "Extra"
+}
+
+function extraKind(x) {
+  var sub = String(x.subtype || "")
+  if (EXTRA_KINDS.hasOwnProperty(sub)) return EXTRA_KINDS[sub]
+  var t = Number(x.extraType)
+  if (EXTRA_TYPES.hasOwnProperty(t)) return EXTRA_TYPES[t]
+  return "Extra"
 }
 
 // Extras are `clip` metadata with their own ratingKey and a playable part, so
-// playItem() handles them unchanged.
+// playItem() handles them unchanged. Every extra probed plays from
+// /services/iva/..., which 302s to video.internetvideoarchive.net — a third
+// party, which is why the panel never sends the token there as a header.
 function extrasFor(extras) {
   var out = []
   var list = (extras && extras.Metadata) || []
@@ -523,7 +547,7 @@ function extrasFor(extras) {
     out.push({
       ratingKey: keyOf(x.ratingKey),
       title: cap(x.title, MAX_FIELD),
-      kind: EXTRA_KINDS[String(x.subtype || "")] || "Extra",
+      kind: extraKind(x),
       thumbPath: cap(x.thumb, 512),
       durationText: x.duration ? durationText(x.duration) : ""
     })
