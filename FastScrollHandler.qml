@@ -106,7 +106,7 @@ Item {
   }
 
   WheelHandler {
-    id: wheel
+    id: wheelHandler
     target: null
     acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
     blocking: true
@@ -123,7 +123,7 @@ Item {
         return
       }
       if (root.sideways(event)) {
-        var list = root.horizontalListAt(wheel.point.position.x, wheel.point.position.y)
+        var list = root.horizontalListAt(wheelHandler.point.position.x, wheelHandler.point.position.y)
         if (!list || !list.interactive) { event.accepted = false; return }
         var dx = root.scrollDistance(event.pixelDelta.x, event.angleDelta.x)
         if (dx === 0) dx = root.scrollDistance(event.pixelDelta.y, event.angleDelta.y)
