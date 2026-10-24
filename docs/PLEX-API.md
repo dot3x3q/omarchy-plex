@@ -5,7 +5,10 @@ Everything below was verified live against the user's real Plex Media Server
 old Plex docs. Every endpoint returned `200`. Samples are trimmed to the
 fields the mappers read (plus a few extras, to prove tolerance) and
 sanitized: no token, no machine identifiers beyond the local library-section
-UUIDs (harmless, not secrets), file paths shortened.
+UUIDs (harmless, not secrets), file paths shortened. Sections dated
+2026-10-23 were re-probed (or probed for the first time) on that date; where
+they contradict an older line, the dated one wins and the older line has been
+corrected.
 
 ## Endpoints
 
@@ -16,7 +19,10 @@ UUIDs (harmless, not secrets), file paths shortened.
 | `GET /library/sections/{id}/recentlyAdded` | 200 | flat `Metadata[]`, paginable |
 | `GET /library/sections/{id}/all` | 200 | flat `Metadata[]`, sort param honored |
 | `GET /library/metadata/{ratingKey}` | 200 | movie, show, season, episode all probed |
-| `GET /library/metadata/{ratingKey}/children` | 200 | show→seasons, season→episodes |
+| `GET /library/metadata/{ratingKey}/children` | 200 | show→seasons (+ an "All episodes" `Directory`), season→episodes; paginable |
+| `GET /hubs/home/recentlyAdded?type=2&sectionID={id}` | 200 | grouped TV shelf: show / season / episode entries |
+| `GET /hubs/metadata/{ratingKey}/related` | 200 | `Hub[]`, ~1.5 s; 6 items per hub, `more: true` |
+| `GET /services/iva/assets/{id}/video.mp4?fmt=&bitrate=` | 302 | extras playback; redirects to `video.internetvideoarchive.net` (third party) |
 | `GET /search?query=` | 200 | flat, pre-ranked, pre-typed |
 | `GET /hubs/search?query=` | 200 | bucketed by type into `Hub[]` |
 | `GET /photo/:/transcode?...&url=&X-Plex-Token=` | 200 `image/jpeg` | works with a server-relative path in `url=` |
@@ -88,8 +94,11 @@ Tested `X-Plex-Container-Start`/`X-Plex-Container-Size` on
 `recentlyAdded` both as request headers and as query params on the same
 endpoint; the response `MediaContainer.offset`/`size`/`totalSize` came back
 identical either way (`size: 3, offset: 0, totalSize: 100` for
-`start=0&size=3` against a 100-item Movies library). Api.js's URL builders
-use the query-param form (`libraryAllUrl`, `recentlyAddedUrl`) since
+`start=0&size=3`). That 100 is `recentlyAdded`'s own ceiling, not the
+library's size: the same request against `/all` on the same Movies library
+reports `totalSize: 1924` (2026-10-23). `/children` pages the same way (see
+below). Api.js's URL builders use the query-param form (`libraryAllUrl`,
+`recentlyAddedUrl`, `childrenUrl`) since
 `panel.request(path, cb)` builds one URL string per call — no per-call
 header plumbing needed for a feature headers buy nothing over.
 
@@ -111,22 +120,82 @@ Probed 2026-10-23. A TV section's own `/recentlyAdded` lists bare episodes, so
 a home shelf built on it is a row of screenshots titled "Episode 2". This hub
 is what stock Plex's "Recently Added in TV Shows" row uses: one entry per show,
 typed `show` (whole show new; `childCount` seasons), `season` (`parentTitle` =
-show, `parentThumb` = show poster, `leafCount` new episodes) or `episode`
-(`grandparentTitle`/`grandparentThumb`/`grandparentRatingKey` = the show).
-`Api.mapRecentShows` turns each into a card with the show's poster and name.
+show, `parentThumb` = show poster, `parentRatingKey` = show) or `episode`
+(`grandparentTitle`/`grandparentThumb`/`grandparentRatingKey` = the show,
+`parentRatingKey` = its season, `parentIndex` = its season number).
+`Api.mapRecentShows` turns each into a card with the show's poster and name;
+episode cards also carry `seasonKey`/`episodeKey` so the page can open the
+show at that season and episode.
 
-## Movie-page includes — `?includeExtras=1&includeRelated=1`
+Two season-entry fields lie, so no mapper reads them for meaning:
 
-Same `/library/metadata/{ratingKey}` call (`Api.detailUrl`). Adds `Extras.Metadata[]`
-(type `clip`, `subtype` trailer/scene/…, own `ratingKey`; the part key is
-`/services/iva/assets/…/video.mp4?fmt=4&bitrate=5000`, which 302s to an
-external CDN and already carries a `?`) and `Related.Hub[]` (`movie.similar`).
-`Role[]` (cast, `thumb` is an absolute metadata-static.plex.tv URL),
-`Director[]`, `studio` and `Rating[]` are present without any include.
+- **`leafCount` is the season's TOTAL episode count, not how many are new.**
+  *The Simpsons* Season 7 shows up with `leafCount: 25`, the whole season.
+  The badge is `leafCount - viewedLeafCount` (unwatched), which is what stock
+  Plex paints.
+- **Every season entry carries `parentIndex: 1`**, whatever the season (Season
+  13 of *American Horror Story* included). The season's number is its own
+  `index`. Episode entries' `parentIndex` is correct.
+
+```json
+{ "type": "season", "ratingKey": "67777", "title": "Season 7", "index": 7,
+  "parentIndex": 1, "parentTitle": "The Simpsons", "parentRatingKey": "26480",
+  "leafCount": 25, "viewedLeafCount": 0 }
+```
+
+## Movie-page includes — `?includeOnDeck=1&includeExtras=1`
+
+Same `/library/metadata/{ratingKey}` call (`Api.detailUrl`), ~30–120 ms.
+`includeRelated` is **not** sent any more: it made this one request take
+~1.5 s and the whole page waited on it. Related comes from its own endpoint,
+fetched after the page has drawn (next section).
+
+`includeExtras` adds `Extras.Metadata[]`: type `clip`, own `ratingKey`, and a
+`subtype` + numeric `extraType` pair. Probed 2026-10-23 across ~110 movies
+and 345 extras, only three pairs ever occur:
+
+| `subtype` | `extraType` | Share | Label |
+|---|---|---|---|
+| `trailer` | 1 | 36% | Trailer |
+| `sceneOrSample` | 6 | 39% | Scene |
+| `behindTheScenes` | 5 | 25% | Behind the Scenes |
+
+`scene` and `clip` are not subtypes Plex sends. `Api.extrasFor` maps subtype
+first and falls back to Plex's `extraType` enum (1 trailer, 2 deleted scene,
+3 interview, 4 music video, 5 behind the scenes, 6 scene/sample, 7 live music
+video, 8 lyric music video, 9 concert, 10 featurette, 11 short, 12 other),
+then to "Extra".
+
+Every probed extra plays from
+`/services/iva/assets/{id}/video.mp4?fmt=4&bitrate=2500` (the key already
+carries a `?`), and each carries 1–3 `Media` entries at different bitrates.
+That path answers **302 to `video.internetvideoarchive.net`**, a third party.
+A player that follows the redirect can carry a token header along with it, so
+the panel sends the token for these only as a query param on the Plex URL,
+never as a header: `tokenHeaderAllowed` in `PlexPanel.qml` allows the header
+only toward the server's own `/library/` and `/video/` paths.
+
+`Role[]` (cast), `Director[]`, `studio` and `Rating[]` are present without any
+include. Role `thumb` is an absolute https URL, mostly on
+`metadata-static.plex.tv` but some on `image.tmdb.org`, and about 30% of
+roles carry no `thumb` at all. Some of those URLs are dead: 2 of 150
+metadata-static thumbs sampled answered 403 (all 37 tmdb ones were fine),
+so a cast photo has to fail quietly to its placeholder.
 `Rating[]` names its source only through `image`: `imdb://image.rating`,
 `rottentomatoes://image.rating.ripe|rotten` (critic),
 `rottentomatoes://image.rating.upright|spilled` (audience),
 `themoviedb://image.rating`; values are 0–10.
+
+## `/hubs/metadata/{ratingKey}/related` — the Related row
+
+Probed 2026-10-23 (`Api.relatedUrl` / `mapRelated`). ~1.5 s per call, against
+~80 ms for the metadata itself, which is why it is fetched separately. Returns
+`MediaContainer.Hub[]`, `movie.similar` ("Related Movies") first, then
+same-director / same-actor hubs (`movie.same.actor.0`, "More with Gary
+Oldman", …). Each hub carries **6** items, `size: 6` and `more: true`; its
+`key` (`/library/metadata/{key}/similar`,
+`/library/sections/1/all?actor=…&id!=…`) lists the rest. A movie with few
+credits returns only the `movie.similar` hub.
 
 ## `/library/metadata/{ratingKey}` — one per type
 
@@ -160,6 +229,12 @@ own):
 `mapDetail` falls back `rating: m.rating ?? m.audienceRating` so the detail
 hero always has a number, regardless of type.
 
+**OnDeck on a show** (`?includeOnDeck=1`, 2026-10-23): `OnDeck.Metadata` is a
+single episode **object, not an array**. It can also be **absent on a partly
+watched show**: *1883* (11 episodes, 9 watched) came back with no `OnDeck`
+at all, while *Euphoria* (24, 2 watched) and *The Simpsons* (333, 1 watched)
+both had one. A Play button cannot assume it.
+
 **Season** — no its own rating/Genre; carries `leafCount`/`viewedLeafCount`
 same as a show (scoped to that season), `parentTitle` (show name),
 `art`/`thumb` that fall back to the parent show's art when the season has no
@@ -171,9 +246,22 @@ distinct art of its own.
 ## `/library/metadata/{ratingKey}/children`
 
 - On a **show** → `Metadata[]` of `type: "season"` (this show: 1 season, 8
-  episodes: `leafCount: 8, viewedLeafCount: 0`).
+  episodes: `leafCount: 8, viewedLeafCount: 0`), **plus** a
+  `MediaContainer.Directory[]` with one "All episodes" entry
+  (`key: /library/metadata/{show}/allLeaves`, the show's total `leafCount`).
+  Every show probed carries it. `mapChildren` reads only `Metadata[]`, so it
+  never becomes a card.
+- **Specials sort first.** A Season 0 (`index: 0`, `title: "Specials"`) comes
+  back ahead of Season 1 — *1883*: `[Specials, Season 1]`. Anything that
+  takes "the first season" as the place to start playing lands on Specials.
+  24 of this server's 1,855 seasons are Specials.
 - On a **season** → `Metadata[]` of `type: "episode"`, same shape as the
   onDeck episode sample.
+- **Paginable** like `/all`: `?X-Plex-Container-Start=5&X-Plex-Container-Size=3`
+  on a 13-episode season returned `offset: 5, size: 3, totalSize: 13`.
+  Without the params the response has **no `totalSize`**. `mapChildren` stops
+  at 256 items, so a longer season needs `Api.childrenUrl(server, key,
+  { start, size })` to reach its tail.
 
 ## `/search` vs `/hubs/search` — decision: **`/search`**
 
@@ -273,7 +361,9 @@ sensibly without either component needing type-specific logic of its own.
 `rating` if present, else `audienceRating`, else `null`), `contentRating`,
 `genres` (always an array), and `media` (`null` for show/season, `{
 videoResolution, container, videoCodec, audioCodec, width, height, bitrate
-}` for movie/episode).
+}` for movie/episode, from the first `Media`), plus `videoText`/`audioText`/
+`subtitleCount` (first Media, first Part), `tagline`, `studio`, `directors`,
+`writers`, `ratings`, `cast` and `extras`.
 
 ## Audio and subtitle streams — `Media[].Part[].Stream[]`
 
@@ -356,9 +446,38 @@ Verified live 2026-08-29 against the same server (PMS `1.43.3.10896`), on
   own `key`. This library is 100% muxed. `mapStreams`'s `external` branch
   (and `ordinal: -1` for it) is therefore *defensive, not verified*; the
   behavior is pinned by a unit test rather than by a live capture.
-- **No multi-part item was found** (`Media[0].Part.length > 1`) across 11
-  movies and 5 episodes. `mapStreams` reads `Part[0]` only; `allParts=1` on
-  the selection PUT keeps the halves in step if one ever turns up.
+- **Multi-part items exist** (an earlier sample of 11 movies found none; see
+  "Multi-part and multi-version items" below). Every part of one probed
+  multi-part item carries the same stream list, so `mapStreams` reads
+  `Part[0]` and `allParts=1` on the selection PUT keeps the halves in step.
+
+### Multi-part and multi-version items
+
+Probed 2026-10-23. Both shapes are real on this server:
+
+- **Multi-part**: one `Media` whose `Part[]` holds several files that play
+  back to back. `3732` (*Jigen's Gravestone*, `… - part1.mkv` / `part2.mkv`)
+  and `7324` (*The Sound of Music*, `… - CD1.mkv` / `CD2.mkv`).
+  `Media.duration` is the sum of the parts; each part has its own `id`, `key`
+  and `duration`, and here identical `Stream[]` lists.
+- **Multi-version**: several `Media` entries, each a complete copy. `393`
+  (*Anchorman*) has a 4K HEVC remux first and a 1080p mp4 second — on this
+  server that second "version" is in fact a different film merged into the
+  item, so versions cannot be assumed interchangeable.
+
+```json
+{ "ratingKey": "7324", "duration": 10351488, "Media": [ { "id": 17399,
+  "duration": 10351488, "Part": [
+    { "id": 17400, "key": "/library/parts/17400/1678012411/file.mkv", "duration": 6160064 },
+    { "id": 17401, "key": "/library/parts/17401/1678012412/file.mkv", "duration": 4191424 }
+] } ] }
+```
+
+Api.js reads `Media[0]`, the version Plex lists first, throughout (choosing
+a version is not built). `Api.partsFor(json)` returns that Media's parts in order as
+`{ key, duration, id }` (keys must be server-relative paths), for a player to
+stitch into one timeline (an mpv EDL). `mapDetail`'s `media`, `videoText`,
+`audioText` and `subtitleCount` describe `Media[0].Part[0]` only.
 
 ### `PUT /library/parts/{partId}` — server-side track selection
 

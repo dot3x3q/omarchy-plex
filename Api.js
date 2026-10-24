@@ -399,8 +399,9 @@ function partSelectionUrl(server, partId, audioStreamId, subtitleStreamId) {
 // sum; each Part has its own id, key and duration. MULTI-VERSION: several
 // Media entries for one item, each a complete copy — 393 carries a 4K remux
 // and a 1080p mp4 (which, on this server, is in fact a different film merged
-// into the item). Plex lists the version it would pick first, so everything
-// here reads Media[0], and Media[0].Part[0] where one part is enough.
+// into the item). Choosing a version is not built: everything here reads
+// Media[0], the one Plex lists first, and Media[0].Part[0] where one part is
+// enough.
 function firstMedia(m) {
   return (m && m.Media && m.Media[0]) || null
 }
