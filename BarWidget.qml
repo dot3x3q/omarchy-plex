@@ -5,8 +5,9 @@ import qs.Ui
 
 // Omarchy Plex bar widget.
 //   idle    - the Plex glyph alone
-//   playing - glyph + now-playing title, marquee (render-thread XAnimator,
-//             Spotify-style) if the title overflows maxTitleWidth
+//   playing - glyph + now-playing title; if it overflows maxTitleWidth it
+//             rests at the start, slides to show the end, rests, slides
+//             back, then rests longer (render-thread XAnimators)
 //   paused  - glyph swaps to a pause glyph, title stays put (no marquee)
 // Click always toggles the panel. Bar width is just implicitWidth off the
 // content Row — the bar host reflows the layout on its own the moment this
@@ -83,6 +84,13 @@ BarWidget {
       // Static while paused even if it would otherwise overflow.
       readonly property bool scrolling: label.needsScroll && root.isPlaying && !root.isPaused
       readonly property real fadeStop: width > 0 ? Math.min(0.2, Style.space(28) / width) : 0
+      // How far the title has to travel to bring its last letter into view.
+      readonly property real overflow: Math.max(0, label.implicitWidth - width)
+      // Fade only the edge text is actually hidden behind: at rest on the
+      // start the first letters must read cleanly, and at the end the last.
+      property bool atStart: true
+      property bool atEnd: false
+      onScrollingChanged: { scrollClip.atStart = true; scrollClip.atEnd = false }
 
       Item {
         id: labelLayer
@@ -114,14 +122,35 @@ BarWidget {
           // Render-thread marquee: XAnimator drives x off the render thread,
           // so it stays smooth without dispatching through the shared
           // shell's main thread (same reasoning as the Spotify bar widget).
-          XAnimator on x {
+          // A full wrap-around ticker never stopped moving, which was a lot to
+          // have in the corner of the eye; this travels only the overflow and
+          // spends most of its time still. The longer rest is on the start,
+          // the part of the title that identifies it.
+          SequentialAnimation {
             running: scrollClip.scrolling
             loops: Animation.Infinite
-            duration: Math.round(Math.max(6000, label.implicitWidth * 25))
-            from: scrollClip.width
-            to: -label.implicitWidth
-            easing.type: Easing.Linear
             onStopped: label.x = 0
+
+            PauseAnimation { duration: 4000 }
+            ScriptAction { script: scrollClip.atStart = false }
+            XAnimator {
+              target: label
+              from: 0
+              to: -scrollClip.overflow
+              duration: Math.round(Math.max(1200, scrollClip.overflow * 30))
+              easing.type: Easing.InOutSine
+            }
+            ScriptAction { script: scrollClip.atEnd = true }
+            PauseAnimation { duration: 2000 }
+            ScriptAction { script: scrollClip.atEnd = false }
+            XAnimator {
+              target: label
+              from: -scrollClip.overflow
+              to: 0
+              duration: Math.round(Math.max(1200, scrollClip.overflow * 30))
+              easing.type: Easing.InOutSine
+            }
+            ScriptAction { script: scrollClip.atStart = true }
           }
         }
       }
@@ -133,10 +162,10 @@ BarWidget {
         layer.enabled: scrollClip.scrolling
         gradient: Gradient {
           orientation: Gradient.Horizontal
-          GradientStop { position: 0; color: "transparent" }
+          GradientStop { position: 0; color: scrollClip.atStart ? "white" : "transparent" }
           GradientStop { position: scrollClip.fadeStop; color: "white" }
           GradientStop { position: 1 - scrollClip.fadeStop; color: "white" }
-          GradientStop { position: 1; color: "transparent" }
+          GradientStop { position: 1; color: scrollClip.atEnd ? "white" : "transparent" }
         }
       }
     }
