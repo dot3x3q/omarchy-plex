@@ -63,6 +63,25 @@ var saveStateScript =
   + "\"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\""
   + " > \"$t\" && chmod 600 \"$t\" && mv -f -- \"$t\" window.json && trap - EXIT"
 
+// $1 = cache directory. Prints at most 262145 bytes of home.json (one over
+// HomeCache.MAX_BYTES, so an oversize file fails the caller's length check).
+var readHomeCacheScript =
+  "d=$1; d=${d%/}; b=${d##*/}; "
+  + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 0; "
+  + "[ -d \"$p/$b\" ] && [ ! -L \"$p/$b\" ] && cd -P -- \"$p/$b\" "
+  + "&& [ \"$(pwd -P)\" = \"$p/$b\" ] "
+  + "&& dd if=home.json iflag=nofollow,nonblock bs=262145 count=1 status=none 2>/dev/null || true"
+
+// $1 = cache directory. The JSON arrives on STDIN (titles are arbitrary
+// text, so they never ride argv); head bounds what lands on disk.
+var saveHomeCacheScript =
+  "d=$1; d=${d%/}; b=${d##*/}; "
+  + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 1; "
+  + "mkdir -p -- \"$p/$b\" && [ ! -L \"$p/$b\" ] && chmod 700 \"$p/$b\" "
+  + "&& cd -P -- \"$p/$b\" && [ \"$(pwd -P)\" = \"$p/$b\" ] "
+  + "&& umask 077 && t=.home.$$.tmp && trap 'rm -f -- \"$t\"' EXIT "
+  + "&& head -c 262145 > \"$t\" && chmod 600 \"$t\" && mv -f -- \"$t\" home.json && trap - EXIT"
+
 // $1 = mpv IPC socket. Asks a running mpv to quit; silent no-op when none is.
 var mpvQuitScript =
   "test -S \"$1\" && echo '{\"command\":[\"quit\"]}' | socat - UNIX-CONNECT:\"$1\" >/dev/null 2>&1 || true"

@@ -10,6 +10,7 @@ import "Model.js" as Model
 import "Api.js" as Api
 import "Pool.js" as Pool
 import "Io.js" as Io
+import "HomeCache.js" as HomeCache
 
 // Omarchy Plex panel entry point.
 // Hosted by omarchy-shell; summoned with:
@@ -216,6 +217,7 @@ Item {
   Component.onCompleted: {
     configRead.running = true
     positionRead.running = true
+    homeCacheRead.running = true
   }
 
   function configured() { return root.server !== "" && root.token !== "" }
@@ -1248,7 +1250,82 @@ Item {
       if (doc === null && root.configured())
         root.setStatus("Plex request failed — check server, token and network", true)
       root.libraries = out
+      if (doc !== null && doc !== undefined) root.cacheHome(HomeCache.withShelfList(root.homeCache, root.server, out))
     })
+  }
+
+  // ---- Home cache (HomeCache.js) ----
+  // The last good Home rows, so Home draws at once and refreshes behind
+  // itself: the TV row's hub takes ~2 s on every request. Kept in memory for
+  // the session and on disk for the first Home after a shell restart. Holds
+  // Plex's relative image paths only; pages add the token when they resolve.
+  property var homeCache: null
+  readonly property string cacheDir: (Quickshell.env("XDG_CACHE_HOME")
+    || (Quickshell.env("HOME") + "/.cache")) + "/omarchy-plex"
+  // The disk copy can land before the config says which server it is for.
+  property string homeCacheDiskText: ""
+
+  function cacheHome(next) {
+    root.homeCache = next
+    homeCacheSaveDebounce.restart()
+  }
+  function cacheHomeOnDeck(items) { root.cacheHome(HomeCache.withOnDeck(root.homeCache, root.server, items)) }
+  function cacheHomeShelf(id, items) { root.cacheHome(HomeCache.withShelf(root.homeCache, root.server, id, items)) }
+  function cachedHomeOnDeck() { return HomeCache.onDeckItems(root.homeCache, root.server) }
+  function cachedHomeShelf(id) { return HomeCache.shelfItems(root.homeCache, root.server, id) }
+  function cachedHomeShelfList() {
+    var c = root.homeCache
+    return c && c.server === root.server ? c.shelfList : []
+  }
+
+  function adoptDiskHomeCache() {
+    if (root.homeCacheDiskText === "" || root.server === "") return
+    var parsed = HomeCache.parse(root.homeCacheDiskText, root.server)
+    root.homeCacheDiskText = ""
+    // Fresh rows fetched this session win over the disk copy.
+    if (parsed && !(root.homeCache && root.homeCache.server === root.server)) root.homeCache = parsed
+  }
+  onServerChanged: root.adoptDiskHomeCache()
+
+  Process {
+    id: homeCacheRead
+    running: false
+    command: ["sh", "-c", Io.readHomeCacheScript, "sh", root.cacheDir]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.homeCacheDiskText = String(text || "")
+        root.adoptDiskHomeCache()
+      }
+    }
+  }
+
+  // A Home visit lands one response per row; write once they settle.
+  Timer {
+    id: homeCacheSaveDebounce
+    interval: 1500
+    repeat: false
+    onTriggered: {
+      if (homeCacheWrite.running) { homeCacheSaveDebounce.restart(); return }
+      var text = HomeCache.serialize(root.homeCache)
+      if (text === "") return
+      homeCacheWrite.pending = text
+      homeCacheWrite.running = true
+    }
+  }
+
+  Process {
+    id: homeCacheWrite
+    property string pending: ""
+    running: false
+    // Titles are arbitrary text: the JSON goes in on stdin, never argv.
+    stdinEnabled: true
+    onStarted: {
+      write(homeCacheWrite.pending)
+      homeCacheWrite.stdinEnabled = false
+    }
+    onExited: homeCacheWrite.stdinEnabled = true
+    command: ["sh", "-c", Io.saveHomeCacheScript, "sh", root.cacheDir]
   }
 
   function libraryTitle(id) {

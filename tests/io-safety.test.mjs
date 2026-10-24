@@ -128,3 +128,32 @@ test("mpvQuitScript is a silent no-op with no socket, even at an odd path", () =
   assert.equal(r.code, 0)
   assert.equal(r.out + r.err, "")
 }))
+
+test("home cache scripts round-trip arbitrary titles through stdin, 0600, no temp left", () => sandbox(home => {
+  const dir = join(home, ".cache", "omarchy-plex")
+  mkdirSync(join(home, ".cache"))
+  const body = JSON.stringify({ v: 1, server: "http://h:32400", title: "it's \"$(touch pwned)\" `x`" })
+  const r = sh(Io.saveHomeCacheScript, [dir], { input: body, home })
+  assert.equal(r.code, 0, r.err)
+  assert.equal(mode(dir), 0o700)
+  assert.equal(mode(join(dir, "home.json")), 0o600)
+  assert.deepEqual(readdirSync(dir), ["home.json"])
+  assert.ok(!existsSync(join(home, "pwned")))
+  assert.equal(sh(Io.readHomeCacheScript, [dir], { home }).out, body)
+}))
+
+test("home cache write is capped one byte over the read ceiling", () => sandbox(home => {
+  const dir = join(home, ".cache", "omarchy-plex")
+  mkdirSync(join(home, ".cache"))
+  const r = sh(Io.saveHomeCacheScript, [dir], { input: "A".repeat(300000), home })
+  assert.equal(r.code, 0, r.err)
+  assert.equal(statSync(join(dir, "home.json")).size, 262145)
+}))
+
+test("home cache read refuses a symlinked file and a missing dir", () => sandbox(home => {
+  const dir = join(home, ".cache", "omarchy-plex")
+  assert.equal(sh(Io.readHomeCacheScript, [dir], { home }).out, "")
+  mkdirSync(dir, { recursive: true })
+  symlinkSync("/etc/passwd", join(dir, "home.json"))
+  assert.equal(sh(Io.readHomeCacheScript, [dir], { home }).out, "")
+}))

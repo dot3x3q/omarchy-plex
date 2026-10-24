@@ -214,8 +214,39 @@ Item {
   // onDestruction turns a late response into a no-op.
   property int fetchGen: 0
 
+  // ---- cache-first ----
+  // Home draws the panel's cached rows (HomeCache.js) at once and the fetches
+  // below replace them when they land. Only rows with nothing on screen yet
+  // take cached data, so a seed never overwrites a fresh answer.
+  function seedFromCache() {
+    if (page.onDeckLoading && page.onDeckItems.length === 0) {
+      var deck = page.panel.cachedHomeOnDeck()
+      if (deck) {
+        page.onDeckItems = page.resolveOnDeck(deck)
+        page.onDeckLoading = false
+      }
+    }
+    if (page.libraryShelves.length === 0 && (page.panel.libraries || []).length === 0) {
+      var list = page.panel.cachedHomeShelfList()
+      if (list.length > 0) page.libraryShelves = list.map(function(l) { return { id: l.id, title: l.title, type: l.type } })
+    }
+    var data = null
+    for (var i = 0; i < page.libraryShelves.length; i++) {
+      var id = page.libraryShelves[i].id
+      if (page.shelfData[id]) continue
+      var items = page.panel.cachedHomeShelf(id)
+      if (!items) continue
+      if (!data) data = Object.assign({}, page.shelfData)
+      data[id] = { items: page.resolveShelf(items), loading: false, failed: false }
+    }
+    if (data) page.shelfData = data
+    page.clampCursor()
+    page.maybeRestore()
+  }
+
   function fetchOnDeck() {
-    page.onDeckLoading = true
+    // Cached rows stay up while the refresh runs; only an empty list says Loading.
+    if (page.onDeckItems.length === 0) page.onDeckLoading = true
     var gen = page.fetchGen
     page.panel.request(Api.onDeckUrl(""), function(doc) {
       if (gen !== page.fetchGen) return
@@ -225,6 +256,8 @@ Item {
       page.onDeckFailed = doc === null || doc === undefined
       if (!page.onDeckFailed || page.onDeckItems.length === 0) page.onDeckItems = page.resolveOnDeck(raw)
       page.onDeckLoading = false
+      // After the page's own update: the cache signal re-runs seedFromCache.
+      if (!page.onDeckFailed) page.panel.cacheHomeOnDeck(raw)
       page.clampCursor()
       page.maybeRestore()
     })
@@ -252,6 +285,7 @@ Item {
       var items = failed && prev && prev.items.length > 0 ? prev.items : page.resolveShelf(raw)
       data[sectionId] = { items: items, loading: false, failed: failed }
       page.shelfData = data
+      if (!failed) page.panel.cacheHomeShelf(sectionId, raw)
       page.clampCursor()
       page.maybeRestore()
     })
@@ -264,7 +298,10 @@ Item {
     // Only hand the Repeater a new list when the libraries really changed: a
     // refresh re-sends the same sections, and reassigning would rebuild every
     // shelf for nothing (see shelfData above).
-    if (JSON.stringify(shelves) !== JSON.stringify(page.libraryShelves)) page.libraryShelves = shelves
+    // Before the libraries land, the cached shelf list (seedFromCache) holds
+    // the page; don't blank it.
+    if (libs.length > 0 && JSON.stringify(shelves) !== JSON.stringify(page.libraryShelves)) page.libraryShelves = shelves
+    page.seedFromCache()
     // Shelves already showing keep their posters while the refetch runs.
     for (var j = 0; j < libs.length; j++) page.fetchShelf(libs[j].id, libs[j].type)
     page.clampCursor()
@@ -336,6 +373,7 @@ Item {
   }
 
   Component.onCompleted: {
+    page.seedFromCache()
     page.reload()
     Qt.callLater(page.maybeRestore)
   }
@@ -350,6 +388,9 @@ Item {
   Connections {
     target: page.panel
     function onLibrariesChanged() { page.rebuildShelves() }
+    // The disk copy can arrive after this page mounted (first open after a
+    // shell restart); fill whatever is still empty.
+    function onHomeCacheChanged() { page.seedFromCache() }
   }
 
   Flickable {

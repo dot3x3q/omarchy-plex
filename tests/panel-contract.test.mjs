@@ -223,3 +223,13 @@ test("native is only chosen on an OpenGL scene graph", () => {
   assert.match(qml, /root\.sceneGraphicsApi === GraphicsInfo\.OpenGL/)
   assert.match(qml, /Quickshell\.env\("QSG_RHI_BACKEND"\)/)
 })
+
+test("home cache stores raw Plex paths, never token-bearing image URLs", () => {
+  const home = readFileSync(new URL("../HomePage.qml", import.meta.url), "utf8")
+  // `raw` is the mapper output; resolveShelf/resolveOnDeck add the token.
+  assert.match(home, /page\.panel\.cacheHomeShelf\(sectionId, raw\)/)
+  assert.match(home, /page\.panel\.cacheHomeOnDeck\(raw\)/)
+  assert.doesNotMatch(home, /cacheHome\w*\([^)]*resolve/)
+  // The disk write goes over stdin, never argv.
+  assert.match(qml, /command: \["sh", "-c", Io\.saveHomeCacheScript, "sh", root\.cacheDir\]/)
+})
