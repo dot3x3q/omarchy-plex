@@ -264,6 +264,36 @@ Item {
   // (a transcode restart, a PiP handoff) still reports the item's length to
   // the server instead of duration=0.
   property real lastKnownDuration: 0
+
+  // ---- multi-part items ----
+  //
+  // A two-disc film is ONE Plex item whose first Media has several Parts
+  // (live examples: ratingKeys 3732 and 7324, The Sound of Music, CD1 102 min
+  // + CD2 70 min). Only Part[0] used to play, and since the scrobble threshold
+  // read part 1's duration, the whole film was marked watched 92 minutes in.
+  // Two ways to play them, picked per stream in launchStream:
+  //  - EDL (either mpv engine, direct play): mpv stitches the parts into one
+  //    timeline itself (`edl://`), so position, duration, seeking and resume
+  //    are all the film's own and nothing below has to translate.
+  //  - Chain (QtMultimedia, and any transcode — the transcoder serves one
+  //    part per session via partIndex): one part plays at a time, the engine's
+  //    numbers are offset by partStartSec into the film's, and the end of a
+  //    part starts the next one.
+  // Timeline, scrobble and resume always speak the film's cumulative time.
+  property var mediaParts: []
+  property int partIndex: 0
+  property real partStartSec: 0
+  property bool chainActive: false
+  property bool edlActive: false
+  readonly property real partsTotalSec: {
+    var total = 0
+    for (var i = 0; i < root.mediaParts.length; i++) {
+      var d = Number(root.mediaParts[i].duration) || 0
+      if (d <= 0) return 0 // unknown: no honest total
+      total += d
+    }
+    return root.mediaParts.length > 1 ? total / 1000 : 0
+  }
   property string pendingMpvUrl: "" // staged for mpvRelay's 300 ms socket-release wait
 
   // mpv remote state (seconds)
@@ -425,7 +455,7 @@ Item {
     // races the window teardown, and a lost race leaks a playing audio thread
     // (NativeVideoHost.onDestruction is the second line of defense).
     if (root.nativeMode && root.mode === "playing") {
-      root.pendingNativeArm = { pos: root.seekDisplayTime, paused: root.isPaused }
+      root.pendingNativeArm = { pos: root.engineSeekTime, paused: root.isPaused }
       if (root.nativeVideo) root.nativeVideo.stop()
     }
     root.windowed = false
@@ -437,7 +467,7 @@ Item {
   function exitPip() {
     if (root.windowed) return
     if (root.nativeMode && root.mode === "playing") {
-      root.pendingNativeArm = { pos: root.seekDisplayTime, paused: root.isPaused }
+      root.pendingNativeArm = { pos: root.engineSeekTime, paused: root.isPaused }
       if (root.nativeVideo) root.nativeVideo.stop()
     }
     root.windowed = true
@@ -1185,6 +1215,8 @@ Item {
       root.resumeSec = parsed.viewOffsetSec
       root.currentThumbPath = root.metadataThumb(jsonText)
       root.stashStreams(jsonText)
+      root.mediaParts = parsed.parts && parsed.parts.length > 0
+        ? parsed.parts : [{ key: partKey, duration: 0, id: "" }]
       // Only QtMultimedia needs the token on the URL: its media loader cannot
       // send an HTTP header at all, which is the documented exception the
       // artwork URLs share. Both mpv engines carry it in a header instead, so
@@ -1278,11 +1310,94 @@ Item {
     root.playGen++
     root.clearSeekPreview()
     var at = Math.max(0, Math.round(Number(atSec) || 0))
+    var mpvEngine = root.backend === "mpv" || root.nativeMode
+    var parts = root.mediaParts
+    var multi = parts.length > 1
+    root.edlActive = multi && !root.triedTranscode && mpvEngine && root.edlHeaderSafe()
+    root.chainActive = multi && !root.edlActive
+    var url
+    if (root.chainActive) {
+      var k = root.partAt(at)
+      root.partIndex = k
+      root.partStartSec = root.partStartAt(k)
+      at = Math.max(0, at - root.partStartSec)
+      url = root.triedTranscode ? root.transcodeUrl() : root.directPlayUrl(parts[k].key)
+    } else {
+      root.partIndex = 0
+      root.partStartSec = 0
+      url = root.triedTranscode ? root.transcodeUrl()
+        : (root.edlActive ? root.edlUrl() : root.directPlayUrl(root.currentPartKey))
+    }
+    // Engine-local from here on: resumeSec and streamLocalStart are positions
+    // in the stream the engine is about to open, which in a chain is one part.
     root.streamLocalStart = at
     root.resumeSec = at
-    var url = root.triedTranscode ? root.transcodeUrl() : root.directPlayUrl(root.currentPartKey)
     if (root.backend === "mpv") startMpv(url)
     else startInternal(url)
+  }
+
+  // Cumulative start of part k in seconds; unknown durations count as 0, which
+  // keeps a chain playable (it just cannot seek across parts by position).
+  function partStartAt(k) {
+    var t = 0
+    for (var i = 0; i < k && i < root.mediaParts.length; i++)
+      t += (Number(root.mediaParts[i].duration) || 0) / 1000
+    return t
+  }
+
+  function partAt(sec) {
+    if (root.partsTotalSec <= 0) return Math.max(0, Math.min(root.partIndex, root.mediaParts.length - 1))
+    var t = 0
+    for (var i = 0; i < root.mediaParts.length; i++) {
+      t += (Number(root.mediaParts[i].duration) || 0) / 1000
+      if (sec < t) return i
+    }
+    return root.mediaParts.length - 1
+  }
+
+  // The token header goes to EVERY segment of an EDL (mpv applies
+  // http-header-fields per stream it opens), so an EDL is only built when every
+  // part is a path the header may go to — see tokenHeaderAllowed. Plex's
+  // /library/parts/ paths always are; anything else falls back to a chain.
+  function edlHeaderSafe() {
+    for (var i = 0; i < root.mediaParts.length; i++)
+      if (!root.tokenHeaderAllowed(root.server + root.mediaParts[i].key)) return false
+    return true
+  }
+
+  // mpv's inline EDL: `edl://` + segments joined by ";", each written as
+  // %<byte length>%<url> so the commas, semicolons and query strings inside a
+  // URL are never parsed as EDL syntax. The length is in BYTES (UTF-8), not
+  // UTF-16 code units. Checked against mpv 0.41 with two local HTTP parts:
+  // duration came out as the sum, --start landed in the stitched timeline, and
+  // the header reached both segment requests.
+  function edlUrl() {
+    var segs = []
+    for (var i = 0; i < root.mediaParts.length; i++) {
+      var u = root.directPlayUrl(root.mediaParts[i].key)
+      segs.push("%" + unescape(encodeURIComponent(u)).length + "%" + u)
+    }
+    return "edl://" + segs.join(";")
+  }
+
+  // Whether the token header may ride this media URL: per tokenHeaderAllowed
+  // for a plain URL, and for an EDL whatever launchStream already proved for
+  // every one of its parts.
+  function mediaHeaderAllowed(url) {
+    var u = String(url || "")
+    if (u.indexOf("edl://") === 0) return root.edlActive && root.edlHeaderSafe()
+    return root.tokenHeaderAllowed(u)
+  }
+
+  // The engine reached the end of what it was playing. In a chain that is the
+  // end of one part, and the next one starts at its first frame.
+  function streamEnded() {
+    if (root.mode !== "playing") return
+    if (root.chainActive && root.partIndex < root.mediaParts.length - 1) {
+      root.launchStream(root.triedTranscode, root.partStartAt(root.partIndex + 1))
+      return
+    }
+    root.finishPlayback()
   }
 
   function playSource(title) {
@@ -1359,7 +1474,7 @@ Item {
         "--autofit=" + root.videoWidth + "x" + root.videoHeight,
         "--geometry=-" + (root.marginRight + 14) + "-" + (root.marginBottom + 130)]
       // Header only toward Plex's own media paths — see tokenHeaderAllowed.
-      if (root.tokenHeaderAllowed(root.pendingMpvUrl))
+      if (root.mediaHeaderAllowed(root.pendingMpvUrl))
         args.push("--http-header-fields=X-Plex-Token: " + root.token)
       args.push(root.pendingMpvUrl)
       // Assigned whole: pushing onto mpvProc.command would edit a copy.
@@ -1380,7 +1495,12 @@ Item {
       if (root.mode !== "playing") return
       pollTimer.stop()
       if (root.userStop || exitCode === 0) {
-        finishPlayback()
+        // mpv exits 0 both at EOF and when its window is closed, so in a chain
+        // only an exit within a few seconds of the part's end means "next part".
+        var partEnd = root.partStartAt(root.partIndex + 1)
+        if (!root.userStop && root.chainActive && root.partsTotalSec > 0
+            && root.dispTime >= partEnd - 10) root.streamEnded()
+        else finishPlayback()
         return
       }
       // mpv choked on the codec — fall back to server transcode.
@@ -1441,6 +1561,8 @@ Item {
         mpvSend('{"command":["get_property","time-pos"],"request_id":0}\n{"command":["get_property","duration"],"request_id":1}\n{"command":["get_property","pause"],"request_id":2}')
       }
       if (root.dispDuration > 0 && !root.scrobbled
+          && (!root.chainActive || root.partsTotalSec > 0
+            || root.partIndex === root.mediaParts.length - 1)
           && root.dispTime / root.dispDuration >= 0.9) {
         root.scrobbled = true
         sendScrobble()
@@ -1702,22 +1824,40 @@ Item {
   }
 
   function seekRel(seconds) {
+    // A chain has to know which part the target lands in, so it seeks by
+    // absolute film time instead.
+    if (root.chainActive) { root.seekToSec(root.dispTime + Number(seconds)); return }
     if (root.backend === "mpv") mpvSend('{"command":["seek",' + seconds + ']}')
     else if (root.nativeMode) { if (root.nativeVideo) root.nativeVideo.seekRelative(seconds) }
     else player.position = Math.max(0, player.position + seconds * 1000)
   }
 
   function seekAbs(fraction) {
+    // The callers all speak fractions because that is what a slider produces.
+    if (root.dispDuration <= 0) return
+    root.seekToSec(fraction * root.dispDuration)
+  }
+
+  // Film time in, engine seek out. Within the playing part (or a single
+  // stream) it is a plain seek; into another part of a chain it is a restart
+  // of that part at the right offset, through the same launchStream as
+  // everything else.
+  function seekToSec(sec) {
+    var target = Math.max(0, Number(sec) || 0)
+    if (root.dispDuration > 0) target = Math.min(target, root.dispDuration)
+    if (root.chainActive && root.partsTotalSec > 0) {
+      if (root.partAt(target) !== root.partIndex) {
+        root.launchStream(root.triedTranscode, target)
+        return
+      }
+      target -= root.partStartSec
+    }
     if (root.backend === "mpv") {
-      if (root.dispDuration <= 0) return
-      mpvSend('{"command":["set_property","time-pos",' + (fraction * root.dispDuration).toFixed(1) + ']}')
+      mpvSend('{"command":["set_property","time-pos",' + target.toFixed(1) + ']}')
     } else if (root.nativeMode) {
-      // The native API takes seconds, not a fraction — the callers all speak
-      // fractions because that is what a slider produces.
-      if (root.dispDuration <= 0 || !root.nativeVideo) return
-      root.nativeVideo.seekAbsolute(fraction * root.dispDuration)
+      if (root.nativeVideo) root.nativeVideo.seekAbsolute(target)
     } else if (player.duration > 0) {
-      player.position = Math.max(0, Math.min(player.duration, fraction * player.duration))
+      player.position = Math.max(0, Math.min(player.duration, target * 1000))
     }
   }
 
@@ -1733,6 +1873,10 @@ Item {
   property string seekPreviewKey: ""
   readonly property bool seekPending: root.seekPreview >= 0
   readonly property real seekDisplayTime: root.seekPending ? root.seekPreview : root.dispTime
+  // The same, in the live stream's own time: what a native surface handoff
+  // reloads the SAME url at. Differs from seekDisplayTime only in a chain.
+  readonly property real engineSeekTime: Math.max(0,
+    root.seekDisplayTime - (root.chainActive ? root.partStartSec : 0))
   readonly property real seekAckTolerance: 2
   readonly property int seekAckMinMs: 300
   readonly property int seekAckTimeoutMs: 8000
@@ -2534,7 +2678,7 @@ Item {
     if (root.pendingNativeArm !== null) return
     var v = root.nativeVideo
     if (!v || !(v.duration > 0)) return
-    root.pendingNativeArm = { pos: root.seekDisplayTime, paused: root.isPaused }
+    root.pendingNativeArm = { pos: root.engineSeekTime, paused: root.isPaused }
     v.stop()
     root.pipPlayerBounce = true
     Qt.callLater(function() { root.pipPlayerBounce = false })
@@ -2553,7 +2697,7 @@ Item {
     root.streamLocalStart = Math.max(0, Number(arm.pos) || 0)
     // Set on EVERY load, never left over: the property persists in the core,
     // so an extra played after a film would otherwise inherit the header.
-    v.httpHeaders = root.tokenHeaderAllowed(root.currentMediaUrl) ? ["X-Plex-Token: " + root.token] : []
+    v.httpHeaders = root.mediaHeaderAllowed(root.currentMediaUrl) ? ["X-Plex-Token: " + root.token] : []
     v.volume = root.volumePct
     v.paused = false
     v.loadUrl(root.currentMediaUrl, Math.max(0, Number(arm.pos) || 0))
@@ -2588,7 +2732,7 @@ Item {
       root.nativeLoaded = true
       root.applyNativeSelectedTracks()
     }
-    function onEndReached() { if (root.mode === "playing") root.finishPlayback() }
+    function onEndReached() { root.streamEnded() }
     // Same entry point as every other engine's failure, so the direct-play →
     // server-transcode ladder is shared rather than reimplemented.
     function onPlaybackFailed(reason) { if (root.mode === "playing") root.playbackFailed() }
@@ -2645,7 +2789,7 @@ Item {
         player.position = root.resumeSec * 1000
         resumeRetry.restart()
       }
-      if (status === MediaPlayer.EndOfMedia) finishPlayback()
+      if (status === MediaPlayer.EndOfMedia) root.streamEnded()
       else if (status === MediaPlayer.InvalidMedia) playbackFailed()
     }
     onErrorOccurred: function(error) {
@@ -2669,7 +2813,7 @@ Item {
     //    identifier registered) — so uniquely here, it stays out.
     return root.server + "/video/:/transcode/universal/start.m3u8"
       + "?path=" + encodeURIComponent("/library/metadata/" + root.currentRatingKey)
-      + "&mediaIndex=0&partIndex=0&protocol=hls&fastSeek=1"
+      + "&mediaIndex=0&partIndex=" + root.partIndex + "&protocol=hls&fastSeek=1"
       + "&directPlay=0&directStream=0&hasMDE=1"
       + "&videoQuality=" + root.transcodeVideoQuality
       + "&maxVideoBitrate=" + root.transcodeBitrateKbps
@@ -2786,16 +2930,25 @@ Item {
   // (native keeps it; external mpv kept it until startMpv zeroed it), so the
   // reading is the stream's own requested start. That also covers QtMultimedia
   // between LoadedMedia and the resume seek actually landing (resumeRetry).
-  readonly property real dispTime: root.mpvMode
+  //
+  // engineTime/engineDuration are the live stream's own numbers; dispTime and
+  // dispDuration are the FILM's, which differ only in a multi-part chain.
+  readonly property real engineTime: root.mpvMode
     ? (root.mpvDuration > 0 ? root.mpvTime : root.streamLocalStart)
     : (root.nativeMode
       ? (root.nativeVideo && root.nativeLoaded ? root.nativeVideo.timePos : root.streamLocalStart)
       : (!root.qtLoaded || player.duration <= 0 || resumeRetry.running
         ? root.streamLocalStart : player.position / 1000))
-  readonly property real dispDuration: root.mpvMode
+  readonly property real engineDuration: root.mpvMode
     ? root.mpvDuration
     : (root.nativeMode ? (root.nativeVideo && root.nativeLoaded ? root.nativeVideo.duration : 0)
       : (root.qtLoaded ? player.duration / 1000 : 0))
+  readonly property real dispTime: root.engineTime + (root.chainActive ? root.partStartSec : 0)
+  // A chain with unknown part durations has no film-length total; it reports
+  // the part's, and the scrobble check below refuses to fire before the last
+  // part, so 90% of disc one can never mark the film watched.
+  readonly property real dispDuration: root.chainActive && root.partsTotalSec > 0
+    ? root.partsTotalSec : root.engineDuration
   // What timeline reports carry: the live duration, or the last one seen for
   // this item while a reload has none yet.
   readonly property real reportDuration: root.dispDuration > 0 ? root.dispDuration : root.lastKnownDuration

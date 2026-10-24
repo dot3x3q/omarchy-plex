@@ -108,8 +108,15 @@ test("media token header is gated by origin and path", () => {
   const headerSites = qml.match(/X-Plex-Token: " \+ root\.token/g) || []
   // curl pool header (Plex API only), native httpHeaders, mpv argv.
   assert.equal(headerSites.length, 3)
-  assert.match(qml, /tokenHeaderAllowed\(root\.currentMediaUrl\) \? \["X-Plex-Token: " \+ root\.token\] : \[\]/)
-  assert.match(qml, /if \(root\.tokenHeaderAllowed\(root\.pendingMpvUrl\)\)\s*args\.push\("--http-header-fields=X-Plex-Token: "/)
+  assert.match(qml, /mediaHeaderAllowed\(root\.currentMediaUrl\) \? \["X-Plex-Token: " \+ root\.token\] : \[\]/)
+  assert.match(qml, /if \(root\.mediaHeaderAllowed\(root\.pendingMpvUrl\)\)\s*args\.push\("--http-header-fields=X-Plex-Token: "/)
+  // An EDL sends the header to EVERY segment, so it may only carry it when
+  // every part passed tokenHeaderAllowed; otherwise the parts play as a chain.
+  const media = qml.slice(qml.indexOf("function mediaHeaderAllowed"), qml.indexOf("function streamEnded"))
+  assert.match(media, /indexOf\("edl:\/\/"\) === 0\) return root\.edlActive && root\.edlHeaderSafe\(\)/)
+  assert.match(media, /return root\.tokenHeaderAllowed\(u\)/)
+  const safe = qml.slice(qml.indexOf("function edlHeaderSafe"), qml.indexOf("function edlUrl"))
+  assert.match(safe, /if \(!root\.tokenHeaderAllowed\(root\.server \+ root\.mediaParts\[i\]\.key\)\) return false/)
   const allowed = qml.slice(qml.indexOf("function tokenHeaderAllowed"), qml.indexOf("function directPlayUrl"))
   assert.match(allowed, /path\.indexOf\("\/library\/"\) === 0 \|\| path\.indexOf\("\/video\/"\) === 0/)
   // Every (re)start goes through launchStream, which is the one place a

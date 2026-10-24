@@ -113,3 +113,35 @@ test("parsePlaybackMetadata rejects missing or foreign part paths", () => {
   const foreign = JSON.stringify({ MediaContainer: { Metadata: [{ Media: [{ Part: [{ key: "https://evil.test/x" }] }] }] } })
   assert.equal(M.parsePlaybackMetadata(foreign), null)
 })
+
+test("parsePlaybackMetadata lists every part of the FIRST media only", () => {
+  // Shaped like ratingKey 7324 (The Sound of Music, CD1 102 min + CD2 70 min),
+  // with a second Media standing in for 393's unrelated alternate version.
+  const doc = JSON.stringify({ MediaContainer: { Metadata: [{ viewOffset: 0, Media: [
+    { Part: [
+      { id: 11, key: "/library/parts/11/1/file.avi", duration: 6120000 },
+      { id: 12, key: "/library/parts/12/1/file.avi", duration: 4200000 },
+    ] },
+    { Part: [{ id: 99, key: "/library/parts/99/1/other.mkv", duration: 1 }] },
+  ] }] } })
+  const p = M.parsePlaybackMetadata(doc)
+  assert.equal(p.partKey, "/library/parts/11/1/file.avi")
+  assert.equal(JSON.stringify(p.parts), JSON.stringify([
+    { key: "/library/parts/11/1/file.avi", duration: 6120000, id: "11" },
+    { key: "/library/parts/12/1/file.avi", duration: 4200000, id: "12" },
+  ]))
+})
+
+test("parsePlaybackMetadata stops the part list at a key that is not a plain path", () => {
+  const doc = JSON.stringify({ MediaContainer: { Metadata: [{ Media: [{ Part: [
+    { key: "/library/parts/1/a.mkv", duration: 10 },
+    { key: "//evil.test/b.mkv", duration: 10 },
+    { key: "/library/parts/3/c.mkv", duration: 10 },
+  ] }] }] } })
+  const p = M.parsePlaybackMetadata(doc)
+  assert.equal(p.parts.length, 1)
+  // A single-part item still gets a one-element list, with unknown duration as 0.
+  const one = M.parsePlaybackMetadata(JSON.stringify({ MediaContainer: { Metadata: [{ Media: [{ Part: [{ key: "/x" }] }] }] } }))
+  assert.equal(one.parts.length, 1)
+  assert.equal(one.parts[0].duration, 0)
+})
