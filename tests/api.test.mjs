@@ -778,3 +778,37 @@ test("mapDetail falls back to the first audio stream when none is selected", () 
   assert.equal(d.audioText, "日本語 (AAC Stereo)")
   assert.equal(d.videoText, "")
 })
+
+// ---- keyOf invariant: every key a mapper emits is alphanumeric ----
+//
+// Keys travel into URL paths and query strings (playItem, timeline, the URL
+// builders), so a hostile or malformed server key must come out stripped at
+// the mapping boundary, whichever mapper it went through.
+test("keyOf strips a path-traversal key, and every mapper applies it", () => {
+  const bad = "12/../x?y=1#z"
+  const want = "12xy1z"
+  assert.equal(A.keyOf(bad), want)
+  assert.equal(A.mapItems({ MediaContainer: { Metadata: [{ type: "movie", ratingKey: bad }] } })[0].ratingKey, want)
+  const [ep, season, show] = A.mapRecentShows({ MediaContainer: { Metadata: [
+    { type: "episode", ratingKey: bad, parentRatingKey: bad, grandparentRatingKey: bad },
+    { type: "season", ratingKey: bad },
+    { type: "show", ratingKey: bad }
+  ] } })
+  assert.deepEqual([ep.ratingKey, ep.targetKey, ep.seasonKey, ep.episodeKey], [want, want, want, want])
+  assert.deepEqual([season.targetKey, season.seasonKey], [want, want])
+  assert.equal(show.targetKey, want)
+  assert.equal(A.extrasFor({ Metadata: [{ ratingKey: bad, subtype: "trailer" }] })[0].ratingKey, want)
+  assert.equal(A.mapRelated({ MediaContainer: { Hub: [{ Metadata: [{ type: "movie", ratingKey: bad }] }] } })[0].ratingKey, want)
+  assert.equal(A.partsFor({ MediaContainer: { Metadata: [{ Media: [{ Part: [{ id: bad, key: "/p" }] }] }] } })[0].id, want)
+  // castFor has no key field to check; its entries are tag + role + photo only.
+})
+
+test("ratingsFor reads the bad-review images too (rotten, spilled)", () => {
+  assert.deepEqual(Array.from(A.ratingsFor({ Rating: [
+    { image: "rottentomatoes://image.rating.rotten", value: 3.1, type: "critic" },
+    { image: "rottentomatoes://image.rating.spilled", value: 4.4, type: "audience" },
+    { image: "imdb://image.rating", value: "6.0", type: "audience" },
+    { image: "themoviedb://image.rating", value: null },
+    { image: "imdb://image.rating", value: "n/a" }
+  ] })), ["Critics 31%", "Audience 44%", "IMDb 6.0"])
+})
