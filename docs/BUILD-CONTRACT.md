@@ -28,13 +28,15 @@ attribution comment is fine).
 - Flat directory (Spotify convention). Pages/components are separate files (unlike
   Spotify's inline Components) so they can be built in parallel.
 - NO list-row animations. Buttons/CursorSurfaces animate via the kit only.
-- Lint gate: `qmllint -I /usr/share/omarchy/shell <file>.qml` → 0 errors.
-- Test gate: `node --test tests/` stays green. `tests/panel-contract.test.mjs` pins
+- Lint gate: `/usr/lib/qt6/bin/qmllint -I ~/.cache/omarchy-qmllint -I /usr/share/omarchy/shell <file>.qml`
+  → 0 errors (qmllint is not on PATH; the shadow tree is set up in AGENTS.md).
+- Test gate: `node --test tests/*.test.mjs` stays green (the bare `tests/` form
+  breaks on node 26). `tests/panel-contract.test.mjs` pins
   security chokepoints by regex — preserve those code blocks verbatim. Only update a
   test expectation when DESIGN.md deliberately changes the behavior, and justify it
   in your report.
 - Do NOT `git commit` — leave changes in the working tree; the orchestrator commits.
-- The real Plex token lives in `~/.config/plexmini/config.json` (0600). You may use
+- The real Plex token lives in `~/.config/omarchy-plex/config.json` (0600). You may use
   it in curl headers to verify live API shapes. NEVER print, echo, or log it.
 - Comments follow upstream's style: explain why, not what.
 
@@ -191,7 +193,7 @@ Keep the raw `artPath` alongside for detail-page backdrops (resolve at its own s
 
 FloatingWindow (chromeless — the 34px header row DIES) → content Item margins
 `Style.space(14)`:
-sidebar (BorderSurface; brand row "Plex Mini" + 󰚺; Home button; library buttons from
+sidebar (BorderSurface; brand row "Omarchy Plex" + 󰚺; Home button; library buttons from
 panel.libraries; PanelSeparator; Settings pinned bottom; icon-rail collapse below
 `Style.space(760)` width) · content pane (header row: back?/title/subtitle + refresh +
 close · status banner (collapses to 0) · search TextField (global, `/`, debounce kept)
@@ -204,5 +206,6 @@ wave 4). Placeholder `HomePage.qml`/`SearchPage.qml`/`LibraryPage.qml`/`DetailPa
 wave 2 overwrites them. `SettingsPage.qml` is REAL in wave 1: the current setup form
 restyled with kit TextFields/Buttons + backend picker, same save flow (test-pinned IO).
 
-Window title stays "Plex Mini" (Hyprland rules match on it); playing retitles
-"<media> — Plex Mini" as today.
+Window title stays "Omarchy Plex" (Hyprland rules match on it); playing retitles
+"<media> — Omarchy Plex" as today. (Both read "Plex Mini" before the 2026-08-29
+rename; a Hyprland title rule needs the `.*` prefix, see AGENTS.md.)
