@@ -666,9 +666,11 @@ Item {
     posSave.windowed = root.windowed ? "true" : "false"
   }
 
-  // One posSave run per save, never two: Quickshell latches a Process's argv at
-  // start and silently ignores writes to a running one, so a second
-  // running=true chasing the first would simply be dropped.
+  // Overlapping saves are safe, for a reason worth knowing: Quickshell does
+  // not drop a `running = true` aimed at a Process that is still running. It
+  // remembers it, and the moment the current run exits it starts ONE more run
+  // with whatever `command` is current then. So a burst of saves collapses to
+  // "the first, then the latest" — exactly right for a whole-file write.
   function saveWidth() {
     root.stageWindowState()
     posSave.running = true
@@ -1113,24 +1115,34 @@ Item {
 
   // Resolve the media part, then hand the URL to the backend. Direct play
   // first; universal transcode HLS is the fallback when a codec fails.
+  //
+  // Overlapping picks used to cross wires. The resolve was one shared Process,
+  // and Quickshell does not drop a second launch of a running Process: it
+  // re-runs it with the newest command after the first exits (see posSave). So
+  // picking A then B quickly delivered A's response while the Process already
+  // said B — A's film played under B's ratingKey and title, and every timeline
+  // report and the scrobble went to B. Each pick now captures its key, title
+  // and a generation, rides the request pool, and a response that is no
+  // longer the newest pick is dropped on arrival.
+  property int resolveGen: 0
+
   function playItem(ratingKey, title) {
-    // Drop the old artwork now: a minibar showing the last thing you watched
-    // beside the new title is worse than a placeholder glyph for one second.
-    root.currentThumbPath = ""
-    resolve.ratingKey = ratingKey
-    resolve.title = title
-    resolve.command = ["curl", "-s", "--fail", "--max-time", "10", "--max-filesize", "2097152"]
-      .concat(root.plexHeaders)
-      .concat([root.server + "/library/metadata/" + ratingKey])
-    resolve.running = true
+    root.resolveGen++
+    var gen = root.resolveGen
+    var key = String(ratingKey)
+    var name = String(title === undefined || title === null ? "" : title)
+    root.request("/library/metadata/" + key, function(text) {
+      if (gen !== root.resolveGen) return
+      root.applyMetadata(text, key, name)
+    }, { raw: true, tag: "resolve" })
   }
 
-  function applyMetadata(jsonText) {
+  function applyMetadata(jsonText, ratingKey, title) {
     try {
       var parsed = Model.parsePlaybackMetadata(jsonText)
       if (!parsed) { fail("No playable part found"); return }
       var partKey = parsed.partKey
-      root.currentRatingKey = String(resolve.ratingKey)
+      root.currentRatingKey = String(ratingKey)
       root.sessionId = "" + Date.now()
       root.triedTranscode = false
       root.userStop = false
@@ -1145,7 +1157,7 @@ Item {
       // artwork URLs share. Both mpv engines carry it in a header instead, so
       // in native mode this direct-play URL is clean — no token in the string
       // handed to the demuxer, none in any log line that quotes it.
-      playSource(mediaUrl, resolve.title)
+      playSource(mediaUrl, title)
     } catch (e) {
       fail("Could not resolve media")
     }
@@ -2038,12 +2050,14 @@ Item {
   // the new stream is built from the old tracks. So the restart hangs off the
   // PUT's exit rather than racing it.
   property bool restartAfterPut: false
-  // Queue of exactly one. Quickshell latches a Process's argv at start and
-  // silently ignores writes to a running one, so a second pick landing while
-  // the first PUT is still in flight would vanish — and the symptom would be
-  // "the subtitle didn't change", with the server quietly holding the older
-  // choice. Only the newest selection is worth sending, so a single slot is
-  // enough; the payload is rebuilt from current state when it runs.
+  // Queue of exactly one. Quickshell would re-run a still-running Process with
+  // its newest command once the current run exits (see posSave), so the PUT
+  // itself would not be lost — but restartAfterPut would: a second pick
+  // landing mid-flight would rewrite the flag the FIRST run's onExited reads,
+  // and the restart would fire after the old selection reached the server
+  // instead of the new one. Queueing here keeps flag and payload paired. Only
+  // the newest selection is worth sending, so a single slot is enough; the
+  // payload is rebuilt from current state when it runs.
   property bool trackPutQueued: false
   property bool trackPutQueuedRestart: false
 
@@ -2624,19 +2638,6 @@ Item {
     onExited: scrobblePost.stdinEnabled = true
   }
 
-  Process {
-    id: resolve
-    property string ratingKey: ""
-    property string title: ""
-    running: false
-    stdinEnabled: true
-    onStarted: { root.currentTitle = title; root.feedCurlAuth(resolve) }
-    onExited: resolve.stdinEnabled = true
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.applyMetadata(String(text || ""))
-    }
-  }
 
   // ---- display helpers ----
   //
