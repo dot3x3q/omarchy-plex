@@ -127,7 +127,11 @@ Item {
     onContentYChanged: page.panel.rememberScroll("search", contentY)
     Component.onDestruction: page.panel.rememberScroll("search", resultsList.contentY)
 
-    FastScrollHandler { flickable: resultsList }
+    // parent: is load-bearing. Declared bare inside a Flickable, the handler
+    // becomes a child of contentItem and scrolls away with the content: the
+    // fast wheel then only works on the first screen and onScrolled stops
+    // firing (verified offscreen). The Spotify plugin parents every one.
+    FastScrollHandler { parent: resultsList; flickable: resultsList }
 
     delegate: MediaRow {
       required property var modelData

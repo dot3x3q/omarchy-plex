@@ -315,7 +315,11 @@ Item {
       }
     }
 
+    // parent: keeps the handler on the viewport rather than inside
+    // contentItem, where it scrolls away after the first screen and the
+    // onScrolled scroll-memory hook stops firing.
     FastScrollHandler {
+      parent: gridView
       flickable: gridView
       onScrolled: root.panel.rememberScroll(root.scrollKey, gridView.contentY)
     }

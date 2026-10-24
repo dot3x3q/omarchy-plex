@@ -261,7 +261,9 @@ Item {
     onContentYChanged: page.panel.rememberScroll("home", contentY)
     Component.onDestruction: page.panel.rememberScroll("home", homeFlick.contentY)
 
-    FastScrollHandler { flickable: homeFlick }
+    // parent: keeps the handler on the viewport rather than inside
+    // contentItem, where it scrolls away after the first screen.
+    FastScrollHandler { parent: homeFlick; flickable: homeFlick }
 
     Column {
       id: mainColumn

@@ -840,7 +840,10 @@ Item {
       }
     }
 
+    // parent: on every handler here — declared bare, it lands in contentItem
+    // and scrolls away with the content after the first screen.
     FastScrollHandler {
+      parent: seasonList
       flickable: seasonList
     }
   }
@@ -897,6 +900,7 @@ Item {
     }
 
     FastScrollHandler {
+      parent: episodeList
       flickable: episodeList
       onScrolled: page.saveScroll()
     }
@@ -929,7 +933,7 @@ Item {
     clip: true
     boundsBehavior: Flickable.StopAtBounds
 
-    FastScrollHandler { flickable: movieFlick }
+    FastScrollHandler { parent: movieFlick; flickable: movieFlick }
 
     Column {
       id: movieColumn
