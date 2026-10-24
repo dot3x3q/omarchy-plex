@@ -6,11 +6,10 @@ import qs.Ui
 import "Api.js" as Api
 
 // Poster-grid browser for one library section (panel.pageParams.sectionId).
-// The root panel's page Loader keeps this SAME instance alive across two
-// library sections in a row (its sourceComponent only changes when
-// currentPage itself changes, not pageParams — see PlexPanel.qml
-// pageComponent()), so section switches are driven by watching
-// panel.pageParams, not by Component.onCompleted alone.
+// PlexPanel.showPage() rebuilds the page on every navigation, so a section
+// switch normally arrives as a fresh instance. trySync() still watches
+// panel.pageParams so an in-place params change (if one ever returns) keeps
+// working rather than showing the wrong library.
 Item {
   id: root
 
@@ -35,7 +34,7 @@ Item {
   function cycleSort() {
     // Bank the scroll position under the OLD key before it changes out from
     // under gridView's contentY.
-    panel.rememberScroll(root.scrollKey, gridView.contentY)
+    root.saveView()
     var idx = root.sortKeys.indexOf(root.sortKey)
     root.sortKey = root.sortKeys[(idx + 1) % root.sortKeys.length]
     root.resetAndFetch()
@@ -57,8 +56,16 @@ Item {
   property bool hasMore: true
   property bool loadedOnce: false
   property string loadedSectionId: ""
+  // A null response is a transport/auth failure, not the end of the library.
+  // It used to read as one: mapItems(null) is [], so hasMore went false and
+  // totalCount -1, and the grid silently ended at 240 with the count gone.
+  property bool loadFailed: false
 
   readonly property int itemCount: root.totalCount >= 0 ? root.totalCount : root.items.length
+  // Nothing to count until the first page lands; "0 items" over a loading
+  // grid read as an empty library.
+  readonly property string countText: root.totalCount < 0 && root.items.length === 0
+    ? "" : root.itemCount + (root.itemCount === 1 ? " item" : " items")
 
   // Resolve section switches: called from Component.onCompleted, onWidthChanged
   // (width can still be 0 the instant this Item is created) and whenever the
@@ -66,7 +73,7 @@ Item {
   function trySync() {
     if (root.width <= 0) return
     if (root.sectionId === root.loadedSectionId && root.loadedOnce) return
-    if (root.loadedOnce) panel.rememberScroll(root.scrollKey, gridView.contentY)
+    if (root.loadedOnce) root.saveView()
     root.loadedSectionId = root.sectionId
     root.sortKey = root.sortKeys[0]
     root.resetAndFetch()
@@ -84,18 +91,26 @@ Item {
     root.nextStart = 0
     root.totalCount = -1
     root.hasMore = true
+    root.loadFailed = false
     root.loadedOnce = false
     root.restoreApplied = false
     gridView.currentIndex = -1
     root.fetchPage()
   }
 
+  // R after a failed page retries THAT page and keeps everything already on
+  // screen; otherwise it is a full refresh.
   function reload() {
+    if (root.loadFailed && root.items.length > 0) {
+      root.loadFailed = false
+      root.fetchPage()
+      return
+    }
     root.resetAndFetch()
   }
 
   function fetchPage() {
-    if (root.loading || !root.hasMore || root.sectionId === "") return
+    if (root.loading || !root.hasMore || root.loadFailed || root.sectionId === "") return
     root.loading = true
     // Empty server arg gets us back a bare path — libraryAllUrl always
     // prepends its server param, and panel.request(path, cb) prepends
@@ -108,6 +123,12 @@ Item {
     panel.request(path, function(doc) {
       if (gen !== root.fetchGen) return
       root.loading = false
+      if (doc === null || doc === undefined) {
+        // Keep hasMore, totalCount and nextStart as they were, so a retry
+        // asks for exactly this page again.
+        root.loadFailed = true
+        return
+      }
       var mc = doc && doc.MediaContainer
       var total = mc && mc.totalSize !== undefined ? Number(mc.totalSize) : -1
       // Image-URL handoff: Api.js hands back raw, unauthenticated paths —
@@ -132,7 +153,7 @@ Item {
   }
 
   function maybeLoadMore() {
-    if (root.loading || !root.hasMore) return
+    if (root.loading || !root.hasMore || root.loadFailed) return
     if (gridView.atYEnd || gridView.contentHeight <= gridView.height) root.fetchPage()
   }
 
@@ -163,10 +184,23 @@ Item {
   // row's last — it reads like text-cursor movement. Vertical moves clamp
   // instead of wrapping: a same-column step off the top or bottom edge has no
   // sane target, so it is a no-op rather than a jump to an unrelated column.
+  // Where a keyboard step starts. If the wheel has carried the cursor's cell
+  // out of view, the step starts from the first visible poster instead —
+  // otherwise one "l" after scrolling (or after a restore that brought back
+  // the scroll but not a cursor) yanks the grid back to the old spot.
+  function cursorStart() {
+    var cur = gridView.currentIndex < 0 ? 0 : gridView.currentIndex
+    var rowTop = Math.floor(cur / root.columns) * gridView.cellHeight + gridView.originY
+    if (rowTop + gridView.cellHeight > gridView.contentY && rowTop < gridView.contentY + gridView.height) return cur
+    var top = gridView.indexAt(gridView.cellWidth / 2, gridView.contentY + gridView.cellHeight / 2)
+    return top >= 0 ? top : cur
+  }
+
   function moveCursor(dx, dy) {
     var count = gridView.count
     if (count === 0) return
-    var cur = gridView.currentIndex < 0 ? 0 : gridView.currentIndex
+    var cur = root.cursorStart()
+    if (cur !== gridView.currentIndex) { gridView.currentIndex = cur; return }
     var next = cur
     if (dx !== 0) next = cur + dx
     else if (dy !== 0) next = cur + dy * root.columns
@@ -195,17 +229,32 @@ Item {
   function stepRows(rows) {
     var count = gridView.count
     if (count === 0) return
-    var cur = gridView.currentIndex < 0 ? 0 : gridView.currentIndex
+    var cur = root.cursorStart()
     var next = Math.max(0, Math.min(count - 1, cur + rows * root.columns))
     gridView.currentIndex = next
     gridView.positionViewAtIndex(next, GridView.Contain)
   }
 
+  // "s" cycles the sort, the keyboard twin of the sort button (DESIGN.md
+  // keyboard model). Dispatched from PlexPanel.handleKey.
+  function handlePageKey(text) {
+    if (text === "s") { root.cycleSort(); return true }
+    return false
+  }
+
   function pageUp() { root.stepRows(-root.rowsPerScreen()) }
   function pageDown() { root.stepRows(root.rowsPerScreen()) }
 
-  // ---- scroll memory ----
+  // ---- scroll + cursor memory ----
+  // Both are banked per section+sort. Restoring scroll alone left the cursor
+  // on item 0 — off-screen — so the first keypress after Back yanked the
+  // grid to the top.
   property bool restoreApplied: false
+
+  function saveView() {
+    panel.rememberScroll(root.scrollKey, gridView.contentY)
+    if (gridView.currentIndex >= 0) panel.rememberScroll(root.scrollKey + ":cursor", gridView.currentIndex)
+  }
 
   function restoreView() {
     if (root.restoreApplied) return
@@ -219,15 +268,29 @@ Item {
       if (root.restoreApplied) return
       if (gridView.count <= 0) return
       var target = root.panel.scrollFor(root.scrollKey)
+      var want = Math.round(root.panel.scrollFor(root.scrollKey + ":cursor"))
       var maxY = Math.max(gridView.originY, gridView.contentHeight - gridView.height + gridView.originY)
+      // Only page 1 exists when Back rebuilds this page. Clamping the target
+      // to it and calling the restore done threw a reader at item 300 back
+      // to ~item 40 (verified: 10206 → 1533). Keep paging until the
+      // remembered spot exists; each landed page re-arms this timer.
+      if ((target > maxY || want >= root.items.length) && root.hasMore && !root.loadFailed) {
+        root.fetchPage()
+        return
+      }
       gridView.contentY = Math.max(gridView.originY, Math.min(maxY, target))
+      if (root.items.length > 0) gridView.currentIndex = Math.max(0, Math.min(root.items.length - 1, want))
       root.restoreApplied = true
     }
   }
 
   Component.onCompleted: root.trySync()
   onWidthChanged: root.trySync()
-  Component.onDestruction: panel.rememberScroll(root.scrollKey, gridView.contentY)
+  Component.onDestruction: {
+    root.saveView()
+    // Responses for a page already left return at their gen check.
+    root.fetchGen++
+  }
 
   Connections {
     target: root.panel
@@ -249,15 +312,22 @@ Item {
       iconText: "󰒺"
       text: root.sortLabel()
       foreground: Color.foreground
-      tooltipText: "Change sort order"
+      tooltipText: "Change sort order · S"
+      hasCursor: root.panel.cursorOn("pointer", "library-sort")
       onClicked: root.cycleSort()
+      // Pointer-only control: claiming hides the grid cursor while the kit
+      // Button paints its own hover, so only one highlight shows.
+      onHovered: function(on) {
+        if (on) root.panel.claimPointer("library-sort")
+        else root.panel.releasePointer("library-sort")
+      }
     }
 
     Text {
       id: countLabel
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
-      text: root.itemCount + (root.itemCount === 1 ? " item" : " items")
+      text: root.countText
       color: Color.muted
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
@@ -274,7 +344,7 @@ Item {
     anchors.bottom: parent.bottom
     // The paginating footer floats at the page bottom; reserve its strip so
     // "Loading more…" never overlaps the last poster row.
-    anchors.bottomMargin: root.loading && root.items.length > 0 ? Style.space(24) : 0
+    anchors.bottomMargin: (root.loading || root.loadFailed) && root.items.length > 0 ? Style.space(24) : 0
     clip: true
     visible: root.items.length > 0
     reuseItems: true
@@ -285,6 +355,10 @@ Item {
     cellHeight: root.cellH
     model: gridModel
     onContentYChanged: root.maybeLoadMore()
+    // Only once restored: before that, currentIndex is the fetch's default 0
+    // and banking it would overwrite the spot being restored.
+    onCurrentIndexChanged: if (root.restoreApplied && currentIndex >= 0)
+      root.panel.rememberScroll(root.scrollKey + ":cursor", currentIndex)
     // Deferred, not direct: the "Loading more…" footer's bottomMargin depends
     // on `loading`, so a fetch started from inside a height change resizes the
     // grid again mid-binding — Qt reported it as a bottomMargin binding loop.
@@ -315,7 +389,11 @@ Item {
       }
     }
 
+    // parent: keeps the handler on the viewport rather than inside
+    // contentItem, where it scrolls away after the first screen and the
+    // onScrolled scroll-memory hook stops firing.
     FastScrollHandler {
+      parent: gridView
       flickable: gridView
       onScrolled: root.panel.rememberScroll(root.scrollKey, gridView.contentY)
     }
@@ -337,7 +415,8 @@ Item {
     textFormat: Text.PlainText
     text: root.loading
       ? "Loading " + root.panel.libraryTitle(root.sectionId) + "…"
-      : "This library is empty."
+      : (root.loadFailed ? "Couldn't load " + root.panel.libraryTitle(root.sectionId) + " — R to retry"
+        : "This library is empty.")
   }
 
   // Paginating footer — text only, matching the no-spinner rule.
@@ -345,11 +424,11 @@ Item {
     anchors.horizontalCenter: parent.horizontalCenter
     anchors.bottom: parent.bottom
     anchors.bottomMargin: Style.space(6)
-    visible: root.loading && root.items.length > 0
+    visible: (root.loading || root.loadFailed) && root.items.length > 0
     color: Color.muted
     font.family: Style.font.family
     font.pixelSize: Style.font.caption
     textFormat: Text.PlainText
-    text: "Loading more…"
+    text: root.loadFailed ? "Couldn't load more — R to retry" : "Loading more…"
   }
 }

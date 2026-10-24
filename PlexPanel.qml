@@ -117,9 +117,20 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        try { root.applyConfig(String(text || "")) }
+        var raw = String(text || "")
+        try { root.applyConfig(raw) }
         catch (e) { /* first run or rejected file */ }
-        if (!root.configured()) { legacyConfigRead.running = true; return }
+        if (!root.configured()) {
+          // Only an ABSENT new config may be spoken for by the pre-rename one,
+          // the same rule positionRead follows. A present-but-invalid file (a
+          // JSON typo, a token that fails validToken) used to fall through to
+          // here too, and adoption then SAVED the old config over it: one bad
+          // keystroke in config.json silently reverted you to a months-old
+          // server and token. A bad file now parks you on setup, saying why.
+          if (raw === "") legacyConfigRead.running = true
+          else root.setStatus("~/.config/omarchy-plex/config.json could not be read — fix it here and Connect", true)
+          return
+        }
         // Opened in the moments after a shell restart, before this read
         // finished: open() saw no config and parked the window on setup.
         // A valid config arriving now means it never belonged there.
@@ -128,17 +139,35 @@ Item {
     }
   }
 
-  function saveConfig() {
+  // With no arguments this writes what the root already holds (the legacy
+  // adoption path). The Settings page passes its STAGED form values instead:
+  // they are validated first and only reach root.server/token/backend once
+  // they pass, so a half-typed URL or token never drives a live request, and
+  // a rejected form leaves the working config exactly as it was.
+  function saveConfig(server, token, backend) {
+    var s = server === undefined ? root.server : String(server)
+    var t = token === undefined ? root.token : String(token)
+    var b = backend === undefined ? root.backend : (backend === "mpv" ? "mpv" : "internal")
     // Validate visibly instead of silently mangling; nothing user-controlled
     // is ever interpolated into shell source.
-    if (!Model.validServer(root.server)) {
+    if (!Model.validServer(s)) {
       root.setStatus("Server must look like http://host:32400", true)
       return false
     }
-    if (!Model.validToken(root.token)) {
+    if (!Model.validToken(t)) {
       root.setStatus("Token looks wrong — paste only the X-Plex-Token value", true)
       return false
     }
+    // Switching engines under a live session unloads the native player while
+    // `mode` stays "playing": a ghost session nothing can stop. Refusing is
+    // simpler and more honest than tearing down someone's film from Settings.
+    if (b !== root.backend && root.mode === "playing") {
+      root.setStatus("Stop playback before switching the playback backend", true)
+      return false
+    }
+    root.server = s
+    root.token = t
+    root.backend = b
     root.setStatus("", false)
     saveProcess.running = true
     return true
@@ -196,13 +225,19 @@ Item {
 
   function configured() { return root.server !== "" && root.token !== "" }
 
-  // Settings page calls this once saveConfig() has accepted the form.
+  // Settings page calls this once saveConfig() has accepted the form, and
+  // configRead calls it when a config lands after open() parked on setup.
+  // `mode` is the ENGINE's state: only setup/error belong to this function.
+  // Forcing "list" unconditionally used to strand a live session (Connect
+  // mid-film flipped mode under the player, so nothing could stop it).
+  // Focus goes through focusPrimary so the window still opens into
+  // type-to-search when the config arrives late.
   function configApplied() {
-    root.mode = "list"
+    if (root.mode === "setup" || root.mode === "error") root.mode = "list"
     root.setStatus("", false)
     root.loadLibraries()
     root.navigate("home", ({}))
-    keyHost.forceActiveFocus()
+    root.focusPrimary()
   }
 
   // ---- state ----
@@ -272,21 +307,42 @@ Item {
   property var pageParams: ({})
   readonly property int navStackLimit: 32
 
+  // Swaps the live page. The order is the whole point: the old page is
+  // destroyed FIRST, while pageParams still describe it, so its
+  // Component.onDestruction banks scroll/cursor under its own key; then the
+  // params change; then the new page is built already holding its own params.
+  // The Loader builds synchronously, so setting currentPage before
+  // pageParams (the old order) constructed every new page with the PREVIOUS
+  // page's params and then re-fed it the right ones — Search saw its query
+  // "change", armed "Searching…" forever and zeroed its remembered scroll.
+  // Setting params first instead would let the outgoing page react to
+  // params that are not its own. `active` false→true destroys and rebuilds
+  // synchronously (verified offscreen), which also gives detail→detail and
+  // library→library a fresh page instead of a reused one reloading in place.
+  function showPage(page, params) {
+    pageLoader.active = false
+    root.pageParams = params
+    root.currentPage = page
+    pageLoader.active = true
+  }
+
   function navigate(page, params) {
     var next = String(page || "home")
     var args = params === undefined || params === null ? ({}) : params
     if (next === root.currentPage) {
-      // Same page, new arguments: replace rather than stack a history entry,
-      // or every debounced keystroke in the search box becomes a back step.
-      root.pageParams = args
-      return
+      // Search alone coalesces: every debounced keystroke replaces the
+      // query rather than stacking a back step. Coalescing every same-page
+      // move used to swallow detail→detail (Related), so Back skipped the
+      // movie you came from.
+      if (next === "search") { root.pageParams = args; return }
+      // Re-opening exactly where you are (Home from Home) is not history.
+      if (JSON.stringify(args) === JSON.stringify(root.pageParams)) return
     }
     var stack = root.navStack.slice()
     stack.push({ page: root.currentPage, params: root.pageParams })
     while (stack.length > root.navStackLimit) stack.shift()
     root.navStack = stack
-    root.currentPage = next
-    root.pageParams = args
+    root.showPage(next, args)
     // A banner describes the page that raised it; carrying "No results for X"
     // onto Home reads as a stuck error.
     root.setStatus("", false)
@@ -297,8 +353,7 @@ Item {
     root.setStatus("", false)
     if (root.navStack.length === 0) {
       if (root.currentPage !== "home") {
-        root.currentPage = "home"
-        root.pageParams = ({})
+        root.showPage("home", ({}))
         root.setPanelCursor("page", "")
       }
       return
@@ -306,8 +361,8 @@ Item {
     var stack = root.navStack.slice()
     var prev = stack.pop()
     root.navStack = stack
-    root.currentPage = String(prev.page || "home")
-    root.pageParams = prev.params === undefined || prev.params === null ? ({}) : prev.params
+    root.showPage(String(prev.page || "home"),
+      prev.params === undefined || prev.params === null ? ({}) : prev.params)
     root.setPanelCursor("page", "")
   }
 
@@ -354,6 +409,15 @@ Item {
     root.cursorRegion = region === undefined || region === null ? "" : String(region)
     root.cursorAction = action === undefined || action === null ? "" : String(action)
   }
+
+  // Pointer-only controls (shelf arrows, the library sort button, a shelf
+  // title link) have no slot in any keyboard walk, but the kit Button paints
+  // its own hover — so hovering one lit it NEXT TO the page cursor, two
+  // highlights at once. They claim this pseudo-region instead: the page
+  // cursor hides while the pointer is on them, and comes back where it was
+  // when the pointer leaves. Keyboard input from here resumes in the page.
+  function claimPointer(key) { root.setPanelCursor("pointer", key) }
+  function releasePointer(key) { if (root.cursorOn("pointer", key)) root.setPanelCursor("page", "") }
 
   function cursorOn(region, action) {
     return root.cursorRegion === String(region)
@@ -1073,19 +1137,38 @@ Item {
   // slots, a slow response for "jo" can land after the fast one for "john
   // wick" and silently replace the newer results.
   property int searchGen: 0
+  // The one source of truth for "a search is in flight": set here, cleared
+  // only by the callback of the CURRENT generation. SearchPage used to infer
+  // it from its query changing, which also fired when the page was merely
+  // rebuilt by Back — a "Searching…" that never cleared.
+  property bool searching: false
+  // The last finished search failed (null doc) rather than found nothing.
+  property bool searchFailed: false
+  // A NEW query (not a rebuilt page) is what resets the results list's
+  // scroll and cursor; SearchPage listens for this instead of onQueryChanged.
+  signal searchStarted()
 
   function search(q) {
     var query = String(q === undefined || q === null ? "" : q).trim()
     root.searchGen++
     if (query === "") {
+      root.searching = false
       root.searchResults = []
       if (root.currentPage === "search") root.goBack()
       return
     }
     var gen = root.searchGen
+    root.searching = true
+    // Fresh list: a page built by the navigate below must not restore the
+    // previous query's position.
+    root.rememberScroll("search", 0)
+    root.rememberScroll("search:cursor", 0)
     root.navigate("search", { query: query })
+    root.searchStarted()
     root.request(Api.searchUrl("", query), function(doc) {
       if (gen !== root.searchGen) return
+      root.searching = false
+      root.searchFailed = doc === null || doc === undefined
       var out = []
       try { out = Api.mapSearch(doc) } catch (e) { out = [] }
       root.searchResults = out
@@ -2740,7 +2823,12 @@ Item {
 
   function escapePressed() {
     if (searchInput.activeFocus && searchInput.text !== "") {
+      // A programmatic text change never fires textEdited, so the debounce
+      // never ran and "Results for john" sat under an empty box — three Escs
+      // to get out. Clear the query for real, now.
       searchInput.text = ""
+      searchDebounce.stop()
+      root.search("")
       root.disarmEscapeClose()
       return
     }
@@ -2806,7 +2894,7 @@ Item {
     // keyboard-discoverable; the minibar only while it is on screen.
     if (root.minibarVisible) order.push("minibar")
     if (root.headerActions.length > 0) order.push("header")
-    var at = order.indexOf(root.cursorRegion)
+    var at = order.indexOf(root.cursorRegion === "pointer" ? "page" : root.cursorRegion)
     if (at < 0) at = 0
     at = ((at + dir) % order.length + order.length) % order.length
     // Skip the search box when it is not on screen (setup, playing).
@@ -2840,6 +2928,9 @@ Item {
   }
 
   function moveCursor(dx, dy) {
+    // A key pressed while the pointer rests on a pointer-only control acts on
+    // the page, and must make the page's cursor visible again to do it.
+    if (root.cursorRegion === "pointer") root.setPanelCursor("page", "")
     if (root.cursorRegion === "sidebar") {
       if (dx > 0) { root.enterRegion("page"); return }
       if (dy === 0) return
@@ -2888,6 +2979,7 @@ Item {
   }
 
   function activateCursor() {
+    if (root.cursorRegion === "pointer") root.setPanelCursor("page", "")
     if (root.cursorRegion === "sidebar") { root.activateSidebar(root.cursorAction); return }
     if (root.cursorRegion === "minibar") { root.activateMinibar(root.cursorAction); return }
     if (root.cursorRegion === "header") { root.activateHeader(root.cursorAction); return }
@@ -3028,6 +3120,15 @@ Item {
     if (key === Qt.Key_PageUp) { root.pageStep(-1); return true }
     if (key === Qt.Key_PageDown) { root.pageStep(1); return true }
     if (!ctrl && !alt && text === "r") { root.refresh(); return true }
+    // Page-owned single letters (Library's "s" = sort). Same implicit gate
+    // as every other letter here: a focused text field eats it first.
+    if (!ctrl && !alt && text !== "") {
+      var pageItem = pageLoader.item
+      if (pageItem && typeof pageItem.handlePageKey === "function" && pageItem.handlePageKey(text)) {
+        if (root.cursorRegion === "pointer") root.setPanelCursor("page", "")
+        return true
+      }
+    }
     // A no-op unless a session is live: enterPip() guards on pipAvailable.
     if (!ctrl && !alt && text === "p") { root.toggleSurface(); return true }
     return false

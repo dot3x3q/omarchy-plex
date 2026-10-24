@@ -64,7 +64,12 @@ Item {
     Text {
       anchors.centerIn: parent
       visible: posterArt.status !== Image.Ready
-      text: root.itemData && root.itemData.type === "show" ? "󰦔" : "󰎁"
+      // TV glyph for every TV-shaped card (season and episode cards appear on
+      // the TV shelf and in Related); the film glyph only for movies.
+      text: {
+        var type = root.itemData ? String(root.itemData.type || "") : ""
+        return type === "show" || type === "season" || type === "episode" ? "󰦔" : "󰎁"
+      }
       textFormat: Text.PlainText
       color: Color.muted
       font.family: Style.font.family

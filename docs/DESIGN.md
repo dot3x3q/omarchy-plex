@@ -137,6 +137,8 @@ dispatchers 2026-08-29 — `handleKey`/`handlePlayingKey`/`handlePipKey`/
   implemented for browse cursor movement** — only inside the track popup
   (below). Drop "Home/End" from the browse story until/unless a page grows
   that behavior.
+- Page-owned letters, dispatched through a page's `handlePageKey(text)`:
+  `s` cycles the Library sort (Recently added → Title → Year).
 - `/` focus search · Enter activate/drill · Esc layered: track popup close →
   clear non-empty search → leave search field → exit theater to browse →
   back-stack → arm-close → close (armed close button goes urgent, 1500ms).

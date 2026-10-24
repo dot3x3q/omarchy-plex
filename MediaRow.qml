@@ -157,7 +157,9 @@ BorderSurface {
         iconText: "󰐊"
         iconSize: Style.font.body
         foreground: Color.foreground
-        tooltipText: "Play · Enter"
+        // Enter only plays on rows that play on activate; on a browse row
+        // (a movie in search results) Enter opens the detail page instead.
+        tooltipText: root.browseOnActivate ? "Play" : "Play · Enter"
         horizontalPadding: Style.space(7)
         onClicked: root.activated()
         // Single-highlight rule: hovering the inline button must move the
