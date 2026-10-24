@@ -474,6 +474,9 @@ Item {
     // The PiP *is* the theater on the floaty surface, so popping back later
     // lands on the picture rather than the minibar.
     root.theater = true
+    // The theater (and its volume popup) is about to be destroyed under the
+    // pointer; a hold it had would otherwise outlive it.
+    root.releaseVolumePopupNow()
     // The theater's native item dies with this flip (per-surface players —
     // see the crash note at the native block); capture what its successor in
     // the PiP must resume, and idle the outgoing core NOW — its destruction
@@ -1851,6 +1854,11 @@ Item {
 
   function releaseVolumePopup() { volumePopupGrace.restart() }
 
+  function releaseVolumePopupNow() {
+    volumePopupGrace.stop()
+    root.volumePopupHeld = false
+  }
+
   // ---- the 100–200 zone: PipeWire per-stream boost ----
   //
   // The quickshell PROCESS publishes several identical-looking output streams —
@@ -2087,7 +2095,13 @@ Item {
     else theaterHideTimer.stop()
   }
 
-  onInTheaterChanged: root.pokeTheaterControls()
+  onInTheaterChanged: {
+    // Leaving theater destroys the strip, popup included, possibly under the
+    // pointer — its HoverHandler never reports the exit, and the hold would
+    // pin the popup the next time theater opened.
+    if (!root.inTheater) root.releaseVolumePopupNow()
+    root.pokeTheaterControls()
+  }
   onIsPausedChanged: {
     if (root.inTheater) root.pokeTheaterControls()
     root.syncPlayerState()
