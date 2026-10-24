@@ -1,4 +1,26 @@
-# omarchy-plex — Marketplace Listing (draft, submit after the repo is public)
+# omarchy-plex — Marketplace Listing
+
+Listed at https://omarchyplugins.com/plugin.html?id=dot3x3q.omarchy-plex
+(first approved 2026-08-30; submission issue omacom/omarchy-plugin-marketplace#3352).
+
+## Updating the listing after a release
+
+The marketplace pins one exact commit. To publish a newer one:
+
+1. Push `main`, then take the full SHA: `git rev-parse HEAD`.
+2. Open a verify issue (form `verify-plugin.yml`, or `gh issue create -R
+   omacom/omarchy-plugin-marketplace --title "[Verify]: dot3x3q.omarchy-plex"`)
+   with action "Verify and publish a newer upstream commit", plugin ID
+   `dot3x3q.omarchy-plex`, the repo URL and that SHA; tick the verification box,
+   leave standard installation unticked (the native module is a manual step).
+3. A bot validates compatibility and runs the security baseline. It always flags
+   `remote-build`, `installer`, `package-manager` and `privilege`, all from
+   `native/install.sh`; a maintainer accepted these on #3352/#3621. Then a
+   maintainer applies `approved-and-verified` and the bot publishes.
+
+History: #3621 (5f428df, 2026-08-30), #12797 (0.2.0, 2026-10-24).
+
+## Original submission (2026-08-30, kept for reference)
 
 ## Submission title
 
