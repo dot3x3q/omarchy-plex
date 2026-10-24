@@ -69,7 +69,7 @@ Item {
     // does, and a hold with no matching hover-out would pin the popup open.
     onWheel: function(wheel) {
       view.panel.pokeTheaterControls()
-      view.panel.nudgeVolumeWheel(wheel.angleDelta.y > 0)
+      view.panel.wheelVolume(wheel.angleDelta.y)
     }
   }
 
@@ -268,7 +268,7 @@ Item {
           acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
           onWheel: function(event) {
             view.panel.holdVolumePopup()
-            view.panel.nudgeVolumeWheel(event.angleDelta.y > 0)
+            view.panel.wheelVolume(event.angleDelta.y)
           }
         }
 
@@ -465,7 +465,7 @@ Item {
               }
               onWheel: function(wheel) {
                 view.panel.holdVolumePopup()
-                view.panel.nudgeVolumeWheel(wheel.angleDelta.y > 0)
+                view.panel.wheelVolume(wheel.angleDelta.y)
               }
 
               PanelToolTip {
@@ -675,7 +675,11 @@ Item {
       preferredHighlightEnd: height
       highlightRangeMode: ListView.ApplyRange
 
-      FastScrollHandler { flickable: pickerList }
+      // parent: the ListView itself, not its contentItem (where a child
+      // declared here would otherwise land): parented to the content, the
+      // handler scrolled away with the rows and stopped catching the wheel
+      // once the list moved past its first screen.
+      FastScrollHandler { parent: pickerList; flickable: pickerList }
 
       delegate: Button {
         required property var modelData

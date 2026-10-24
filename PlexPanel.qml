@@ -8,6 +8,8 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "Api.js" as Api
+import "Pool.js" as Pool
+import "Io.js" as Io
 
 // Omarchy Plex panel entry point.
 // Hosted by omarchy-shell; summoned with:
@@ -84,7 +86,16 @@ Item {
     readonly property string fontFamily: root.fontFamily
   }
 
-  property int videoWidth: 460
+  // The width the user asked for (resize grips, window.json) and the width the
+  // card actually gets. The card's height is width × 9/16, and the old cap was
+  // the screen's WIDTH alone, so on an ultrawide — or after moving a big card
+  // to a smaller or portrait monitor — the card ran off the top of the screen
+  // with its strip unreachable. pipMaxWidth caps by whichever of the screen's
+  // width and its height × 16/9 is smaller, less the resting inset each side.
+  // Kept apart from the preference so moving back to the big screen restores
+  // the size you chose; re-capped automatically when the PiP changes screen.
+  property int pipWidthPref: 460
+  readonly property int videoWidth: Math.max(280, Math.min(root.pipWidthPref, root.pipMaxWidth))
   readonly property int videoHeight: Math.round(videoWidth * 9 / 16)
   function tint(a) { return Qt.rgba(root.accent.r, root.accent.g, root.accent.b, a) }
 
@@ -108,12 +119,8 @@ Item {
   Process {
     id: configRead
     running: false
-    command: ["sh", "-c",
-      "d='" + root.configDir + "'; d=${d%/}; b=${d##*/}; "
-      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 0; "
-      + "[ -d \"$p/$b\" ] && [ ! -L \"$p/$b\" ] && cd -P -- \"$p/$b\" "
-      + "&& [ \"$(pwd -P)\" = \"$p/$b\" ] "
-      + "&& dd if=config.json iflag=nofollow,nonblock bs=4097 count=1 status=none 2>/dev/null || true"]
+    // Fixed script, directory as $1 — see Io.js.
+    command: ["sh", "-c", Io.readConfigScript, "sh", root.configDir]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -182,16 +189,9 @@ Item {
     stdinEnabled: true
     onStarted: write(root.server + "\t" + root.token + "\t"
       + (root.backend === "internal" ? "internal" : "mpv") + "\n")
-    command: ["sh", "-c",
-      "IFS=$(printf '\t') read -r plex_server plex_token plex_backend || exit 1; "
-      + "d='" + root.configDir + "'; d=${d%/}; b=${d##*/}; "
-      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 1; "
-      + "mkdir -p -- \"$p/$b\" && [ ! -L \"$p/$b\" ] && chmod 700 \"$p/$b\" "
-      + "&& cd -P -- \"$p/$b\" && [ \"$(pwd -P)\" = \"$p/$b\" ] "
-      + "&& umask 077 && t=.config.$$.tmp && trap 'rm -f -- \"$t\"' EXIT "
-      + "&& printf '{\"server\":\"%s\",\"token\":\"%s\",\"backend\":\"%s\"}' "
-      + "\"$plex_server\" \"$plex_token\" \"$plex_backend\" > \"$t\" "
-      + "&& chmod 600 \"$t\" && mv -f -- \"$t\" config.json && trap - EXIT"]
+    // Fixed script (Io.saveConfigScript), directory as $1; the values come
+    // in on stdin above.
+    command: ["sh", "-c", Io.saveConfigScript, "sh", root.configDir]
   }
 
   // Adopts a pre-rename install once. Read-only on the old paths — nothing
@@ -202,12 +202,7 @@ Item {
   Process {
     id: legacyConfigRead
     running: false
-    command: ["sh", "-c",
-      "d='" + root.legacyConfigDir + "'; d=${d%/}; b=${d##*/}; "
-      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 0; "
-      + "[ -d \"$p/$b\" ] && [ ! -L \"$p/$b\" ] && cd -P -- \"$p/$b\" "
-      + "&& [ \"$(pwd -P)\" = \"$p/$b\" ] "
-      + "&& dd if=config.json iflag=nofollow,nonblock bs=4097 count=1 status=none 2>/dev/null || true"]
+    command: ["sh", "-c", Io.readConfigScript, "sh", root.legacyConfigDir]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -287,12 +282,63 @@ Item {
   property string currentRatingKey: ""
   property string sessionId: ""
   property bool triedTranscode: false
-  property real lastFailMs: 0
+  // The playGen whose failure has already been handled. Failures are
+  // de-duplicated per stream rather than by wall clock: QtMultimedia reports
+  // one bad source twice (InvalidMedia AND errorOccurred), but a transcode
+  // that dies 200 ms after the direct play it replaced is a NEW failure and
+  // must reach fail() — the old 250 ms window swallowed it and left the panel
+  // "playing" a dead stream.
+  property int failedGen: -1
+  // Which rungs of the direct ↔ transcode ladder have FAILED for the current
+  // item, so a failure tries the other one once, whichever it began on.
+  property bool directFailed: false
+  property bool transcodeFailed: false
   property bool userStop: false
   property bool scrobbled: false
   property int tickCount: 0
+  property double lastTimelineMs: 0
   property int resumeSec: 0
   property int playGen: 0 // guards mpv exit handler against item switches
+  // Where the CURRENT stream was asked to start, in seconds. Kept after the
+  // engine has consumed resumeSec, because until the engine reports a real
+  // position (a loaded file with a duration) this is the only honest answer
+  // to "where are we": a stop, a failure or a surface handoff in the first
+  // half-second of a load must not capture 0 or the previous file's time.
+  property real streamLocalStart: 0
+  // The last real duration seen for the current item. A stop during a reload
+  // (a transcode restart, a PiP handoff) still reports the item's length to
+  // the server instead of duration=0.
+  property real lastKnownDuration: 0
+
+  // ---- multi-part items ----
+  //
+  // A two-disc film is ONE Plex item whose first Media has several Parts
+  // (live examples: ratingKeys 3732 and 7324, The Sound of Music, CD1 102 min
+  // + CD2 70 min). Only Part[0] used to play, and since the scrobble threshold
+  // read part 1's duration, the whole film was marked watched 92 minutes in.
+  // Two ways to play them, picked per stream in launchStream:
+  //  - EDL (either mpv engine, direct play): mpv stitches the parts into one
+  //    timeline itself (`edl://`), so position, duration, seeking and resume
+  //    are all the film's own and nothing below has to translate.
+  //  - Chain (QtMultimedia, and any transcode — the transcoder serves one
+  //    part per session via partIndex): one part plays at a time, the engine's
+  //    numbers are offset by partStartSec into the film's, and the end of a
+  //    part starts the next one.
+  // Timeline, scrobble and resume always speak the film's cumulative time.
+  property var mediaParts: []
+  property int partIndex: 0
+  property real partStartSec: 0
+  property bool chainActive: false
+  property bool edlActive: false
+  readonly property real partsTotalSec: {
+    var total = 0
+    for (var i = 0; i < root.mediaParts.length; i++) {
+      var d = Number(root.mediaParts[i].duration) || 0
+      if (d <= 0) return 0 // unknown: no honest total
+      total += d
+    }
+    return root.mediaParts.length > 1 ? total / 1000 : 0
+  }
   property string pendingMpvUrl: "" // staged for mpvRelay's 300 ms socket-release wait
 
   // mpv remote state (seconds)
@@ -449,14 +495,19 @@ Item {
   // into the card exactly as the VideoOutput does.
   readonly property bool pipAvailable: root.mode === "playing" && !root.mpvMode
 
+  // Entering is two-step: ask the compositor which output the window is on,
+  // THEN flip. The flip used to happen first and the answer land ~30 ms after
+  // the PiP had mapped, so the correction reassigned window.screen under a
+  // native player that was still loading — a recreated surface under a load
+  // in flight, and a dead or black PiP. Asked first, the screen is set while
+  // the PiP is still unmapped, which costs nothing.
+  property bool pipEntering: false
+
   function enterPip() {
-    if (!root.pipAvailable || !root.windowed) return
+    if (!root.pipAvailable || !root.windowed || root.pipEntering) return
     // The PiP cannot host or dismiss the picker popups; one left open would
     // pin the strip over the video for the rest of the session.
     root.closeTrackPopup()
-    // The PiP *is* the theater on the floaty surface, so popping back later
-    // lands on the picture rather than the minibar.
-    root.theater = true
     // Bind the surface to the output the REAL WINDOW is on before it maps.
     // Setting `screen` while the window is unmapped is free — there is no
     // surface to tear down yet, Quickshell just records it — and it is half
@@ -473,17 +524,39 @@ Item {
     // appWindow.screen is Qt's OPINION of the window's output, and on Wayland
     // that is a default rather than a fact: a window tiled on monitor three
     // still spawns its PiP on monitor one. The compositor is the only
-    // authority on where a toplevel lives, so ask it; the answer lands after
-    // the PiP maps, and reassigning screen then flows through onScreenChanged
-    // -> bouncePipPlayer like any other move.
+    // authority on where a toplevel lives, so ask it, and finish entering
+    // when it answers (or after a short grace if hyprctl/jq are missing).
+    root.pipEntering = true
     pipHostQuery.running = true
+    pipEnterGrace.restart()
+  }
+
+  Timer {
+    id: pipEnterGrace
+    interval: 600
+    repeat: false
+    onTriggered: root.completeEnterPip()
+  }
+
+  function completeEnterPip() {
+    if (!root.pipEntering) return
+    root.pipEntering = false
+    pipEnterGrace.stop()
+    // Anything could have happened in the wait: Stop, the item ending.
+    if (!root.pipAvailable || !root.windowed) return
+    // The PiP *is* the theater on the floaty surface, so popping back later
+    // lands on the picture rather than the minibar.
+    root.theater = true
+    // The theater (and its volume popup) is about to be destroyed under the
+    // pointer; a hold it had would otherwise outlive it.
+    root.releaseVolumePopupNow()
     // The theater's native item dies with this flip (per-surface players —
     // see the crash note at the native block); capture what its successor in
     // the PiP must resume, and idle the outgoing core NOW — its destruction
     // races the window teardown, and a lost race leaks a playing audio thread
     // (NativeVideoHost.onDestruction is the second line of defense).
     if (root.nativeMode && root.mode === "playing") {
-      root.pendingNativeArm = { pos: root.seekDisplayTime, paused: root.isPaused }
+      root.pendingNativeArm = root.handoffArm()
       if (root.nativeVideo) root.nativeVideo.stop()
     }
     root.windowed = false
@@ -495,13 +568,28 @@ Item {
   function exitPip() {
     if (root.windowed) return
     if (root.nativeMode && root.mode === "playing") {
-      root.pendingNativeArm = { pos: root.seekDisplayTime, paused: root.isPaused }
+      root.pendingNativeArm = root.handoffArm()
       if (root.nativeVideo) root.nativeVideo.stop()
     }
     root.windowed = true
     root.savePosition()
     root.enterTheater() // no-op unless a session is still live
     root.focusPrimary()
+  }
+
+  // What a replacement native player must reproduce: position (in the live
+  // stream's own time), pause and mute. Mute used to be dropped, so every
+  // handoff — theater ↔ PiP, a monitor move, an unlock — came back loud.
+  //
+  // Pause has one exception. Unlocking resumes a film the lock paused, but
+  // that unpause is an async property write on the OLD item while the PiP's
+  // re-shown surface bounces the player in the same moment — and the bounce
+  // read the still-paused state, so the PiP came back paused. Inside that
+  // window the handoff records what the unlock is about to do instead.
+  function handoffArm() {
+    var paused = root.isPaused
+    if (root.unlockResuming && !root.sessionLocked) paused = false
+    return { pos: root.engineSeekTime, paused: paused, muted: root.audioMuted }
   }
 
   function toggleSurface() {
@@ -563,6 +651,12 @@ Item {
     ? root.pipScreen.width : (window.width > 0 ? window.width : 0)
   readonly property int pipAreaHeight: root.pipScreen && root.pipScreen.height > 0
     ? root.pipScreen.height : (window.height > 0 ? window.height : 0)
+
+  // See pipWidthPref. 3800 with no screen known yet, the old load-time ceiling.
+  readonly property int pipMaxWidth: root.pipAreaWidth > 0 && root.pipAreaHeight > 0
+    ? Math.max(280, Math.floor(Math.min(root.pipAreaWidth, root.pipAreaHeight * 16 / 9)
+      - root.pipInset * 2))
+    : 3800
 
   // Margins measure the PiP CARD's distance from its screen's edges, not the
   // surface's — the layer surface is full-screen and never moves.
@@ -642,7 +736,9 @@ Item {
 
   function adoptPipScreenByName(name) {
     var wanted = String(name || "").trim()
-    if (wanted === "" || root.windowed) return
+    // While entering, the PiP is not mapped yet and this is the free,
+    // pre-map assignment completeEnterPip is waiting for.
+    if (wanted === "" || (root.windowed && !root.pipEntering)) return
     var list = Quickshell.screens
     if (!list) return
     for (var i = 0; i < list.length; i++) {
@@ -668,7 +764,10 @@ Item {
       + "hyprctl -j monitors | jq -r --argjson m \"${m:-null}\" 'first(.[] | select(.id==$m) | .name) // empty'"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.adoptPipScreenByName(String(text || ""))
+      onStreamFinished: {
+        root.adoptPipScreenByName(String(text || ""))
+        root.completeEnterPip()
+      }
     }
   }
 
@@ -740,13 +839,15 @@ Item {
   function stageWindowState() {
     posSave.right = "" + Math.round(root.marginRight)
     posSave.bottom = "" + Math.round(root.marginBottom)
-    posSave.width = "" + root.videoWidth
+    posSave.width = "" + root.pipWidthPref
     posSave.windowed = root.windowed ? "true" : "false"
   }
 
-  // One posSave run per save, never two: Quickshell latches a Process's argv at
-  // start and silently ignores writes to a running one, so a second
-  // running=true chasing the first would simply be dropped.
+  // Overlapping saves are safe, for a reason worth knowing: Quickshell does
+  // not drop a `running = true` aimed at a Process that is still running. It
+  // remembers it, and the moment the current run exits it starts ONE more run
+  // with whatever `command` is current then. So a burst of saves collapses to
+  // "the first, then the latest" — exactly right for a whole-file write.
   function saveWidth() {
     root.stageWindowState()
     posSave.running = true
@@ -787,16 +888,11 @@ Item {
     // quality pick is a deliberate act, not a drag.
     property string quality: "" + root.qualityKbps
     running: false
-    command: ["sh", "-c",
-      "d='" + root.stateDir + "'; d=${d%/}; b=${d##*/}; "
-      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 1; "
-      + "mkdir -p -- \"$p/$b\" && [ ! -L \"$p/$b\" ] && chmod 700 \"$p/$b\" "
-      + "&& cd -P -- \"$p/$b\" && [ \"$(pwd -P)\" = \"$p/$b\" ] "
-      + "&& umask 077 && t=.window.$$.tmp && trap 'rm -f -- \"$t\"' EXIT "
-      + "&& printf '{\"right\":%s,\"bottom\":%s,\"width\":%s,\"windowed\":%s,\"volume\":%s,\"quality\":%s}' "
-      + posSave.right + " " + posSave.bottom + " " + posSave.width + " " + posSave.windowed
-      + " " + posSave.volume + " " + posSave.quality
-      + " > \"$t\" && chmod 600 \"$t\" && mv -f -- \"$t\" window.json && trap - EXIT"]
+    // Fixed script (Io.saveStateScript): the directory and every value are
+    // positional parameters, never shell source.
+    command: ["sh", "-c", Io.saveStateScript, "sh", root.stateDir,
+      posSave.right, posSave.bottom, posSave.width, posSave.windowed,
+      posSave.volume, posSave.quality]
   }
 
   function applyWindowState(raw) {
@@ -804,7 +900,7 @@ Item {
     var doc = JSON.parse(raw)
     if (doc.right !== undefined) root.marginRight = Math.max(0, doc.right | 0)
     if (doc.bottom !== undefined) root.marginBottom = Math.max(0, doc.bottom | 0)
-    if (doc.width !== undefined) root.videoWidth = Math.max(280, Math.min(3800, doc.width | 0))
+    if (doc.width !== undefined) root.pipWidthPref = Math.max(280, Math.min(3800, doc.width | 0))
     if (doc.volume !== undefined) root.volumePct = Math.max(0, Math.min(200, doc.volume | 0))
     // Only a value the tier list actually offers is accepted. This one ends up
     // substituted into a transcode URL, so "clamp it" is not good enough — an
@@ -824,12 +920,8 @@ Item {
   Process {
     id: positionRead
     running: false
-    command: ["sh", "-c",
-      "d='" + root.stateDir + "'; d=${d%/}; b=${d##*/}; "
-      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 0; "
-      + "[ -d \"$p/$b\" ] && [ ! -L \"$p/$b\" ] && cd -P -- \"$p/$b\" "
-      + "&& [ \"$(pwd -P)\" = \"$p/$b\" ] "
-      + "&& dd if=window.json iflag=nofollow,nonblock bs=1025 count=1 status=none 2>/dev/null || true"]
+    // Fixed script, directory as $1 — see Io.js.
+    command: ["sh", "-c", Io.readStateScript, "sh", root.stateDir]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -848,12 +940,7 @@ Item {
   Process {
     id: legacyPositionRead
     running: false
-    command: ["sh", "-c",
-      "d='" + root.legacyStateDir + "'; d=${d%/}; b=${d##*/}; "
-      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 0; "
-      + "[ -d \"$p/$b\" ] && [ ! -L \"$p/$b\" ] && cd -P -- \"$p/$b\" "
-      + "&& [ \"$(pwd -P)\" = \"$p/$b\" ] "
-      + "&& dd if=window.json iflag=nofollow,nonblock bs=1025 count=1 status=none 2>/dev/null || true"]
+    command: ["sh", "-c", Io.readStateScript, "sh", root.legacyStateDir]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -881,10 +968,22 @@ Item {
       else if (root.nativeMode) { if (root.nativeVideo) root.nativeVideo.paused = true }
       else player.pause()
     } else if (root.wasPlayingBeforeLock) {
+      // See handoffArm: the PiP's surface comes back with the unlock and may
+      // bounce the native player before this unpause has landed.
+      root.unlockResuming = true
+      unlockResumeWindow.restart()
       if (root.backend === "mpv") mpvSend('{"command":["set_property","pause",false]}')
       else if (root.nativeMode) { if (root.nativeVideo) root.nativeVideo.paused = false }
       else player.play()
     }
+  }
+  property bool unlockResuming: false
+  Timer {
+    id: unlockResumeWindow
+    // Long enough to cover the re-shown surface's async screen assignment.
+    interval: 1500
+    repeat: false
+    onTriggered: root.unlockResuming = false
   }
   Timer {
     id: lockServiceResolve
@@ -955,10 +1054,15 @@ Item {
       player.pause()
     }
     if (root.mode === "playing") sendTimeline("paused")
-    // A closed panel has nothing to poll for: on mpv this timer spawns a
-    // sh+socat every second, and both backends keep posting timeline pings
-    // for a session nobody is watching. open() restarts it.
-    pollTimer.stop()
+    // In-window engines: a closed panel has paused its film and has nothing to
+    // poll for. open() restarts the timer.
+    //
+    // External mpv is different: its window outlives the panel, and a viewer
+    // can simply press play in it. Stopping the timer there meant everything
+    // watched after closing the panel was never reported — no timeline, no
+    // resume point, no scrobble. So the timer keeps running under mpv, at a
+    // gentler cadence while closed (it costs a sh+socat per tick).
+    if (root.backend !== "mpv" || root.mode !== "playing") pollTimer.stop()
     root.opened = false
   }
 
@@ -967,130 +1071,163 @@ Item {
   // process lists, server logs, and cross-host redirects. No redirect
   // following: Plex does not redirect API calls, and following one would
   // forward credentials.
+  //
+  // And the header itself never rides curl's ARGV. /proc/PID/cmdline is
+  // readable by every process on the box (no hidepid here), so a `-H
+  // "X-Plex-Token: …"` argument publishes the token for as long as curl runs.
+  // Every curl gets `-K -` instead — read a config file from stdin — and
+  // writes the header there in onStarted, then closes stdin so curl stops
+  // waiting for more config. saveProcess has always moved the token this way.
+  // The one remaining argv exception is the external mpv backend's
+  // --http-header-fields (mpv cannot read headers from anywhere else).
 
   readonly property var plexHeaders: [
+    "-K", "-",
     "-H", "Accept: application/json",
-    "-H", "X-Plex-Token: " + root.token,
     "-H", "X-Plex-Client-Identifier: " + root.pluginId
   ]
+
+  // curl config syntax: one long option per line. validToken() restricts the
+  // token to [A-Za-z0-9._-], so it cannot close the quotes or start a line.
+  function curlAuthConfig() {
+    return "header = \"X-Plex-Token: " + root.token + "\"\n"
+  }
+
+  // The onStarted half of `-K -`, shared by every curl Process. Closing stdin
+  // (stdinEnabled = false; Quickshell calls closeWriteChannel, which flushes
+  // first) is what lets curl stop reading config and start the transfer.
+  // Callers set stdinEnabled back to true before the next run — or in
+  // onExited, for the ones Quickshell may re-run on its own (see posSave).
+  function feedCurlAuth(proc) {
+    proc.write(root.curlAuthConfig())
+    proc.stdinEnabled = false
+  }
 
   // Four curl slots and a FIFO queue. A home page fans out one request per
   // library, and an unbounded fan-out gets the server rate-limiting and the
   // process table churning; four in flight stays civil and still saturates a
-  // LAN Plex.
-  property var reqQueue: []
+  // LAN Plex. The bookkeeping lives in Pool.js so it can be unit-tested; the
+  // Processes below only report their events into it.
+  readonly property var reqPool: Pool.createPool(4)
   readonly property var reqSlots: [req0, req1, req2, req3]
 
-  function request(path, cb) {
-    if (!root.configured()) { if (cb) cb(null); return }
-    var queue = root.reqQueue.slice()
-    queue.push({ path: String(path || ""), cb: cb })
-    root.reqQueue = queue
+  // request(path, cb[, opts]). Every existing caller passes two arguments and
+  // keeps its old behaviour exactly: an untagged job is never dropped. opts:
+  //   page — the page name the result is for ("home", "detail", …). A QUEUED
+  //          job whose page is no longer the one on screen is dropped instead
+  //          of run, so the page you are looking at gets the four slots rather
+  //          than waiting behind a fan-out from one you already left. Its
+  //          callback is not called: the page that would receive it is gone.
+  //   tag  — any string; cancelRequests(tag) drops that tag's queued jobs at
+  //          once (a page's Component.onDestruction, say).
+  //   raw  — hand cb the body string instead of the parsed JSON.
+  function request(path, cb, opts) {
+    var o = opts && typeof opts === "object" ? opts : ({})
+    if (!root.configured()) {
+      if (cb) cb(o.raw === true ? "" : null)
+      return
+    }
+    Pool.enqueue(root.reqPool, {
+      path: String(path || ""),
+      cb: cb,
+      page: o.page !== undefined && o.page !== null ? String(o.page) : "",
+      tag: o.tag !== undefined && o.tag !== null ? String(o.tag) : "",
+      raw: o.raw === true
+    })
     root.pumpRequests()
   }
 
+  function cancelRequests(tag) {
+    var t = String(tag || "")
+    if (t === "") return 0
+    return Pool.dropQueued(root.reqPool, function(job) { return job.tag === t })
+  }
+
+  function requestStale(job) {
+    return job.page !== "" && job.page !== root.currentPage
+  }
+
   function pumpRequests() {
-    for (var i = 0; i < root.reqSlots.length; i++) {
-      if (root.reqQueue.length === 0) return
-      var slot = root.reqSlots[i]
-      if (slot.busy) continue
-      var queue = root.reqQueue.slice()
-      var job = queue.shift()
-      root.reqQueue = queue
-      slot.busy = true
-      slot.streamDone = false
-      slot.exitDone = false
-      slot.body = ""
-      slot.cb = job.cb
-      // Command fully set BEFORE running: Quickshell latches argv at start
-      // and silently ignores writes to a running Process.
+    Pool.pump(root.reqPool, function(job) { return root.requestStale(job) }, function(index, job) {
+      var slot = root.reqSlots[index]
+      // A queued re-run would fire on the old process's exit with whatever
+      // command is current, so a slot is only ever launched from idle — the
+      // pool guarantees that by settling on stream AND exit first.
+      slot.stdinEnabled = true
       slot.command = ["curl", "-s", "--fail", "--max-time", "10", "--max-filesize", "4194304"]
         .concat(root.plexHeaders)
         .concat([root.server + job.path])
       slot.running = true
-    }
+    })
   }
 
-  // A slot frees up only once BOTH its stdout stream has ended and the
-  // process has exited. Quickshell emits streamFinished when the child closes
-  // stdout, which can happen before it actually exits — handing that slot a
-  // new command right then would have it silently dropped and the queue would
-  // wedge with jobs that never run.
-  function slotSettled(slot) {
-    if (!slot.streamDone || !slot.exitDone) return
-    var cb = slot.cb
-    var body = slot.body
-    slot.cb = null
-    slot.body = ""
-    slot.busy = false
-    if (cb) {
-      var parsed = null
-      // --fail leaves stdout empty on any HTTP error, so a parse failure and
-      // a transport failure land in the same place: cb(null).
-      try { parsed = JSON.parse(String(body || "")) } catch (e) { parsed = null }
-      // A callback whose page has since been destroyed throws (its `page` id
-      // resolves to null). Without the catch the pump below never ran, and
-      // the queue sat stalled until some unrelated request came along.
-      try { cb(parsed) } catch (e) { console.warn("omarchy-plex: request callback threw:", e) }
+  function slotDone(done) {
+    if (done) {
+      var err = Pool.deliver(done)
+      if (err) console.warn("omarchy-plex: request callback threw:", err)
     }
     root.pumpRequests()
   }
 
+  // Quickshell drops `running` to false AFTER `exited` on a normal finish, and
+  // with no `exited` at all when the process failed to start. So a busy slot
+  // whose exit never arrived, seen here, is a start failure.
+  function slotStopped(index) {
+    var slot = root.reqSlots[index]
+    if (slot.running) return
+    var state = root.reqPool.slots[index]
+    if (!state || !state.busy || state.exitDone) return
+    console.warn("omarchy-plex: request process failed to start")
+    root.slotDone(Pool.startFailed(root.reqPool, index))
+  }
+
   Process {
     id: req0
-    property var cb: null
-    property string body: ""
-    property bool busy: false
-    property bool streamDone: false
-    property bool exitDone: false
     running: false
+    stdinEnabled: true
+    onStarted: root.feedCurlAuth(req0)
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: { req0.body = String(text || ""); req0.streamDone = true; root.slotSettled(req0) }
+      onStreamFinished: root.slotDone(Pool.streamFinished(root.reqPool, 0, text))
     }
-    onExited: { req0.exitDone = true; root.slotSettled(req0) }
+    onExited: root.slotDone(Pool.exited(root.reqPool, 0))
+    onRunningChanged: root.slotStopped(0)
   }
   Process {
     id: req1
-    property var cb: null
-    property string body: ""
-    property bool busy: false
-    property bool streamDone: false
-    property bool exitDone: false
     running: false
+    stdinEnabled: true
+    onStarted: root.feedCurlAuth(req1)
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: { req1.body = String(text || ""); req1.streamDone = true; root.slotSettled(req1) }
+      onStreamFinished: root.slotDone(Pool.streamFinished(root.reqPool, 1, text))
     }
-    onExited: { req1.exitDone = true; root.slotSettled(req1) }
+    onExited: root.slotDone(Pool.exited(root.reqPool, 1))
+    onRunningChanged: root.slotStopped(1)
   }
   Process {
     id: req2
-    property var cb: null
-    property string body: ""
-    property bool busy: false
-    property bool streamDone: false
-    property bool exitDone: false
     running: false
+    stdinEnabled: true
+    onStarted: root.feedCurlAuth(req2)
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: { req2.body = String(text || ""); req2.streamDone = true; root.slotSettled(req2) }
+      onStreamFinished: root.slotDone(Pool.streamFinished(root.reqPool, 2, text))
     }
-    onExited: { req2.exitDone = true; root.slotSettled(req2) }
+    onExited: root.slotDone(Pool.exited(root.reqPool, 2))
+    onRunningChanged: root.slotStopped(2)
   }
   Process {
     id: req3
-    property var cb: null
-    property string body: ""
-    property bool busy: false
-    property bool streamDone: false
-    property bool exitDone: false
     running: false
+    stdinEnabled: true
+    onStarted: root.feedCurlAuth(req3)
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: { req3.body = String(text || ""); req3.streamDone = true; root.slotSettled(req3) }
+      onStreamFinished: root.slotDone(Pool.streamFinished(root.reqPool, 3, text))
     }
-    onExited: { req3.exitDone = true; root.slotSettled(req3) }
+    onExited: root.slotDone(Pool.exited(root.reqPool, 3))
+    onRunningChanged: root.slotStopped(3)
   }
 
   // Artwork is the one documented exception to headers-only auth: QML's Image
@@ -1191,39 +1328,68 @@ Item {
 
   // Resolve the media part, then hand the URL to the backend. Direct play
   // first; universal transcode HLS is the fallback when a codec fails.
+  //
+  // Overlapping picks used to cross wires. The resolve was one shared Process,
+  // and Quickshell does not drop a second launch of a running Process: it
+  // re-runs it with the newest command after the first exits (see posSave). So
+  // picking A then B quickly delivered A's response while the Process already
+  // said B — A's film played under B's ratingKey and title, and every timeline
+  // report and the scrobble went to B. Each pick now captures its key, title
+  // and a generation, rides the request pool, and a response that is no
+  // longer the newest pick is dropped on arrival.
+  property int resolveGen: 0
+
   function playItem(ratingKey, title) {
-    // Drop the old artwork now: a minibar showing the last thing you watched
-    // beside the new title is worse than a placeholder glyph for one second.
-    root.currentThumbPath = ""
-    resolve.ratingKey = ratingKey
-    resolve.title = title
-    resolve.command = ["curl", "-s", "--fail", "--max-time", "10", "--max-filesize", "2097152"]
-      .concat(root.plexHeaders)
-      .concat([root.server + "/library/metadata/" + ratingKey])
-    resolve.running = true
+    root.resolveGen++
+    var gen = root.resolveGen
+    var key = String(ratingKey)
+    var name = String(title === undefined || title === null ? "" : title)
+    root.request("/library/metadata/" + key, function(text) {
+      if (gen !== root.resolveGen) return
+      root.applyMetadata(text, key, name)
+    }, { raw: true, tag: "resolve" })
   }
 
-  function applyMetadata(jsonText) {
+  function applyMetadata(jsonText, ratingKey, title) {
     try {
       var parsed = Model.parsePlaybackMetadata(jsonText)
       if (!parsed) { fail("No playable part found"); return }
       var partKey = parsed.partKey
-      root.currentRatingKey = String(resolve.ratingKey)
+      // Switching items mid-session: the outgoing one gets its "stopped"
+      // report while its key and position are still the current ones.
+      if (root.mode === "playing" && root.currentRatingKey !== ""
+          && root.currentRatingKey !== String(ratingKey))
+        root.sendTimeline("stopped", root.seekDisplayTime, root.reportDuration)
+      root.currentRatingKey = String(ratingKey)
+      root.lastKnownDuration = 0
+      root.directFailed = false
+      root.transcodeFailed = false
+      root.partIndex = 0
+      root.partStartSec = 0
       root.sessionId = "" + Date.now()
-      root.triedTranscode = false
+      // A saved quality tier applies from the first frame. It used to be read
+      // only by the picker: every item started on direct play regardless, the
+      // picker still showed the tier as current, and picking that same tier
+      // again was a no-op (activateQualityRow returns early on "no change"),
+      // so the only way to get the tier you had chosen was to pick another one
+      // and come back. A tier IS a transcode, so start on transcodeUrl() and
+      // mark it tried — a transcode that then fails has nowhere further to go.
+      root.triedTranscode = root.qualityKbps > 0
       root.userStop = false
       root.scrobbled = false
       root.tickCount = 0
+      root.lastTimelineMs = Date.now()
       root.resumeSec = parsed.viewOffsetSec
       root.currentThumbPath = root.metadataThumb(jsonText)
       root.stashStreams(jsonText)
-      var mediaUrl = root.directPlayUrl(partKey)
+      root.mediaParts = parsed.parts && parsed.parts.length > 0
+        ? parsed.parts : [{ key: partKey, duration: 0, id: "" }]
       // Only QtMultimedia needs the token on the URL: its media loader cannot
       // send an HTTP header at all, which is the documented exception the
       // artwork URLs share. Both mpv engines carry it in a header instead, so
       // in native mode this direct-play URL is clean — no token in the string
       // handed to the demuxer, none in any log line that quotes it.
-      playSource(mediaUrl, resolve.title)
+      playSource(title)
     } catch (e) {
       fail("Could not resolve media")
     }
@@ -1271,19 +1437,138 @@ Item {
     }
   }
 
+  // A failure that is not about the playing stream — the NEXT item's metadata
+  // would not resolve, say — must not take a live session down with it. It
+  // used to flip mode to "error" under a film that was still playing: on
+  // QtMultimedia the audio carried on with no UI left to stop it, and on the
+  // native engine the Loader destroyed the player with no "stopped" report.
+  // With a session live this is a banner and nothing else.
   function fail(msg) {
+    if (root.mode === "playing") {
+      root.setStatus(msg, true)
+      return
+    }
     pollTimer.stop()
     root.closeTrackPopup()
     root.mode = "error"
     root.setStatus(msg, true)
   }
 
-  function playSource(url, title) {
-    root.currentTitle = title
+  // The playing stream itself is dead and there is nothing left to try. End
+  // the session properly — engine stopped, "stopped" reported at the position
+  // it died at — and only then show the error.
+  function failPlayback(msg) {
+    var t = root.seekDisplayTime
+    var d = root.reportDuration
+    root.userStop = true
+    root.stopEngine()
+    root.finishPlayback(t, d)
+    root.mode = "error"
+    root.setStatus(msg, true)
+  }
+
+  // Every (re)start of the current item's stream goes through here: first
+  // play, codec fallback, track and quality restarts. `atSec` is where to
+  // start; `transcode` picks the server's transcoder over direct play.
+  function launchStream(transcode, atSec) {
+    root.triedTranscode = transcode === true
     root.playGen++
     root.clearSeekPreview()
+    var at = Math.max(0, Math.round(Number(atSec) || 0))
+    var mpvEngine = root.backend === "mpv" || root.nativeMode
+    var parts = root.mediaParts
+    var multi = parts.length > 1
+    root.edlActive = multi && !root.triedTranscode && mpvEngine && root.edlHeaderSafe()
+    root.chainActive = multi && !root.edlActive
+    var url
+    if (root.chainActive) {
+      var k = root.partAt(at)
+      root.partIndex = k
+      root.partStartSec = root.partStartAt(k)
+      at = Math.max(0, at - root.partStartSec)
+      url = root.triedTranscode ? root.transcodeUrl() : root.directPlayUrl(parts[k].key)
+    } else {
+      root.partIndex = 0
+      root.partStartSec = 0
+      url = root.triedTranscode ? root.transcodeUrl()
+        : (root.edlActive ? root.edlUrl() : root.directPlayUrl(root.currentPartKey))
+    }
+    // Engine-local from here on: resumeSec and streamLocalStart are positions
+    // in the stream the engine is about to open, which in a chain is one part.
+    root.streamLocalStart = at
+    root.resumeSec = at
     if (root.backend === "mpv") startMpv(url)
     else startInternal(url)
+  }
+
+  // Cumulative start of part k in seconds; unknown durations count as 0, which
+  // keeps a chain playable (it just cannot seek across parts by position).
+  function partStartAt(k) {
+    var t = 0
+    for (var i = 0; i < k && i < root.mediaParts.length; i++)
+      t += (Number(root.mediaParts[i].duration) || 0) / 1000
+    return t
+  }
+
+  function partAt(sec) {
+    if (root.partsTotalSec <= 0) return Math.max(0, Math.min(root.partIndex, root.mediaParts.length - 1))
+    var t = 0
+    for (var i = 0; i < root.mediaParts.length; i++) {
+      t += (Number(root.mediaParts[i].duration) || 0) / 1000
+      if (sec < t) return i
+    }
+    return root.mediaParts.length - 1
+  }
+
+  // The token header goes to EVERY segment of an EDL (mpv applies
+  // http-header-fields per stream it opens), so an EDL is only built when every
+  // part is a path the header may go to — see tokenHeaderAllowed. Plex's
+  // /library/parts/ paths always are; anything else falls back to a chain.
+  function edlHeaderSafe() {
+    for (var i = 0; i < root.mediaParts.length; i++)
+      if (!root.tokenHeaderAllowed(root.server + root.mediaParts[i].key)) return false
+    return true
+  }
+
+  // mpv's inline EDL: `edl://` + segments joined by ";", each written as
+  // %<byte length>%<url> so the commas, semicolons and query strings inside a
+  // URL are never parsed as EDL syntax. The length is in BYTES (UTF-8), not
+  // UTF-16 code units. Checked against mpv 0.41 with two local HTTP parts:
+  // duration came out as the sum, --start landed in the stitched timeline, and
+  // the header reached both segment requests.
+  function edlUrl() {
+    var segs = []
+    for (var i = 0; i < root.mediaParts.length; i++) {
+      var u = root.directPlayUrl(root.mediaParts[i].key)
+      segs.push("%" + unescape(encodeURIComponent(u)).length + "%" + u)
+    }
+    return "edl://" + segs.join(";")
+  }
+
+  // Whether the token header may ride this media URL: per tokenHeaderAllowed
+  // for a plain URL, and for an EDL whatever launchStream already proved for
+  // every one of its parts.
+  function mediaHeaderAllowed(url) {
+    var u = String(url || "")
+    if (u.indexOf("edl://") === 0) return root.edlActive && root.edlHeaderSafe()
+    return root.tokenHeaderAllowed(u)
+  }
+
+  // The engine reached the end of what it was playing. In a chain that is the
+  // end of one part, and the next one starts at its first frame.
+  function streamEnded() {
+    if (root.mode !== "playing") return
+    if (root.chainActive && root.partIndex < root.mediaParts.length - 1) {
+      root.launchStream(root.triedTranscode, root.partStartAt(root.partIndex + 1))
+      pollTimer.restart()
+      return
+    }
+    root.finishPlayback()
+  }
+
+  function playSource(title) {
+    root.currentTitle = title
+    root.launchStream(root.triedTranscode, root.resumeSec)
     pollTimer.restart()
     // Starting playback always drops into theater (enterTheater parks focus on
     // keyHost too — the search field hides, so transport keys need a home).
@@ -1317,16 +1602,46 @@ Item {
     // One mpv at a time owns the IPC socket: quit any previous instance,
     // wait out the socket release, then launch.
     root.mode = "playing"
+    // The previous file's numbers must not survive into this one: the first
+    // poll tick would otherwise divide episode 1's position by episode 1's
+    // duration on behalf of episode 2, and scrobble it if that was past 90%.
+    // dispTime falls back to streamLocalStart until a duration arrives.
+    root.mpvTime = 0
+    root.mpvDuration = 0
+    root.mpvPaused = false
+    // Without mpv the launch below would fail to start, and a Process that
+    // fails to start emits no `exited` — the session sat in mode "playing"
+    // forever with nothing to stop. Quickshell would also log the whole argv,
+    // token header included. Say what is wrong instead.
+    if (!root.mpvInstalled) {
+      root.failPlayback("mpv is not installed — install it, or switch the backend to Internal in Settings")
+      return
+    }
     mpvQuit.running = true
     root.pendingMpvUrl = url
+    mpvRelay.gen = root.playGen
     mpvRelay.restart()
+  }
+
+  // Probed once at load; assumed present until the probe says otherwise.
+  property bool mpvInstalled: true
+  Process {
+    id: mpvProbe
+    running: true
+    command: ["sh", "-c", Io.mpvProbeScript]
+    onExited: function(exitCode) { root.mpvInstalled = exitCode === 0 }
   }
 
   Timer {
     id: mpvRelay
     interval: 300
     repeat: false
+    // The playGen this launch belongs to. A stop() — or a newer item — inside
+    // the 300 ms socket-release wait used to be followed by the launch anyway,
+    // opening an mpv window for a session that had already ended.
+    property int gen: 0
     onTriggered: {
+      if (root.mode !== "playing" || mpvRelay.gen !== root.playGen || root.backend !== "mpv") return
       // The old process can outlive its socket quit for more than 300 ms;
       // defer instead of dropping the replacement launch.
       if (mpvProc.running) { restart(); return }
@@ -1348,13 +1663,14 @@ Item {
         "--autofit=" + root.videoWidth + "x" + root.videoHeight,
         "--geometry=-" + (root.marginRight + 14) + "-" + (root.marginBottom + 130)]
       // Header only toward Plex's own media paths — see tokenHeaderAllowed.
-      if (root.tokenHeaderAllowed(root.pendingMpvUrl))
+      if (root.mediaHeaderAllowed(root.pendingMpvUrl))
         args.push("--http-header-fields=X-Plex-Token: " + root.token)
       args.push(root.pendingMpvUrl)
       // Assigned whole: pushing onto mpvProc.command would edit a copy.
       mpvProc.command = args
       root.resumeSec = 0
       mpvProc.gen = root.playGen
+      mpvProc.exitSeen = false
       mpvProc.running = true
     }
   }
@@ -1362,14 +1678,33 @@ Item {
   Process {
     id: mpvProc
     property int gen: 0
+    property bool exitSeen: true
     running: false
+    // A launch that never started (mpv vanished after the probe) drops
+    // `running` without an `exited`; without this the session stays
+    // "playing" with nothing behind it.
+    onRunningChanged: {
+      if (mpvProc.running || mpvProc.exitSeen) return
+      mpvProc.exitSeen = true
+      if (mpvProc.gen !== root.playGen || root.mode !== "playing" || root.backend !== "mpv") return
+      root.failPlayback("mpv failed to start")
+    }
     onExited: function(exitCode) {
+      mpvProc.exitSeen = true
       // A newer playSource supersedes this exit; ignore it.
       if (mpvProc.gen !== root.playGen || root.backend !== "mpv") return
       if (root.mode !== "playing") return
-      pollTimer.stop()
+      // No pollTimer.stop() here: both routes below keep or end the session
+      // themselves (finishPlayback stops it), and the transcode fallback used
+      // to inherit a stopped timer — a whole transcoded film with no timeline
+      // reports and no scrobble.
       if (root.userStop || exitCode === 0) {
-        finishPlayback()
+        // mpv exits 0 both at EOF and when its window is closed, so in a chain
+        // only an exit within a few seconds of the part's end means "next part".
+        var partEnd = root.partStartAt(root.partIndex + 1)
+        if (!root.userStop && root.chainActive && root.partsTotalSec > 0
+            && root.dispTime >= partEnd - 10) root.streamEnded()
+        else finishPlayback()
         return
       }
       // mpv choked on the codec — fall back to server transcode.
@@ -1379,24 +1714,50 @@ Item {
   Process {
     id: mpvQuit
     running: false
-    command: ["sh", "-c",
-      "test -S '" + root.ipcSock + "' && echo '{\"command\":[\"quit\"]}' | socat - UNIX-CONNECT:'" + root.ipcSock + "' >/dev/null 2>&1 || true"]
+    command: ["sh", "-c", Io.mpvQuitScript, "sh", root.ipcSock]
   }
 
+  // A FIFO in front of the one mpvCtl Process. Quickshell re-runs a busy
+  // Process only once, with whatever command is newest when it exits, so
+  // every command sent while one socat was in flight but the last was
+  // silently lost: a pause pressed during a poll tick, a seek during a volume
+  // push. Commands now queue, and everything queued goes out in one socat run
+  // (mpv's IPC takes newline-separated commands and answers each in order).
+  // Payloads are fixed JSON templates plus numbers only, and travel as $2.
+  property var mpvQueue: []
+  readonly property int mpvQueueLimit: 64
+
   function mpvSend(payload) {
-    // Command fully built BEFORE running (Quickshell ignores later writes).
-    // Payloads here are fixed JSON templates plus numbers only.
-    mpvCtl.command = ["sh", "-c",
-      "echo '" + payload.replace(/'/g, "") + "' | socat - UNIX-CONNECT:'" + root.ipcSock + "'"]
+    var q = root.mpvQueue.slice()
+    q.push(String(payload))
+    // A dead socket can leave socat failing fast; never let polls pile up.
+    while (q.length > root.mpvQueueLimit) q.shift()
+    root.mpvQueue = q
+    root.pumpMpv()
+  }
+
+  function pumpMpv() {
+    if (mpvCtl.running || root.mpvQueue.length === 0) return
+    var batch = root.mpvQueue.join("\n")
+    root.mpvQueue = []
+    mpvCtl.gen = root.playGen
+    mpvCtl.command = ["sh", "-c", Io.mpvSendScript, "sh", root.ipcSock, batch]
     mpvCtl.running = true
   }
 
   Process {
     id: mpvCtl
+    // The playGen the in-flight batch was sent under: replies about the
+    // previous file must not repopulate the numbers startMpv just zeroed.
+    property int gen: 0
     running: false
+    // Fires after `exited` on a normal finish and alone on a start failure,
+    // so it is the one place the queue can always move on from.
+    onRunningChanged: if (!mpvCtl.running) Qt.callLater(root.pumpMpv)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (mpvCtl.gen !== root.playGen) return
         // Newline-delimited JSON-IPC: one reply per line, request_id tags
         // which property each numeric reply describes.
         var lines = String(text || "").split("\n")
@@ -1417,7 +1778,7 @@ Item {
   // reports a timeline update; crossing 90% scrobbles once.
   Timer {
     id: pollTimer
-    interval: 1000
+    interval: root.opened ? 1000 : 3000
     repeat: true
     triggeredOnStart: false
     onTriggered: {
@@ -1432,11 +1793,17 @@ Item {
         mpvSend('{"command":["get_property","time-pos"],"request_id":0}\n{"command":["get_property","duration"],"request_id":1}\n{"command":["get_property","pause"],"request_id":2}')
       }
       if (root.dispDuration > 0 && !root.scrobbled
+          && (!root.chainActive || root.partsTotalSec > 0
+            || root.partIndex === root.mediaParts.length - 1)
           && root.dispTime / root.dispDuration >= 0.9) {
         root.scrobbled = true
         sendScrobble()
       }
-      if (root.tickCount % 10 === 0) {
+      // By the clock rather than a tick count, so the slower closed-panel
+      // cadence still reports every ten seconds or so.
+      var now = Date.now()
+      if (now - root.lastTimelineMs >= 9500) {
+        root.lastTimelineMs = now
         var paused = root.backend === "mpv"
           ? root.mpvPaused
           : (root.nativeMode ? root.isPaused
@@ -1536,8 +1903,41 @@ Item {
   // exactly and snapping it would only make 95 and 105 unreachable.
   function setVolumeSnapped(pct) { root.setVolumePct(root.snapVolumePct(pct)) }
 
-  function nudgeVolumeWheel(up) {
-    root.setVolumeSnapped(root.volumePct + (up ? root.volumeWheelStep : -root.volumeWheelStep))
+  // Wheel input in, volume steps out. Every wheel handler passes its raw
+  // angleDelta.y here.
+  //
+  // It used to be "y > 0 ? up : down", once per event. Two things wrong with
+  // that: a purely horizontal scroll (y === 0, a tilt wheel or a sideways
+  // touchpad swipe) counted as DOWN; and a touchpad, which reports a swipe as
+  // a stream of small deltas rather than 120-unit notches, stepped 10% on
+  // every one of them — a casual two-finger flick took the volume 60-100%.
+  // Now: y = 0 is ignored, and deltas accumulate until they make up a whole
+  // notch (120 units, Qt's definition of one wheel click). A mouse wheel
+  // still steps exactly once per click.
+  property real wheelVolumeAccum: 0
+
+  function wheelVolume(angleDeltaY) {
+    var dy = Number(angleDeltaY) || 0
+    if (dy === 0) return
+    // A reversal starts a fresh notch rather than first paying back the
+    // partial one in the other direction.
+    if (root.wheelVolumeAccum !== 0 && (dy > 0) !== (root.wheelVolumeAccum > 0))
+      root.wheelVolumeAccum = 0
+    root.wheelVolumeAccum += dy
+    wheelVolumeIdle.restart()
+    var steps = root.wheelVolumeAccum > 0
+      ? Math.floor(root.wheelVolumeAccum / 120) : Math.ceil(root.wheelVolumeAccum / 120)
+    if (steps === 0) return
+    root.wheelVolumeAccum -= steps * 120
+    root.setVolumeSnapped(root.volumePct + steps * root.volumeWheelStep)
+  }
+
+  // A partial notch left over from one gesture should not tip the next one.
+  Timer {
+    id: wheelVolumeIdle
+    interval: 400
+    repeat: false
+    onTriggered: root.wheelVolumeAccum = 0
   }
 
   // ---- the volume popup ----
@@ -1585,6 +1985,11 @@ Item {
   }
 
   function releaseVolumePopup() { volumePopupGrace.restart() }
+
+  function releaseVolumePopupNow() {
+    volumePopupGrace.stop()
+    root.volumePopupHeld = false
+  }
 
   // ---- the 100–200 zone: PipeWire per-stream boost ----
   //
@@ -1693,22 +2098,40 @@ Item {
   }
 
   function seekRel(seconds) {
+    // A chain has to know which part the target lands in, so it seeks by
+    // absolute film time instead.
+    if (root.chainActive) { root.seekToSec(root.dispTime + Number(seconds)); return }
     if (root.backend === "mpv") mpvSend('{"command":["seek",' + seconds + ']}')
     else if (root.nativeMode) { if (root.nativeVideo) root.nativeVideo.seekRelative(seconds) }
     else player.position = Math.max(0, player.position + seconds * 1000)
   }
 
   function seekAbs(fraction) {
+    // The callers all speak fractions because that is what a slider produces.
+    if (root.dispDuration <= 0) return
+    root.seekToSec(fraction * root.dispDuration)
+  }
+
+  // Film time in, engine seek out. Within the playing part (or a single
+  // stream) it is a plain seek; into another part of a chain it is a restart
+  // of that part at the right offset, through the same launchStream as
+  // everything else.
+  function seekToSec(sec) {
+    var target = Math.max(0, Number(sec) || 0)
+    if (root.dispDuration > 0) target = Math.min(target, root.dispDuration)
+    if (root.chainActive && root.partsTotalSec > 0) {
+      if (root.partAt(target) !== root.partIndex) {
+        root.launchStream(root.triedTranscode, target)
+        return
+      }
+      target -= root.partStartSec
+    }
     if (root.backend === "mpv") {
-      if (root.dispDuration <= 0) return
-      mpvSend('{"command":["set_property","time-pos",' + (fraction * root.dispDuration).toFixed(1) + ']}')
+      mpvSend('{"command":["set_property","time-pos",' + target.toFixed(1) + ']}')
     } else if (root.nativeMode) {
-      // The native API takes seconds, not a fraction — the callers all speak
-      // fractions because that is what a slider produces.
-      if (root.dispDuration <= 0 || !root.nativeVideo) return
-      root.nativeVideo.seekAbsolute(fraction * root.dispDuration)
+      if (root.nativeVideo) root.nativeVideo.seekAbsolute(target)
     } else if (player.duration > 0) {
-      player.position = Math.max(0, Math.min(player.duration, fraction * player.duration))
+      player.position = Math.max(0, Math.min(player.duration, target * 1000))
     }
   }
 
@@ -1724,6 +2147,10 @@ Item {
   property string seekPreviewKey: ""
   readonly property bool seekPending: root.seekPreview >= 0
   readonly property real seekDisplayTime: root.seekPending ? root.seekPreview : root.dispTime
+  // The same, in the live stream's own time: what a native surface handoff
+  // reloads the SAME url at. Differs from seekDisplayTime only in a chain.
+  readonly property real engineSeekTime: Math.max(0,
+    root.seekDisplayTime - (root.chainActive ? root.partStartSec : 0))
   readonly property real seekAckTolerance: 2
   readonly property int seekAckMinMs: 300
   readonly property int seekAckTimeoutMs: 8000
@@ -1800,7 +2227,13 @@ Item {
     else theaterHideTimer.stop()
   }
 
-  onInTheaterChanged: root.pokeTheaterControls()
+  onInTheaterChanged: {
+    // Leaving theater destroys the strip, popup included, possibly under the
+    // pointer — its HoverHandler never reports the exit, and the hold would
+    // pin the popup the next time theater opened.
+    if (!root.inTheater) root.releaseVolumePopupNow()
+    root.pokeTheaterControls()
+  }
   onIsPausedChanged: {
     if (root.inTheater) root.pokeTheaterControls()
     root.syncPlayerState()
@@ -2097,8 +2530,15 @@ Item {
     // started later is muxed from it. Best-effort by construction — there is no
     // cheap readback to confirm the mux order matched, so a file whose
     // container order disagreed with Plex's would pick the neighbouring track.
+    //
+    // Except during a transcode, on these engines exactly as on Qt below: the
+    // server muxed ONE audio track (and burned or dropped subtitles), so an
+    // ordinal counted off the original file points at nothing. A film with
+    // four audio tracks transcoding with one: picking the third sets aid=3 on
+    // a stream that only has aid=1, and mpv answers with silence. A server
+    // restart muxed from the new selection is the only real answer.
     if (root.mpvMode || root.nativeMode) {
-      if (needsServer) { root.putTrackSelection(true); return }
+      if (needsServer || root.triedTranscode) { root.putTrackSelection(true); return }
       if (kind === "audio") root.setMpvAudioTrack(Number(row.ordinal) + 1)
       else root.setMpvSubtitleTrack(row.none === true ? -1 : Number(row.ordinal) + 1)
       root.putTrackSelection(false)
@@ -2118,12 +2558,14 @@ Item {
   // the new stream is built from the old tracks. So the restart hangs off the
   // PUT's exit rather than racing it.
   property bool restartAfterPut: false
-  // Queue of exactly one. Quickshell latches a Process's argv at start and
-  // silently ignores writes to a running one, so a second pick landing while
-  // the first PUT is still in flight would vanish — and the symptom would be
-  // "the subtitle didn't change", with the server quietly holding the older
-  // choice. Only the newest selection is worth sending, so a single slot is
-  // enough; the payload is rebuilt from current state when it runs.
+  // Queue of exactly one. Quickshell would re-run a still-running Process with
+  // its newest command once the current run exits (see posSave), so the PUT
+  // itself would not be lost — but restartAfterPut would: a second pick
+  // landing mid-flight would rewrite the flag the FIRST run's onExited reads,
+  // and the restart would fire after the old selection reached the server
+  // instead of the new one. Queueing here keeps flag and payload paired. Only
+  // the newest selection is worth sending, so a single slot is enough; the
+  // payload is rebuilt from current state when it runs.
   property bool trackPutQueued: false
   property bool trackPutQueuedRestart: false
 
@@ -2152,7 +2594,10 @@ Item {
   Process {
     id: trackPut
     running: false
+    stdinEnabled: true
+    onStarted: root.feedCurlAuth(trackPut)
     onExited: {
+      trackPut.stdinEnabled = true
       var restart = root.restartAfterPut
       root.restartAfterPut = false
       if (root.trackPutQueued) {
@@ -2174,13 +2619,7 @@ Item {
   // the new source reports LoadedMedia.
   function beginTrackRestart() {
     if (root.currentRatingKey === "" || root.mode !== "playing") return
-    root.resumeSec = Math.max(0, Math.round(root.seekDisplayTime))
-    root.triedTranscode = true
-    root.playGen++
-    root.clearSeekPreview()
-    var url = root.transcodeUrl()
-    if (root.backend === "mpv") root.startMpv(url)
-    else root.startInternal(url)
+    root.launchStream(true, root.seekDisplayTime)
   }
 
   // ---- stream quality ----
@@ -2316,15 +2755,9 @@ Item {
       return
     }
     root.setStatus("Switching to direct play — restarting the stream…", false)
-    root.resumeSec = Math.max(0, Math.round(root.seekDisplayTime))
-    root.triedTranscode = false
-    root.playGen++
-    root.clearSeekPreview()
-    // Same URL construction as applyMetadata (one helper, so the two can
-    // never drift again — they did once, over extras' `?`).
-    var url = root.directPlayUrl(root.currentPartKey)
-    if (root.backend === "mpv") root.startMpv(url)
-    else root.startInternal(url)
+    // Same URL construction as first play (launchStream, one helper, so the
+    // two can never drift again — they did once, over extras' `?`).
+    root.launchStream(false, root.seekDisplayTime)
   }
 
   // ---- the picker itself ----
@@ -2412,8 +2845,15 @@ Item {
     return true
   }
 
-  function finishPlayback() {
-    sendTimeline("stopped")
+  // `t`/`d` are the position and duration to report, captured by the caller
+  // BEFORE it tore the engine down. Without them the report reads the engine
+  // after the fact: on QtMultimedia, stop() runs player.stop() and clears the
+  // source first, so every Stop button press told the server "stopped at 0 of
+  // 0" and the resume point was lost.
+  function finishPlayback(t, d) {
+    var at = t === undefined ? root.seekDisplayTime : t
+    var len = d === undefined ? root.reportDuration : d
+    sendTimeline("stopped", at, len)
     pollTimer.stop()
     // A picker left open by the ended session would otherwise keep first
     // refusal on every key while the user is back in browse.
@@ -2428,21 +2868,27 @@ Item {
   }
 
   function stop() {
+    var t = root.seekDisplayTime
+    var d = root.reportDuration
     root.userStop = true
+    root.stopEngine()
+    finishPlayback(t, d)
+  }
+
+  function stopEngine() {
     if (root.backend === "mpv") {
+      mpvRelay.stop()
       mpvQuit.running = true
-      finishPlayback()
     } else if (root.nativeMode) {
       // mpv's end-file reason for this is "stop", which mpvvideo.cpp ignores
       // deliberately: a user-initiated stop is neither an EOF nor a failure, so
       // it cannot trip the transcode fallback on the way out. The core stays
       // idle and reusable for the next item.
       if (root.nativeVideo) root.nativeVideo.stop()
-      finishPlayback()
     } else {
+      resumeRetry.stop()
       player.stop()
       player.source = ""
-      finishPlayback()
     }
   }
 
@@ -2471,7 +2917,21 @@ Item {
   // mpv_render_context_render → pthread_mutex_lock, SIGSEGV, taking the whole
   // shell with it. So each surface owns its own item and a surface switch is a
   // deliberate reload-at-position handoff.
-  readonly property bool nativeReady: nativeProbe.status === Loader.Ready
+  //
+  // The probe proves the module LOADS, not that it can draw: under
+  // QSG_RHI_BACKEND=vulkan (which omarchy issue #7268 steers some NVIDIA users
+  // toward) it loads fine and renders a black rectangle over playing audio.
+  // So native also needs the scene graph to be OpenGL. The environment answers
+  // that at startup; GraphicsInfo.api answers it for certain once the window
+  // has been exposed (it reads Unknown before), and wins when it has.
+  readonly property string rhiBackendEnv: String(Quickshell.env("QSG_RHI_BACKEND") || "").toLowerCase()
+  readonly property bool envAllowsGl: (root.rhiBackendEnv === "" || root.rhiBackendEnv === "opengl"
+      || root.rhiBackendEnv === "gl")
+    && String(Quickshell.env("QT_QUICK_BACKEND") || "").toLowerCase() !== "software"
+  property int sceneGraphicsApi: GraphicsInfo.Unknown
+  readonly property bool sceneIsGl: root.sceneGraphicsApi === GraphicsInfo.Unknown
+    ? root.envAllowsGl : root.sceneGraphicsApi === GraphicsInfo.OpenGL
+  readonly property bool nativeReady: nativeProbe.status === Loader.Ready && root.sceneIsGl
   readonly property var nativeVideo: root.windowed ? theaterNativeLoader.item : pipNativeLoader.item
   readonly property bool nativeMode: root.backend === "internal" && root.nativeReady
 
@@ -2486,6 +2946,16 @@ Item {
   // fresh play (from startNative racing its own Loader activation) or a
   // surface handoff (position and pause state captured before the flip).
   property var pendingNativeArm: null
+  // Which PiP screen the native player was last armed on, and when — so the
+  // surface's own first-map screenChanged does not reload a fresh player.
+  property var nativeArmScreen: null
+  property double nativeArmAt: 0
+  // True once the native item has reported fileLoaded for its latest load.
+  property bool nativeLoaded: false
+  // QtMultimedia's equivalent: its position and duration outlive a source
+  // change until the new media loads (a failed load kept the previous film's
+  // 20-minute duration in the harness), so they only count once it has.
+  property bool qtLoaded: false
 
   // Reassigning window.screen recreates the SURFACE under the same item
   // (Quickshell hides, moves, shows — and a hidden layer surface is deleted),
@@ -2505,8 +2975,19 @@ Item {
     // duration yet has no position worth capturing.
     if (root.pendingNativeArm !== null) return
     var v = root.nativeVideo
-    if (!v || !(v.duration > 0)) return
-    root.pendingNativeArm = { pos: root.seekDisplayTime, paused: root.isPaused }
+    if (!v) return
+    // The first-map signal again, after the arm was consumed: the screen is
+    // the one this player was just armed on, moments ago. Reloading would be
+    // harmless but wasted. A real move is to a DIFFERENT screen, and a
+    // re-show (unlock) comes long after the arm, so both still bounce.
+    if (root.sameScreen(window.screen, root.nativeArmScreen)
+        && Date.now() - root.nativeArmAt < 1000) return
+    // Deliberately NOT skipped while the player is still loading (duration
+    // 0). That guard used to be here, and a second move inside a load — `n`
+    // pressed twice on three monitors — left the player on a dead surface:
+    // black PiP, no way back. While loading, engineSeekTime is the arm's own
+    // start position, which is exactly what the replacement should load.
+    root.pendingNativeArm = root.handoffArm()
     v.stop()
     root.pipPlayerBounce = true
     Qt.callLater(function() { root.pipPlayerBounce = false })
@@ -2517,10 +2998,19 @@ Item {
     var arm = root.pendingNativeArm
     if (!v || !arm || root.currentMediaUrl === "") return
     root.pendingNativeArm = null
+    // Until this load reports fileLoaded, the item's timePos/duration still
+    // describe whatever it played last (the C++ drops mpv's "unavailable"
+    // updates rather than publishing zeros), so the panel reads the arm's own
+    // start position instead — see engineTime.
+    root.nativeLoaded = false
+    root.streamLocalStart = Math.max(0, Number(arm.pos) || 0)
+    root.nativeArmScreen = root.windowed ? null : window.screen
+    root.nativeArmAt = Date.now()
     // Set on EVERY load, never left over: the property persists in the core,
     // so an extra played after a film would otherwise inherit the header.
-    v.httpHeaders = root.tokenHeaderAllowed(root.currentMediaUrl) ? ["X-Plex-Token: " + root.token] : []
+    v.httpHeaders = root.mediaHeaderAllowed(root.currentMediaUrl) ? ["X-Plex-Token: " + root.token] : []
     v.volume = root.volumePct
+    v.muted = arm.muted === true
     v.paused = false
     v.loadUrl(root.currentMediaUrl, Math.max(0, Number(arm.pos) || 0))
     // mpv applies a pause set during load before the first frame, so a
@@ -2533,7 +3023,7 @@ Item {
     // resume point rides loadUrl as mpv's `start` property, applied before the
     // first frame, so the resumeRetry ladder below has nothing to do here.
     root.currentMediaUrl = url
-    root.pendingNativeArm = { pos: root.resumeSec, paused: false }
+    root.pendingNativeArm = { pos: root.resumeSec, paused: false, muted: root.audioMuted }
     root.resumeSec = 0
     root.setStatus("", false)
     // Setting mode activates this surface's Loader; if the item already
@@ -2550,8 +3040,11 @@ Item {
     target: root.nativeVideo
     enabled: root.nativeMode
 
-    function onFileLoaded() { root.applyNativeSelectedTracks() }
-    function onEndReached() { if (root.mode === "playing") root.finishPlayback() }
+    function onFileLoaded() {
+      root.nativeLoaded = true
+      root.applyNativeSelectedTracks()
+    }
+    function onEndReached() { root.streamEnded() }
     // Same entry point as every other engine's failure, so the direct-play →
     // server-transcode ladder is shared rather than reimplemented.
     function onPlaybackFailed(reason) { if (root.mode === "playing") root.playbackFailed() }
@@ -2563,6 +3056,7 @@ Item {
     // module is there, "internal" plays through libmpv and QtMultimedia is
     // never touched.
     if (root.nativeMode) { root.startNative(url); return }
+    root.qtLoaded = false
     player.stop()
     if (typeof videoOut !== "undefined" && videoOut !== null) player.videoOutput = videoOut
     player.source = url
@@ -2600,11 +3094,14 @@ Item {
       volume: root.audioVolume
     }
     onMediaStatusChanged: function(status) {
+      if (status === MediaPlayer.LoadedMedia || status === MediaPlayer.BufferingMedia
+          || status === MediaPlayer.BufferedMedia)
+        root.qtLoaded = true
       if (status === MediaPlayer.LoadedMedia && root.resumeSec > 0) {
         player.position = root.resumeSec * 1000
         resumeRetry.restart()
       }
-      if (status === MediaPlayer.EndOfMedia) finishPlayback()
+      if (status === MediaPlayer.EndOfMedia) root.streamEnded()
       else if (status === MediaPlayer.InvalidMedia) playbackFailed()
     }
     onErrorOccurred: function(error) {
@@ -2628,7 +3125,7 @@ Item {
     //    identifier registered) — so uniquely here, it stays out.
     return root.server + "/video/:/transcode/universal/start.m3u8"
       + "?path=" + encodeURIComponent("/library/metadata/" + root.currentRatingKey)
-      + "&mediaIndex=0&partIndex=0&protocol=hls&fastSeek=1"
+      + "&mediaIndex=0&partIndex=" + root.partIndex + "&protocol=hls&fastSeek=1"
       + "&directPlay=0&directStream=0&hasMDE=1"
       + "&videoQuality=" + root.transcodeVideoQuality
       + "&maxVideoBitrate=" + root.transcodeBitrateKbps
@@ -2642,29 +3139,60 @@ Item {
   }
 
   function playbackFailed() {
-    var now = Date.now()
-    if (now - root.lastFailMs < 250) return
-    root.lastFailMs = now
-    if (root.triedTranscode || root.currentRatingKey === "") {
-      fail("Direct play and transcode both failed")
-      return
-    }
-    root.triedTranscode = true
-    root.setStatus("Direct play failed — transcoding…", false)
-    var url = transcodeUrl()
-    root.playGen++
-    if (root.backend === "mpv") startMpv(url)
-    else startInternal(url)
+    if (root.failedGen === root.playGen) return
+    var gen = root.playGen
+    root.failedGen = gen
+    // Act on it a tick later. QtMultimedia reports one bad source through
+    // TWO signals emitted back to back (mediaStatus InvalidMedia, then
+    // errorOccurred), and swapping the source from inside the first would
+    // make the second land on the NEW stream's generation and fail it before
+    // it ever opened. Seen in the harness: a 400 from the transcoder skipped
+    // the direct-play retry entirely. Deferred, both signals hit the dedupe
+    // above; and a stop or a new item in between makes the retry moot.
+    Qt.callLater(function() {
+      if (gen !== root.playGen || root.mode !== "playing") return
+      root.handlePlaybackFailure()
+    })
   }
 
-  function sendTimeline(state) {
+  function handlePlaybackFailure() {
+    if (root.currentRatingKey === "") {
+      root.failPlayback("Playback failed")
+      return
+    }
+    // Rejoin where it died. A stream that failed mid-film used to restart the
+    // transcode at 0:00; one that failed during its load reports its own start
+    // position (streamLocalStart), so a resume point is never lost either.
+    var at = Math.max(root.streamLocalStart, Math.round(root.seekDisplayTime))
+    if (root.triedTranscode) root.transcodeFailed = true
+    else root.directFailed = true
+    if (root.directFailed && root.transcodeFailed) {
+      root.failPlayback("Direct play and transcode both failed")
+      return
+    }
+    // The ladder used to run one way only, direct → transcode. An item that
+    // STARTS on a quality tier begins on the transcoder, so a tier the server
+    // cannot transcode needs the other direction too, or the film would be
+    // unplayable with the quality picker (the way back to Original) gone.
+    if (root.triedTranscode) {
+      root.setStatus("Transcode failed — trying direct play…", false)
+      root.launchStream(false, at)
+    } else {
+      root.setStatus("Direct play failed — transcoding…", false)
+      root.launchStream(true, at)
+    }
+  }
+
+  function sendTimeline(state, atSec, durSec) {
     if (root.currentRatingKey === "") return
+    var at = atSec === undefined ? root.seekDisplayTime : Number(atSec) || 0
+    var len = durSec === undefined ? root.reportDuration : Number(durSec) || 0
     timelinePost.command = ["curl", "-s", "--fail", "--max-time", "5", "-o", "/dev/null"]
       .concat(root.plexHeaders)
         .concat([root.server + "/:/timeline?ratingKey=" + encodeURIComponent(root.currentRatingKey)
         + "&key=" + encodeURIComponent("/library/metadata/" + root.currentRatingKey)
-        + "&duration=" + Math.round(root.dispDuration * 1000)
-        + "&time=" + Math.round(root.dispTime * 1000)
+        + "&duration=" + Math.round(len * 1000)
+        + "&time=" + Math.round(at * 1000)
         + "&state=" + state
         + "&hasMDE=1&identifier=com.plexapp.plugins.library"
         + "&X-Plex-Client-Identifier=" + root.pluginId
@@ -2681,27 +3209,26 @@ Item {
     scrobblePost.running = true
   }
 
+  // Both of these can be asked to run while a previous post is still in
+  // flight (a stop right after a 10 s tick). Quickshell then re-runs the
+  // Process with the latest command as soon as the first exits, so stdin has
+  // to be re-enabled in onExited for that queued run to get its config too.
   Process {
     id: timelinePost
     running: false
+    stdinEnabled: true
+    onStarted: root.feedCurlAuth(timelinePost)
+    onExited: timelinePost.stdinEnabled = true
   }
 
   Process {
     id: scrobblePost
     running: false
+    stdinEnabled: true
+    onStarted: root.feedCurlAuth(scrobblePost)
+    onExited: scrobblePost.stdinEnabled = true
   }
 
-  Process {
-    id: resolve
-    property string ratingKey: ""
-    property string title: ""
-    running: false
-    onStarted: root.currentTitle = title
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.applyMetadata(String(text || ""))
-    }
-  }
 
   // ---- display helpers ----
   //
@@ -2711,14 +3238,36 @@ Item {
   // mpv's own event stream through NOTIFY signals rather than the external
   // backend's 1 s socat poll, so they update at mpv's rate for free.
   readonly property bool mpvMode: root.backend === "mpv" && root.mode === "playing"
-  readonly property real dispTime: root.mpvMode
-    ? root.mpvTime
-    : (root.nativeMode ? (root.nativeVideo ? root.nativeVideo.timePos : 0)
-      : player.position / 1000)
-  readonly property real dispDuration: root.mpvMode
+  //
+  // A position only counts once the engine has a duration for THIS stream.
+  // Before that every engine is either reporting nothing (0, which a stop
+  // would send as the resume point) or still reporting the previous file
+  // (native keeps it; external mpv kept it until startMpv zeroed it), so the
+  // reading is the stream's own requested start. That also covers QtMultimedia
+  // between LoadedMedia and the resume seek actually landing (resumeRetry).
+  //
+  // engineTime/engineDuration are the live stream's own numbers; dispTime and
+  // dispDuration are the FILM's, which differ only in a multi-part chain.
+  readonly property real engineTime: root.mpvMode
+    ? (root.mpvDuration > 0 ? root.mpvTime : root.streamLocalStart)
+    : (root.nativeMode
+      ? (root.nativeVideo && root.nativeLoaded ? root.nativeVideo.timePos : root.streamLocalStart)
+      : (!root.qtLoaded || player.duration <= 0 || resumeRetry.running
+        ? root.streamLocalStart : player.position / 1000))
+  readonly property real engineDuration: root.mpvMode
     ? root.mpvDuration
-    : (root.nativeMode ? (root.nativeVideo ? root.nativeVideo.duration : 0)
-      : player.duration / 1000)
+    : (root.nativeMode ? (root.nativeVideo && root.nativeLoaded ? root.nativeVideo.duration : 0)
+      : (root.qtLoaded ? player.duration / 1000 : 0))
+  readonly property real dispTime: root.engineTime + (root.chainActive ? root.partStartSec : 0)
+  // A chain with unknown part durations has no film-length total; it reports
+  // the part's, and the scrobble check below refuses to fire before the last
+  // part, so 90% of disc one can never mark the film watched.
+  readonly property real dispDuration: root.chainActive && root.partsTotalSec > 0
+    ? root.partsTotalSec : root.engineDuration
+  // What timeline reports carry: the live duration, or the last one seen for
+  // this item while a reload has none yet.
+  readonly property real reportDuration: root.dispDuration > 0 ? root.dispDuration : root.lastKnownDuration
+  onDispDurationChanged: if (root.dispDuration > 0) root.lastKnownDuration = root.dispDuration
   readonly property bool isPaused: root.mpvMode
     ? root.mpvPaused
     : (root.nativeMode ? (root.nativeVideo ? root.nativeVideo.paused : true)
@@ -3287,7 +3836,7 @@ Item {
           // the same proven wheel path as the theater's video surface.
           onWheel: function(wheel) {
             root.pokeTheaterControls()
-            root.nudgeVolumeWheel(wheel.angleDelta.y > 0)
+            root.wheelVolume(wheel.angleDelta.y)
           }
           // A high-rate mouse delivers position events far faster than the
           // display swaps frames, and every margin write re-lays-out the card
@@ -3381,9 +3930,7 @@ Item {
             // frame. The release below persists the settled width once.
             // Cap at the surface, not a constant — any fixed pixel ceiling that
             // suits a laptop reads as "not very big" on a 4K monitor.
-            root.videoWidth = Math.max(280, Math.min(
-              (window.screen ? window.screen.width : 3800) - Style.space(28),
-              startW + (sx - gx)))
+            root.pipWidthPref = Math.max(280, Math.min(root.pipMaxWidth, startW + (sx - gx)))
           }
           onReleased: root.saveWidth()
         }
@@ -3411,10 +3958,8 @@ Item {
             var gx = mapToItem(null, mouse.x, mouse.y).x
             // Dragging RIGHT (gx > sx) grows the card. Same clamp as the left
             // grip; no save per frame, for the same reason.
-            var next = Math.max(280, Math.min(
-              (window.screen ? window.screen.width : 3800) - Style.space(28),
-              startW + (gx - sx)))
-            root.videoWidth = next
+            var next = Math.max(280, Math.min(root.pipMaxWidth, startW + (gx - sx)))
+            root.pipWidthPref = next
             // Give back exactly the width that was granted, so the right edge
             // lands under the pointer and the left edge does not move. Assigning
             // videoWidth above already ran clampMargins against the OLD margin;
@@ -3542,7 +4087,7 @@ Item {
               // Explicit, as in the Spotify plugin: the default acceptedDevices
               // is Mouse alone, which drops touchpad scrolling entirely.
               acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-              onWheel: function(event) { root.nudgeVolumeWheel(event.angleDelta.y > 0) }
+              onWheel: function(event) { root.wheelVolume(event.angleDelta.y) }
             }
           }
 
@@ -3731,6 +4276,12 @@ Item {
       Item {
         id: theaterSlot
         anchors.fill: parent
+
+        // Which RHI the window's scene graph actually runs on; see nativeReady.
+        // Latched once known, so a window that is hidden again (Unknown) does
+        // not flip the engine choice back.
+        readonly property int graphicsApi: GraphicsInfo.api
+        onGraphicsApiChanged: if (graphicsApi !== GraphicsInfo.Unknown) root.sceneGraphicsApi = graphicsApi
 
         // This surface's OWN native player — never reparented (the crash
         // note at the native block is the whole story). Created only while
@@ -4242,7 +4793,7 @@ Item {
 
             WheelHandler {
               acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-              onWheel: function(event) { root.nudgeVolumeWheel(event.angleDelta.y > 0) }
+              onWheel: function(event) { root.wheelVolume(event.angleDelta.y) }
             }
           }
 

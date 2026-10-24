@@ -92,6 +92,22 @@ BarWidget {
       property bool atEnd: false
       onScrollingChanged: { scrollClip.atStart = true; scrollClip.atEnd = false }
 
+      // An Animation snapshots its XAnimators' from/to when it STARTS, and an
+      // infinite loop never starts again — so a new, longer or shorter title
+      // kept sliding by the previous title's overflow: the end of a long
+      // title never came into view, or a short one slid into blank space.
+      // Bouncing `running` off for one tick restarts the loop from rest on
+      // the new numbers.
+      property bool marqueeRestarting: false
+      function restartMarquee() {
+        if (!scrollClip.scrolling || scrollClip.marqueeRestarting) return
+        scrollClip.marqueeRestarting = true
+        scrollClip.atStart = true
+        scrollClip.atEnd = false
+        Qt.callLater(function() { scrollClip.marqueeRestarting = false })
+      }
+      onOverflowChanged: scrollClip.restartMarquee()
+
       Item {
         id: labelLayer
         anchors.fill: parent
@@ -126,8 +142,12 @@ BarWidget {
           // have in the corner of the eye; this travels only the overflow and
           // spends most of its time still. The longer rest is on the start,
           // the part of the title that identifies it.
+          // A new title while the overflow happens to be the same still
+          // has to start from rest, not mid-slide.
+          onTextChanged: scrollClip.restartMarquee()
+
           SequentialAnimation {
-            running: scrollClip.scrolling
+            running: scrollClip.scrolling && !scrollClip.marqueeRestarting
             loops: Animation.Infinite
             onStopped: label.x = 0
 

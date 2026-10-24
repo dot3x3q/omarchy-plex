@@ -68,14 +68,41 @@ function fmtDuration(sec) {
 
 // Parse one /library/metadata response into the playback contract. Keeps
 // remote strings bounded and requires an absolute Plex library part path.
+//
+// `parts` lists every Part of the FIRST Media in order, as
+// [{ key, duration (ms, 0 if unknown), id }] — a two-disc film is one Media
+// with two Parts (CD1, CD2), and all of them have to play. Later Media
+// entries are deliberately ignored: they are alternate versions, and on this
+// server at least one (ratingKey 393) is a different film altogether. A part
+// whose key is not a plain server path ends the list there, so the parts
+// that do play are always a contiguous run from the start.
 function parsePlaybackMetadata(jsonText) {
   var doc = JSON.parse(jsonText)
   var md = doc && doc.MediaContainer && doc.MediaContainer.Metadata && doc.MediaContainer.Metadata[0]
   if (!md || !md.Media || !md.Media[0] || !md.Media[0].Part || !md.Media[0].Part[0]) return null
   var partKey = cap(md.Media[0].Part[0].key, 512)
-  if (partKey.indexOf("/") !== 0) return null
+  if (!plainPartPath(partKey)) return null
+  var parts = []
+  var list = md.Media[0].Part
+  for (var i = 0; i < list.length && i < 32; i++) {
+    var part = list[i]
+    var key = part ? cap(part.key, 512) : ""
+    if (!plainPartPath(key)) break
+    parts.push({
+      key: key,
+      duration: Math.max(0, Math.round(Number(part.duration) || 0)),
+      id: cap(part.id, MAX_KEY)
+    })
+  }
   return {
     partKey: partKey,
+    parts: parts,
     viewOffsetSec: Math.max(0, Math.round((Number(md.viewOffset) || 0) / 1000))
   }
+}
+
+// A server-relative path and nothing else: leading slash, not "//host"
+// (protocol-relative), no whitespace or backslashes.
+function plainPartPath(key) {
+  return /^\/[^\/\s\\][^\s\\]*$/.test(String(key || ""))
 }
