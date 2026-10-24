@@ -80,8 +80,21 @@ function metadataUrl(server, ratingKey) {
   return server + "/library/metadata/" + encodeURIComponent(String(ratingKey))
 }
 
-function childrenUrl(server, ratingKey) {
-  return server + "/library/metadata/" + encodeURIComponent(String(ratingKey)) + "/children"
+// opts: { start, size }, both optional; the two-argument call is unchanged.
+// mapChildren stops at MAX_ITEMS, so a season longer than that (daily shows,
+// long-running anime) needs paging to see its tail. Pagination works on
+// /children exactly as on /all: the response's offset/size/totalSize follow
+// the request (probed 2026-10-23: start=5&size=3 on a 13-episode season came
+// back offset 5, size 3, totalSize 13). Without the params, totalSize is
+// absent, so a pager has to send them to learn the length.
+function childrenUrl(server, ratingKey, opts) {
+  var url = server + "/library/metadata/" + encodeURIComponent(String(ratingKey)) + "/children"
+  var params = []
+  var start = opts ? Number(opts.start) : NaN
+  var size = opts ? Number(opts.size) : NaN
+  if (isFinite(start) && start >= 0) params.push("X-Plex-Container-Start=" + Math.floor(start))
+  if (isFinite(size) && size > 0) params.push("X-Plex-Container-Size=" + Math.floor(size))
+  return params.length ? url + "?" + params.join("&") : url
 }
 
 // /search vs /hubs/search — probed both live with the same query.

@@ -60,6 +60,19 @@ test("metadataUrl / childrenUrl / searchUrl", () => {
   assert.equal(A.searchUrl("http://s:32400", " wick "), "http://s:32400/search?query=wick")
 })
 
+test("childrenUrl pages with X-Plex-Container-Start/Size and keeps the two-arg form", () => {
+  const base = "http://s:32400/library/metadata/26481/children"
+  assert.equal(A.childrenUrl("http://s:32400", "26481"), base)
+  assert.equal(A.childrenUrl("http://s:32400", "26481", {}), base)
+  assert.equal(A.childrenUrl("http://s:32400", "26481", { start: 0, size: 256 }),
+    base + "?X-Plex-Container-Start=0&X-Plex-Container-Size=256")
+  assert.equal(A.childrenUrl("http://s:32400", "26481", { start: 256 }), base + "?X-Plex-Container-Start=256")
+  // Junk never reaches the URL: these values land in a query string.
+  assert.equal(A.childrenUrl("http://s:32400", "26481", { start: "5&x=1", size: -3 }), base)
+  assert.equal(A.childrenUrl("http://s:32400", "26481", { start: 2.7, size: "10" }),
+    base + "?X-Plex-Container-Start=2&X-Plex-Container-Size=10")
+})
+
 test("imageUrl encodes a server-relative path and appends the token last", () => {
   const u = A.imageUrl("http://s:32400", "TOK123", "/library/metadata/3291/thumb/999", 300, 450)
   assert.equal(
