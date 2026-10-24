@@ -55,18 +55,42 @@ Item {
   }
   readonly property string scrollKey: "detail:" + page.ratingKey
 
-  readonly property real heroHeight: Style.space(150)
+  // Movies get the taller, stock-Plex-style hero (director, ratings, video and
+  // audio lines); shows keep the compact one so the episode list stays big.
+  // Secondary hero text. The theme's `muted` is tuned for flat surfaces and
+  // went hard to read over the scrimmed backdrop; foreground at 80% keeps
+  // the hierarchy and still reads.
+  readonly property color heroDim: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.8)
+  readonly property real heroHeight: page.isShow ? Style.space(176) : Style.space(256)
   readonly property real heroInset: Style.space(10)
   readonly property real posterHeight: page.heroHeight - page.heroInset * 2
   readonly property real posterWidth: page.posterHeight * 2 / 3
 
-  // Cursor rows, top to bottom. Movies stop at rowPlay.
+  // Cursor rows, top to bottom. Shows: play, seasons, episodes. Movies: play,
+  // extras, related (cast is read-only, so the cursor skips it).
   readonly property int rowPlay: 0
   readonly property int rowSeasons: 1
   readonly property int rowEpisodes: 2
+  readonly property int rowExtras: 3
+  readonly property int rowRelated: 4
   property int cursorRow: 0
   property int cursorSeason: 0
   property int cursorEpisode: 0
+  property int cursorExtra: 0
+  // Play is where the cursor rests by default, so a mouse that passed over it
+  // and left would otherwise leave it lit like a stuck hover. Leaving drops
+  // the highlight; any keyboard move brings it back.
+  property bool playUnhovered: false
+  property int cursorRelated: 0
+
+  // Movie-page shelves (Api.mapDetail), image URLs resolved at fetch time.
+  readonly property var cast: page.detail && page.detail.cast ? page.detail.cast : []
+  readonly property var extras: page.detail && page.detail.extras ? page.detail.extras : []
+  // Fetched separately after the page draws (Api.relatedUrl: it is slow).
+  property var related: []
+  readonly property real castWidth: Style.space(96)
+  readonly property real extraWidth: Style.space(200)
+  readonly property real relatedWidth: Style.space(110)
 
   // Our highlight only exists while the panel cursor is in the page region —
   // otherwise it would coexist with the sidebar's and break single-highlight.
@@ -77,6 +101,7 @@ Item {
   function load() {
     page.loadedKey = page.ratingKey
     page.loadGen += 1
+    page.playUnhovered = false
     page.detail = null
     page.detailFailed = false
     page.onDeck = null
@@ -89,6 +114,10 @@ Item {
     page.cursorRow = page.rowPlay
     page.cursorSeason = 0
     page.cursorEpisode = 0
+    page.cursorExtra = 0
+    page.cursorRelated = 0
+    page.related = []
+    movieFlick.contentY = 0
     page.restorePending = true
     if (page.ratingKey === "") return
 
@@ -106,7 +135,8 @@ Item {
     // is present even on a show nobody has started, where it points at S1E1.
     // Harmless on a movie, which simply comes back without the block, so this
     // does not need pageParams.type to be trustworthy.
-    page.panel.request(Api.metadataUrl("", page.ratingKey) + "?includeOnDeck=1", function(doc) {
+    // includeExtras/includeRelated ride along for the movie page's shelves.
+    page.panel.request(Api.detailUrl("", page.ratingKey), function(doc) {
       if (gen !== page.loadGen) return
       var item = Api.mapDetail(doc)
       if (!item) { page.detailFailed = true; return }
@@ -121,13 +151,48 @@ Item {
       page.onDeck = page.onDeckFrom(raw)
       page.detail = Object.assign({}, item, {
         artUrl: page.panel.imageUrl(item.artPath, backW, backH),
-        posterUrl: page.panel.imageUrl(item.thumbPath, postW, postH)
+        posterUrl: page.panel.imageUrl(item.thumbPath, postW, postH),
+        cast: page.resolveImages(item.cast, "photoPath", page.castWidth, page.castWidth * 1.25),
+        extras: page.resolveImages(item.extras, "thumbPath", page.extraWidth, page.extraWidth * 9 / 16)
       })
-      if (String(item.type) === "show") page.loadSeasons(gen)
+      // A season's children are its episodes, which loadSeasons' flat branch
+      // already renders — this used to say `=== "show"` only, so a season
+      // page (Home's TV shelf opens them) drew the hero over an empty list.
+      var t = String(item.type)
+      if (t === "show" || t === "season") page.loadSeasons(gen)
+      else page.loadRelated(gen)
     })
   }
 
   function reload() { page.load() }
+
+  function loadRelated(gen) {
+    page.panel.request(Api.relatedUrl("", page.ratingKey), function(doc) {
+      if (gen !== page.loadGen) return
+      var list = []
+      try { list = Api.mapRelated(doc) } catch (e) { list = [] }
+      page.related = page.resolveImages(list, "thumbPath", page.relatedWidth, page.relatedWidth * 3 / 2)
+    })
+  }
+
+  function resolveImages(list, field, w, h) {
+    var out = []
+    var src = list || []
+    for (var i = 0; i < src.length; i++) {
+      var patch = {}
+      var path = String(src[i][field] || "")
+      // Cast photos are absolute public URLs (metadata-static.plex.tv,
+      // image.tmdb.org) and need neither the server nor the token. Through the
+      // transcoder they carried X-Plex-Token, and QQuickImage writes the full
+      // URL of any image that fails into the shell log — dead cast photos are
+      // common, so the token was landing in the log (seen 2026-10-23). Only
+      // https is taken as-is; anything else stays on the server path.
+      patch[field] = path.indexOf("https://") === 0 ? path
+        : page.panel.imageUrl(path, Math.round(w * 2), Math.round(h * 2))
+      out.push(Object.assign({}, src[i], patch))
+    }
+    return out
+  }
 
   // Plex hands OnDeck back as a single object, not the Metadata ARRAY every
   // other endpoint uses — accept both rather than trusting that forever.
@@ -307,6 +372,44 @@ Item {
 
   // ---- keyboard ----
 
+  // Movie rows in order, skipping shelves that came back empty.
+  function movieRows() {
+    var rows = [page.rowPlay]
+    if (page.extras.length > 0) rows.push(page.rowExtras)
+    if (page.related.length > 0) rows.push(page.rowRelated)
+    return rows
+  }
+
+  function moveMovieCursor(dx, dy) {
+    if (dx !== 0) {
+      if (page.cursorRow === page.rowExtras)
+        page.cursorExtra = Math.max(0, Math.min(page.extras.length - 1, page.cursorExtra + dx))
+      else if (page.cursorRow === page.rowRelated)
+        page.cursorRelated = Math.max(0, Math.min(page.related.length - 1, page.cursorRelated + dx))
+      page.scrollMovieRow()
+      return
+    }
+    var rows = page.movieRows()
+    var at = Math.max(0, rows.indexOf(page.cursorRow))
+    var next = Math.max(0, Math.min(rows.length - 1, at + (dy > 0 ? 1 : -1)))
+    page.cursorRow = rows[next]
+    page.scrollMovieRow()
+  }
+
+  // Keep the cursor's shelf on screen in the movie Flickable, and the card in
+  // view inside its shelf.
+  function scrollMovieRow() {
+    var target = page.cursorRow === page.rowExtras ? extrasBlock
+      : (page.cursorRow === page.rowRelated ? relatedBlock : null)
+    if (page.cursorRow === page.rowExtras) extrasList.positionViewAtIndex(page.cursorExtra, ListView.Contain)
+    if (page.cursorRow === page.rowRelated) relatedList.positionViewAtIndex(page.cursorRelated, ListView.Contain)
+    if (!target) { movieFlick.contentY = 0; return }
+    var y = target.mapToItem(movieFlick.contentItem, 0, 0).y
+    if (y < movieFlick.contentY) movieFlick.contentY = Math.max(0, y)
+    else if (y + target.height > movieFlick.contentY + movieFlick.height)
+      movieFlick.contentY = Math.max(0, Math.min(movieFlick.contentHeight - movieFlick.height, y + target.height - movieFlick.height))
+  }
+
   function lastRow() {
     if (!page.isShow) return page.rowPlay
     if (page.episodes.length > 0) return page.rowEpisodes
@@ -320,6 +423,8 @@ Item {
   }
 
   function moveCursor(dx, dy) {
+    page.playUnhovered = false
+    if (!page.isShow) { page.moveMovieCursor(dx, dy); return }
     if (dx !== 0) {
       if (page.cursorRow !== page.rowSeasons || page.seasons.length === 0) return
       var n = page.seasons.length
@@ -346,6 +451,8 @@ Item {
 
   function activateCursor() {
     if (page.cursorRow === page.rowPlay) { page.playNow(); return }
+    if (page.cursorRow === page.rowExtras) { page.playExtra(page.extras[page.cursorExtra]); return }
+    if (page.cursorRow === page.rowRelated) { page.openRelated(page.related[page.cursorRelated]); return }
     if (page.cursorRow === page.rowSeasons) {
       if (page.seasons.length === 0) return
       page.selectSeason(String(page.seasons[page.cursorSeason].ratingKey))
@@ -357,7 +464,20 @@ Item {
     if (ep) page.panel.playItem(String(ep.ratingKey), String(ep.title))
   }
 
+  function playExtra(x) {
+    if (x) page.panel.playItem(String(x.ratingKey), String(x.title))
+  }
+
+  function openRelated(it) {
+    if (it) page.panel.navigate("detail", { ratingKey: it.ratingKey, title: it.title, subtitle: it.caption, type: it.type })
+  }
+
   function pageStep(dir) {
+    if (!page.isShow) {
+      movieFlick.contentY = Math.max(0, Math.min(Math.max(0, movieFlick.contentHeight - movieFlick.height),
+        movieFlick.contentY + dir * movieFlick.height * 0.8))
+      return
+    }
     if (page.cursorRow !== page.rowEpisodes || page.episodes.length === 0) {
       page.moveCursor(0, dir)
       return
@@ -376,6 +496,106 @@ Item {
   onRatingKeyChanged: if (page.ratingKey !== page.loadedKey) page.load()
   onCursorEpisodeChanged: episodeList.positionViewAtIndex(page.cursorEpisode, ListView.Contain)
   onCursorSeasonChanged: seasonList.positionViewAtIndex(page.cursorSeason, ListView.Contain)
+
+  // Cast row, shared by the movie page's shelves and the show page's episode
+  // list footer. An inline component cannot see this file's ids, so what it
+  // shows comes in through properties.
+  component CastShelf: Column {
+    id: castShelf
+    required property var people
+    required property real cardWidth
+    width: parent.width
+    spacing: Style.space(6)
+    visible: castShelf.people.length > 0
+
+    Text {
+      color: Color.foreground
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      font.bold: true
+      textFormat: Text.PlainText
+      text: "CAST & CREW"
+    }
+
+    ListView {
+      id: castList
+      width: parent.width
+      height: castShelf.cardWidth * 1.25 + Style.space(44)
+      orientation: ListView.Horizontal
+      spacing: Style.space(10)
+      clip: true
+      boundsBehavior: Flickable.StopAtBounds
+      model: castShelf.people
+
+      delegate: Item {
+        id: castCard
+        required property var modelData
+        width: castShelf.cardWidth
+        height: castList.height
+
+        BorderSurface {
+          id: photoWell
+          width: parent.width
+          height: castShelf.cardWidth * 1.25
+          radius: Style.spacing.labelGap
+          color: Style.selectedFillFor(Color.foreground, Color.accent)
+          borderSpec: Border.controlSpec("normal", Color.foreground, Color.accent)
+          clip: true
+
+          Image {
+            id: photo
+            anchors.fill: parent
+            anchors.margins: Style.space(2)
+            source: String(castCard.modelData.photoPath || "")
+            // Loaded straight from the public host at full size; decode small.
+            sourceSize.width: castShelf.cardWidth * 2
+            sourceSize.height: castShelf.cardWidth * 2.5
+            fillMode: Image.PreserveAspectCrop
+            asynchronous: true
+            cache: false
+            visible: status === Image.Ready
+          }
+
+          Text {
+            anchors.centerIn: parent
+            visible: photo.status !== Image.Ready
+            text: "󰀄"
+            color: Color.muted
+            font.family: Style.font.family
+            font.pixelSize: Style.font.iconLarge
+          }
+        }
+
+        Column {
+          anchors.top: photoWell.bottom
+          anchors.topMargin: Style.space(4)
+          width: parent.width
+          spacing: Style.space(2)
+
+          Text {
+            width: parent.width
+            text: String(castCard.modelData.name || "")
+            color: Color.foreground
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+            textFormat: Text.PlainText
+          }
+
+          Text {
+            width: parent.width
+            text: String(castCard.modelData.role || "")
+            visible: text !== ""
+            color: Color.muted
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+            textFormat: Text.PlainText
+          }
+        }
+      }
+    }
+  }
 
   // ---- hero ----
 
@@ -466,11 +686,35 @@ Item {
         textFormat: Text.PlainText
       }
 
+      // Movie-only lines, the stock Plex hero: who made it, then how it rates.
+      Text {
+        width: parent.width
+        text: !page.isShow && page.detail && page.detail.directors && page.detail.directors.length > 0
+          ? "Directed by " + page.detail.directors.join(", ") : ""
+        visible: text !== ""
+        color: page.heroDim
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+        textFormat: Text.PlainText
+      }
+
       Text {
         width: parent.width
         text: page.metaLine()
         visible: text !== ""
-        color: Color.muted
+        color: page.heroDim
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+        textFormat: Text.PlainText
+      }
+
+      Text {
+        width: parent.width
+        text: page.detail && page.detail.ratings ? page.detail.ratings.join("   ") : ""
+        visible: text !== ""
+        color: Color.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         elide: Text.ElideRight
@@ -487,13 +731,15 @@ Item {
         font.family: Style.font.family
         font.pixelSize: Style.font.bodySmall
         wrapMode: Text.WordWrap
-        maximumLineCount: 3
+        maximumLineCount: page.isShow ? 3 : 5
         elide: Text.ElideRight
         textFormat: Text.PlainText
       }
 
       Row {
         width: parent.width
+        // Breathing room between the synopsis and the Play button.
+        topPadding: Style.space(6)
         spacing: Style.space(10)
 
         Button {
@@ -506,10 +752,13 @@ Item {
           foreground: Color.foreground
           accent: Color.accent
           enabled: page.playTarget() !== null
-          hasCursor: page.cursorHere && page.cursorRow === page.rowPlay
+          hasCursor: page.cursorHere && page.cursorRow === page.rowPlay && !page.playUnhovered
           tooltipText: page.playTooltip()
           onClicked: page.playNow()
-          onHovered: function(on) { if (on) page.claim(page.rowPlay) }
+          onHovered: function(on) {
+            page.playUnhovered = !on
+            if (on) page.claim(page.rowPlay)
+          }
         }
 
         Text {
@@ -517,12 +766,34 @@ Item {
           width: Math.max(0, parent.width - playButton.width - parent.spacing)
           text: page.detail && page.detail.genres ? page.detail.genres.join(" · ") : ""
           visible: text !== ""
-          color: Color.muted
+          color: page.heroDim
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
           textFormat: Text.PlainText
         }
+      }
+
+      // What the file is: Plex's short stream titles ("4K DoVi/HDR10 (HEVC
+      // Main 10)", "English (DTS-HD MA 5.1)"). The pickers in theater still
+      // own switching tracks; this is the at-a-glance read.
+      Text {
+        width: parent.width
+        text: {
+          var d = page.detail
+          if (page.isShow || !d) return ""
+          var bits = []
+          if (d.videoText) bits.push("Video  " + d.videoText)
+          if (d.audioText) bits.push("Audio  " + d.audioText)
+          if (Number(d.subtitleCount) > 0) bits.push("Subtitles  " + d.subtitleCount)
+          return bits.join("   ·   ")
+        }
+        visible: text !== ""
+        color: page.heroDim
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+        textFormat: Text.PlainText
       }
     }
   }
@@ -608,6 +879,23 @@ Item {
       }
     }
 
+    // Cast sits under the last episode rather than above the seasons: the
+    // episode list is what a show page is for, so it keeps the space and the
+    // cast is one scroll past the end.
+    footer: Item {
+      width: episodeList.width
+      height: page.cast.length > 0 && page.episodes.length > 0 ? showCast.height + Style.space(16) : 0
+      visible: height > 0
+
+      CastShelf {
+        id: showCast
+        y: Style.space(16)
+        width: parent.width
+        people: page.cast
+        cardWidth: page.castWidth
+      }
+    }
+
     FastScrollHandler {
       flickable: episodeList
       onScrolled: page.saveScroll()
@@ -621,6 +909,192 @@ Item {
       font.family: Style.font.family
       font.pixelSize: Style.font.body
       textFormat: Text.PlainText
+    }
+  }
+
+  // ---- movie shelves: cast, extras, related ----
+  // Below the fixed hero, one vertical Flickable; each shelf is a horizontal
+  // ListView like the home page's. Same no-spinner rule: a shelf with nothing
+  // in it is simply absent.
+  Flickable {
+    id: movieFlick
+    anchors.left: parent.left
+    anchors.right: parent.right
+    anchors.top: hero.bottom
+    anchors.topMargin: Style.space(10)
+    anchors.bottom: parent.bottom
+    visible: !page.isShow
+    contentWidth: width
+    contentHeight: movieColumn.height
+    clip: true
+    boundsBehavior: Flickable.StopAtBounds
+
+    FastScrollHandler { flickable: movieFlick }
+
+    Column {
+      id: movieColumn
+      width: movieFlick.width
+      spacing: Style.space(14)
+
+      CastShelf {
+        width: parent.width
+        people: page.cast
+        cardWidth: page.castWidth
+      }
+
+      Column {
+        id: extrasBlock
+        width: parent.width
+        spacing: Style.space(6)
+        visible: page.extras.length > 0
+
+        Text {
+          color: Color.foreground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          textFormat: Text.PlainText
+          text: "EXTRAS"
+        }
+
+        ListView {
+          id: extrasList
+          width: parent.width
+          height: page.extraWidth * 9 / 16 + Style.space(48)
+          orientation: ListView.Horizontal
+          spacing: Style.space(10)
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          model: page.extras
+
+          delegate: Item {
+            id: extraCard
+            required property var modelData
+            required property int index
+            width: page.extraWidth
+            height: extrasList.height
+            readonly property bool cursorOn: page.cursorHere && page.cursorRow === page.rowExtras && page.cursorExtra === extraCard.index
+
+            // Same single-highlight fill model as PosterCard: the page cursor,
+            // never this card's own hover.
+            BorderSurface {
+              anchors.fill: parent
+              radius: Style.cornerRadius
+              color: extraCard.cursorOn ? Style.hoverFillFor(Color.foreground, Color.accent) : "transparent"
+            }
+
+            HoverHandler {
+              onHoveredChanged: if (hovered) { page.cursorExtra = extraCard.index; page.claim(page.rowExtras) }
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: page.playExtra(extraCard.modelData)
+            }
+
+            BorderSurface {
+              id: extraWell
+              width: parent.width
+              height: page.extraWidth * 9 / 16
+              radius: Style.spacing.labelGap
+              color: Style.selectedFillFor(Color.foreground, Color.accent)
+              borderSpec: Border.controlSpec("normal", Color.foreground, Color.accent)
+              clip: true
+
+              Image {
+                id: extraArt
+                anchors.fill: parent
+                anchors.margins: Style.space(2)
+                source: String(extraCard.modelData.thumbPath || "")
+                fillMode: Image.PreserveAspectCrop
+                asynchronous: true
+                cache: false
+                visible: status === Image.Ready
+              }
+
+              Text {
+                anchors.centerIn: parent
+                text: "󰐊"
+                color: extraArt.visible ? Color.foreground : Color.muted
+                font.family: Style.font.family
+                font.pixelSize: Style.font.iconLarge
+              }
+            }
+
+            Column {
+              anchors.top: extraWell.bottom
+              anchors.topMargin: Style.space(4)
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.leftMargin: Style.space(4)
+              anchors.rightMargin: Style.space(4)
+              spacing: Style.space(2)
+
+              Text {
+                width: parent.width
+                text: String(extraCard.modelData.title || "")
+                color: Color.foreground
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+                textFormat: Text.PlainText
+              }
+
+              Text {
+                width: parent.width
+                text: String(extraCard.modelData.kind || "")
+                  + (extraCard.modelData.durationText ? " · " + extraCard.modelData.durationText : "")
+                color: Color.muted
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+                textFormat: Text.PlainText
+              }
+            }
+          }
+        }
+      }
+
+      Column {
+        id: relatedBlock
+        width: parent.width
+        spacing: Style.space(6)
+        visible: page.related.length > 0
+
+        Text {
+          color: Color.foreground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          textFormat: Text.PlainText
+          text: "RELATED MOVIES"
+        }
+
+        ListView {
+          id: relatedList
+          width: parent.width
+          height: Math.round(page.relatedWidth * 3 / 2) + Style.space(40)
+          orientation: ListView.Horizontal
+          spacing: Style.space(8)
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          model: page.related
+
+          delegate: PosterCard {
+            id: relatedCard
+            required property var modelData
+            required property int index
+            width: page.relatedWidth
+            itemData: relatedCard.modelData
+            cursorOn: page.cursorHere && page.cursorRow === page.rowRelated && page.cursorRelated === relatedCard.index
+            onActivated: page.openRelated(relatedCard.modelData)
+            onHovered: function(on) {
+              if (on) { page.cursorRelated = relatedCard.index; page.claim(page.rowRelated) }
+            }
+          }
+        }
+      }
     }
   }
 }
