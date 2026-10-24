@@ -124,15 +124,12 @@ Item {
 
   // /children paged. One unpaged body for a long-running show's season can
   // pass 256 items (Api's MAX_ITEMS cap, so the list silently truncated) or
-  // 4 MiB (the request pool's cap, so it failed as null). This builds the
-  // same URL shape the data batch's Api.childrenUrl(server, key, { start,
-  // size }) will. TODO(consolidate): switch to that once it lands.
+  // 4 MiB (the request pool's cap, so it failed as null).
   readonly property int childPageSize: 256
   readonly property int childPageLimit: 16
 
   function childrenPageUrl(key, start) {
-    return "/library/metadata/" + encodeURIComponent(String(key)) + "/children"
-      + "?X-Plex-Container-Start=" + start + "&X-Plex-Container-Size=" + page.childPageSize
+    return Api.childrenUrl("", key, { start: start, size: page.childPageSize })
   }
 
   // Calls done(docs, failed) with every page's raw doc, in order. `alive`

@@ -230,25 +230,6 @@ Item {
     })
   }
 
-  // seasonKey/episodeKey for episode cards, until Api.mapRecentShows carries
-  // them itself (the data batch adds both; this reads the raw hub only when
-  // the mapper did not). TODO(consolidate): drop once that lands.
-  function withEpisodeKeys(raw, doc) {
-    var meta = doc && doc.MediaContainer && doc.MediaContainer.Metadata ? doc.MediaContainer.Metadata : []
-    var parentOf = ({})
-    for (var i = 0; i < meta.length; i++)
-      if (meta[i] && meta[i].type === "episode" && meta[i].ratingKey !== undefined)
-        parentOf[String(meta[i].ratingKey)] = String(meta[i].parentRatingKey || "").replace(/[^A-Za-z0-9]/g, "")
-    var out = []
-    for (var j = 0; j < raw.length; j++) {
-      var it = raw[j]
-      if (it.type === "episode" && !it.seasonKey && parentOf[String(it.ratingKey)])
-        it = Object.assign({}, it, { seasonKey: parentOf[String(it.ratingKey)] })
-      out.push(it)
-    }
-    return out
-  }
-
   function fetchShelf(sectionId, type) {
     var isShow = type === "show"
     // TV goes through the grouped hub (one card per show, like stock Plex);
@@ -258,7 +239,7 @@ Item {
     page.panel.request(url, function(doc) {
       if (gen !== page.fetchGen) return
       var raw = []
-      try { raw = isShow ? page.withEpisodeKeys(Api.mapRecentShows(doc), doc) : Api.mapItems(doc) } catch (e) { raw = [] }
+      try { raw = isShow ? Api.mapRecentShows(doc) : Api.mapItems(doc) } catch (e) { raw = [] }
       // Stale response guard: the library may have gone between firing this
       // request and it landing.
       var still = false
