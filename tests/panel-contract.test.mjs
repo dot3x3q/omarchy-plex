@@ -112,7 +112,9 @@ test("media token header is gated by origin and path", () => {
   assert.match(qml, /if \(root\.tokenHeaderAllowed\(root\.pendingMpvUrl\)\)\s*args\.push\("--http-header-fields=X-Plex-Token: "/)
   const allowed = qml.slice(qml.indexOf("function tokenHeaderAllowed"), qml.indexOf("function directPlayUrl"))
   assert.match(allowed, /path\.indexOf\("\/library\/"\) === 0 \|\| path\.indexOf\("\/video\/"\) === 0/)
-  assert.equal((qml.match(/root\.directPlayUrl\(/g) || []).length, 2)
+  // Every (re)start goes through launchStream, which is the one place a
+  // direct-play URL is built.
+  assert.match(qml.slice(qml.indexOf("function launchStream"), qml.indexOf("function playSource")), /root\.directPlayUrl\(/)
   assert.doesNotMatch(qml, /root\.server \+ (partKey|root\.currentPartKey)\b/)
 })
 
@@ -149,9 +151,23 @@ test("curl argv never carries the Plex token", () => {
 test("a saved quality tier starts the item on the transcoder; track picks respect it", () => {
   const apply = qml.slice(qml.indexOf("function applyMetadata"), qml.indexOf("// ---- where the token may go"))
   assert.match(apply, /root\.triedTranscode = root\.qualityKbps > 0/)
-  assert.match(apply, /root\.triedTranscode \? root\.transcodeUrl\(/)
+  assert.match(qml, /function playSource\(title\) \{[\s\S]{0,120}root\.launchStream\(root\.triedTranscode,/)
+  assert.match(qml.slice(qml.indexOf("function launchStream"), qml.indexOf("function playSource")),
+    /root\.triedTranscode \? root\.transcodeUrl\(/)
   // A transcode carries one audio track: an ordinal off the original file
   // would select nothing on either mpv engine.
   const pick = qml.slice(qml.indexOf("function activateTrackRow"), qml.indexOf("function putTrackSelection"))
   assert.match(pick, /if \(root\.mpvMode \|\| root\.nativeMode\) \{\s*if \(needsServer \|\| root\.triedTranscode\)/)
+})
+
+test("stop and failure capture the position before the engine is torn down", () => {
+  const stop = qml.slice(qml.indexOf("  function stop() {"), qml.indexOf("  function stopEngine()"))
+  assert.ok(stop.indexOf("seekDisplayTime") < stop.indexOf("stopEngine()"), "capture precedes teardown")
+  assert.match(stop, /finishPlayback\(t, d\)/)
+  // Failures dedupe per stream generation, never by wall clock.
+  assert.doesNotMatch(qml, /lastFailMs/)
+  assert.match(qml, /if \(root\.failedGen === root\.playGen\) return/)
+  // Positions only count once the engine has loaded THIS stream.
+  assert.match(qml, /root\.nativeVideo && root\.nativeLoaded \? root\.nativeVideo\.timePos : root\.streamLocalStart/)
+  assert.match(qml, /function startMpv[\s\S]{0,700}root\.mpvTime = 0\s*root\.mpvDuration = 0/)
 })

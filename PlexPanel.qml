@@ -238,12 +238,32 @@ Item {
   property string currentRatingKey: ""
   property string sessionId: ""
   property bool triedTranscode: false
-  property real lastFailMs: 0
+  // The playGen whose failure has already been handled. Failures are
+  // de-duplicated per stream rather than by wall clock: QtMultimedia reports
+  // one bad source twice (InvalidMedia AND errorOccurred), but a transcode
+  // that dies 200 ms after the direct play it replaced is a NEW failure and
+  // must reach fail() — the old 250 ms window swallowed it and left the panel
+  // "playing" a dead stream.
+  property int failedGen: -1
+  // Which rungs of the direct ↔ transcode ladder the current item has been
+  // on, so a failure tries the other one exactly once whichever it began on.
+  property bool directTried: false
+  property bool transcodeTried: false
   property bool userStop: false
   property bool scrobbled: false
   property int tickCount: 0
   property int resumeSec: 0
   property int playGen: 0 // guards mpv exit handler against item switches
+  // Where the CURRENT stream was asked to start, in seconds. Kept after the
+  // engine has consumed resumeSec, because until the engine reports a real
+  // position (a loaded file with a duration) this is the only honest answer
+  // to "where are we": a stop, a failure or a surface handoff in the first
+  // half-second of a load must not capture 0 or the previous file's time.
+  property real streamLocalStart: 0
+  // The last real duration seen for the current item. A stop during a reload
+  // (a transcode restart, a PiP handoff) still reports the item's length to
+  // the server instead of duration=0.
+  property real lastKnownDuration: 0
   property string pendingMpvUrl: "" // staged for mpvRelay's 300 ms socket-release wait
 
   // mpv remote state (seconds)
@@ -1142,7 +1162,14 @@ Item {
       var parsed = Model.parsePlaybackMetadata(jsonText)
       if (!parsed) { fail("No playable part found"); return }
       var partKey = parsed.partKey
+      // Switching items mid-session: the outgoing one gets its "stopped"
+      // report while its key and position are still the current ones.
+      if (root.mode === "playing" && root.currentRatingKey !== "")
+        root.sendTimeline("stopped", root.seekDisplayTime, root.reportDuration)
       root.currentRatingKey = String(ratingKey)
+      root.lastKnownDuration = 0
+      root.directTried = false
+      root.transcodeTried = false
       root.sessionId = "" + Date.now()
       // A saved quality tier applies from the first frame. It used to be read
       // only by the picker: every item started on direct play regardless, the
@@ -1158,13 +1185,12 @@ Item {
       root.resumeSec = parsed.viewOffsetSec
       root.currentThumbPath = root.metadataThumb(jsonText)
       root.stashStreams(jsonText)
-      var mediaUrl = root.triedTranscode ? root.transcodeUrl() : root.directPlayUrl(partKey)
       // Only QtMultimedia needs the token on the URL: its media loader cannot
       // send an HTTP header at all, which is the documented exception the
       // artwork URLs share. Both mpv engines carry it in a header instead, so
       // in native mode this direct-play URL is clean — no token in the string
       // handed to the demuxer, none in any log line that quotes it.
-      playSource(mediaUrl, title)
+      playSource(title)
     } catch (e) {
       fail("Could not resolve media")
     }
@@ -1212,19 +1238,56 @@ Item {
     }
   }
 
+  // A failure that is not about the playing stream — the NEXT item's metadata
+  // would not resolve, say — must not take a live session down with it. It
+  // used to flip mode to "error" under a film that was still playing: on
+  // QtMultimedia the audio carried on with no UI left to stop it, and on the
+  // native engine the Loader destroyed the player with no "stopped" report.
+  // With a session live this is a banner and nothing else.
   function fail(msg) {
+    if (root.mode === "playing") {
+      root.setStatus(msg, true)
+      return
+    }
     pollTimer.stop()
     root.closeTrackPopup()
     root.mode = "error"
     root.setStatus(msg, true)
   }
 
-  function playSource(url, title) {
-    root.currentTitle = title
+  // The playing stream itself is dead and there is nothing left to try. End
+  // the session properly — engine stopped, "stopped" reported at the position
+  // it died at — and only then show the error.
+  function failPlayback(msg) {
+    var t = root.seekDisplayTime
+    var d = root.reportDuration
+    root.userStop = true
+    root.stopEngine()
+    root.finishPlayback(t, d)
+    root.mode = "error"
+    root.setStatus(msg, true)
+  }
+
+  // Every (re)start of the current item's stream goes through here: first
+  // play, codec fallback, track and quality restarts. `atSec` is where to
+  // start; `transcode` picks the server's transcoder over direct play.
+  function launchStream(transcode, atSec) {
+    root.triedTranscode = transcode === true
+    if (root.triedTranscode) root.transcodeTried = true
+    else root.directTried = true
     root.playGen++
     root.clearSeekPreview()
+    var at = Math.max(0, Math.round(Number(atSec) || 0))
+    root.streamLocalStart = at
+    root.resumeSec = at
+    var url = root.triedTranscode ? root.transcodeUrl() : root.directPlayUrl(root.currentPartKey)
     if (root.backend === "mpv") startMpv(url)
     else startInternal(url)
+  }
+
+  function playSource(title) {
+    root.currentTitle = title
+    root.launchStream(root.triedTranscode, root.resumeSec)
     pollTimer.restart()
     // Starting playback always drops into theater (enterTheater parks focus on
     // keyHost too — the search field hides, so transport keys need a home).
@@ -1258,6 +1321,13 @@ Item {
     // One mpv at a time owns the IPC socket: quit any previous instance,
     // wait out the socket release, then launch.
     root.mode = "playing"
+    // The previous file's numbers must not survive into this one: the first
+    // poll tick would otherwise divide episode 1's position by episode 1's
+    // duration on behalf of episode 2, and scrobble it if that was past 90%.
+    // dispTime falls back to streamLocalStart until a duration arrives.
+    root.mpvTime = 0
+    root.mpvDuration = 0
+    root.mpvPaused = false
     mpvQuit.running = true
     root.pendingMpvUrl = url
     mpvRelay.restart()
@@ -2125,13 +2195,7 @@ Item {
   // the new source reports LoadedMedia.
   function beginTrackRestart() {
     if (root.currentRatingKey === "" || root.mode !== "playing") return
-    root.resumeSec = Math.max(0, Math.round(root.seekDisplayTime))
-    root.triedTranscode = true
-    root.playGen++
-    root.clearSeekPreview()
-    var url = root.transcodeUrl()
-    if (root.backend === "mpv") root.startMpv(url)
-    else root.startInternal(url)
+    root.launchStream(true, root.seekDisplayTime)
   }
 
   // ---- stream quality ----
@@ -2267,15 +2331,9 @@ Item {
       return
     }
     root.setStatus("Switching to direct play — restarting the stream…", false)
-    root.resumeSec = Math.max(0, Math.round(root.seekDisplayTime))
-    root.triedTranscode = false
-    root.playGen++
-    root.clearSeekPreview()
-    // Same URL construction as applyMetadata (one helper, so the two can
-    // never drift again — they did once, over extras' `?`).
-    var url = root.directPlayUrl(root.currentPartKey)
-    if (root.backend === "mpv") root.startMpv(url)
-    else root.startInternal(url)
+    // Same URL construction as first play (launchStream, one helper, so the
+    // two can never drift again — they did once, over extras' `?`).
+    root.launchStream(false, root.seekDisplayTime)
   }
 
   // ---- the picker itself ----
@@ -2363,8 +2421,15 @@ Item {
     return true
   }
 
-  function finishPlayback() {
-    sendTimeline("stopped")
+  // `t`/`d` are the position and duration to report, captured by the caller
+  // BEFORE it tore the engine down. Without them the report reads the engine
+  // after the fact: on QtMultimedia, stop() runs player.stop() and clears the
+  // source first, so every Stop button press told the server "stopped at 0 of
+  // 0" and the resume point was lost.
+  function finishPlayback(t, d) {
+    var at = t === undefined ? root.seekDisplayTime : t
+    var len = d === undefined ? root.reportDuration : d
+    sendTimeline("stopped", at, len)
     pollTimer.stop()
     // A picker left open by the ended session would otherwise keep first
     // refusal on every key while the user is back in browse.
@@ -2379,21 +2444,27 @@ Item {
   }
 
   function stop() {
+    var t = root.seekDisplayTime
+    var d = root.reportDuration
     root.userStop = true
+    root.stopEngine()
+    finishPlayback(t, d)
+  }
+
+  function stopEngine() {
     if (root.backend === "mpv") {
+      mpvRelay.stop()
       mpvQuit.running = true
-      finishPlayback()
     } else if (root.nativeMode) {
       // mpv's end-file reason for this is "stop", which mpvvideo.cpp ignores
       // deliberately: a user-initiated stop is neither an EOF nor a failure, so
       // it cannot trip the transcode fallback on the way out. The core stays
       // idle and reusable for the next item.
       if (root.nativeVideo) root.nativeVideo.stop()
-      finishPlayback()
     } else {
+      resumeRetry.stop()
       player.stop()
       player.source = ""
-      finishPlayback()
     }
   }
 
@@ -2437,6 +2508,12 @@ Item {
   // fresh play (from startNative racing its own Loader activation) or a
   // surface handoff (position and pause state captured before the flip).
   property var pendingNativeArm: null
+  // True once the native item has reported fileLoaded for its latest load.
+  property bool nativeLoaded: false
+  // QtMultimedia's equivalent: its position and duration outlive a source
+  // change until the new media loads (a failed load kept the previous film's
+  // 20-minute duration in the harness), so they only count once it has.
+  property bool qtLoaded: false
 
   // Reassigning window.screen recreates the SURFACE under the same item
   // (Quickshell hides, moves, shows — and a hidden layer surface is deleted),
@@ -2468,6 +2545,12 @@ Item {
     var arm = root.pendingNativeArm
     if (!v || !arm || root.currentMediaUrl === "") return
     root.pendingNativeArm = null
+    // Until this load reports fileLoaded, the item's timePos/duration still
+    // describe whatever it played last (the C++ drops mpv's "unavailable"
+    // updates rather than publishing zeros), so the panel reads the arm's own
+    // start position instead — see engineTime.
+    root.nativeLoaded = false
+    root.streamLocalStart = Math.max(0, Number(arm.pos) || 0)
     // Set on EVERY load, never left over: the property persists in the core,
     // so an extra played after a film would otherwise inherit the header.
     v.httpHeaders = root.tokenHeaderAllowed(root.currentMediaUrl) ? ["X-Plex-Token: " + root.token] : []
@@ -2501,7 +2584,10 @@ Item {
     target: root.nativeVideo
     enabled: root.nativeMode
 
-    function onFileLoaded() { root.applyNativeSelectedTracks() }
+    function onFileLoaded() {
+      root.nativeLoaded = true
+      root.applyNativeSelectedTracks()
+    }
     function onEndReached() { if (root.mode === "playing") root.finishPlayback() }
     // Same entry point as every other engine's failure, so the direct-play →
     // server-transcode ladder is shared rather than reimplemented.
@@ -2514,6 +2600,7 @@ Item {
     // module is there, "internal" plays through libmpv and QtMultimedia is
     // never touched.
     if (root.nativeMode) { root.startNative(url); return }
+    root.qtLoaded = false
     player.stop()
     if (typeof videoOut !== "undefined" && videoOut !== null) player.videoOutput = videoOut
     player.source = url
@@ -2551,6 +2638,9 @@ Item {
       volume: root.audioVolume
     }
     onMediaStatusChanged: function(status) {
+      if (status === MediaPlayer.LoadedMedia || status === MediaPlayer.BufferingMedia
+          || status === MediaPlayer.BufferedMedia)
+        root.qtLoaded = true
       if (status === MediaPlayer.LoadedMedia && root.resumeSec > 0) {
         player.position = root.resumeSec * 1000
         resumeRetry.restart()
@@ -2593,29 +2683,57 @@ Item {
   }
 
   function playbackFailed() {
-    var now = Date.now()
-    if (now - root.lastFailMs < 250) return
-    root.lastFailMs = now
-    if (root.triedTranscode || root.currentRatingKey === "") {
-      fail("Direct play and transcode both failed")
-      return
-    }
-    root.triedTranscode = true
-    root.setStatus("Direct play failed — transcoding…", false)
-    var url = transcodeUrl()
-    root.playGen++
-    if (root.backend === "mpv") startMpv(url)
-    else startInternal(url)
+    if (root.failedGen === root.playGen) return
+    var gen = root.playGen
+    root.failedGen = gen
+    // Act on it a tick later. QtMultimedia reports one bad source through
+    // TWO signals emitted back to back (mediaStatus InvalidMedia, then
+    // errorOccurred), and swapping the source from inside the first would
+    // make the second land on the NEW stream's generation and fail it before
+    // it ever opened. Seen in the harness: a 400 from the transcoder skipped
+    // the direct-play retry entirely. Deferred, both signals hit the dedupe
+    // above; and a stop or a new item in between makes the retry moot.
+    Qt.callLater(function() {
+      if (gen !== root.playGen || root.mode !== "playing") return
+      root.handlePlaybackFailure()
+    })
   }
 
-  function sendTimeline(state) {
+  function handlePlaybackFailure() {
+    if (root.currentRatingKey === "") {
+      root.failPlayback("Playback failed")
+      return
+    }
+    // An item that STARTED on a quality tier never tried direct play, and the
+    // ladder only ever went direct → transcode. Give it the other rung before
+    // giving up, or a tier the server cannot transcode would leave the film
+    // unplayable with the quality picker (the way back to Original) gone.
+    if (root.triedTranscode && !root.directTried) {
+      root.setStatus("Transcode failed — trying direct play…", false)
+      root.launchStream(false, Math.max(root.streamLocalStart, Math.round(root.seekDisplayTime)))
+      return
+    }
+    if (root.triedTranscode || root.transcodeTried) {
+      root.failPlayback("Direct play and transcode both failed")
+      return
+    }
+    root.setStatus("Direct play failed — transcoding…", false)
+    // Rejoin where it died. A stream that failed mid-film used to restart the
+    // transcode at 0:00; one that failed during its load reports its own start
+    // position (streamLocalStart), so a resume point is never lost either.
+    root.launchStream(true, Math.max(root.streamLocalStart, Math.round(root.seekDisplayTime)))
+  }
+
+  function sendTimeline(state, atSec, durSec) {
     if (root.currentRatingKey === "") return
+    var at = atSec === undefined ? root.seekDisplayTime : Number(atSec) || 0
+    var len = durSec === undefined ? root.reportDuration : Number(durSec) || 0
     timelinePost.command = ["curl", "-s", "--fail", "--max-time", "5", "-o", "/dev/null"]
       .concat(root.plexHeaders)
         .concat([root.server + "/:/timeline?ratingKey=" + encodeURIComponent(root.currentRatingKey)
         + "&key=" + encodeURIComponent("/library/metadata/" + root.currentRatingKey)
-        + "&duration=" + Math.round(root.dispDuration * 1000)
-        + "&time=" + Math.round(root.dispTime * 1000)
+        + "&duration=" + Math.round(len * 1000)
+        + "&time=" + Math.round(at * 1000)
         + "&state=" + state
         + "&hasMDE=1&identifier=com.plexapp.plugins.library"
         + "&X-Plex-Client-Identifier=" + root.pluginId
@@ -2661,14 +2779,27 @@ Item {
   // mpv's own event stream through NOTIFY signals rather than the external
   // backend's 1 s socat poll, so they update at mpv's rate for free.
   readonly property bool mpvMode: root.backend === "mpv" && root.mode === "playing"
+  //
+  // A position only counts once the engine has a duration for THIS stream.
+  // Before that every engine is either reporting nothing (0, which a stop
+  // would send as the resume point) or still reporting the previous file
+  // (native keeps it; external mpv kept it until startMpv zeroed it), so the
+  // reading is the stream's own requested start. That also covers QtMultimedia
+  // between LoadedMedia and the resume seek actually landing (resumeRetry).
   readonly property real dispTime: root.mpvMode
-    ? root.mpvTime
-    : (root.nativeMode ? (root.nativeVideo ? root.nativeVideo.timePos : 0)
-      : player.position / 1000)
+    ? (root.mpvDuration > 0 ? root.mpvTime : root.streamLocalStart)
+    : (root.nativeMode
+      ? (root.nativeVideo && root.nativeLoaded ? root.nativeVideo.timePos : root.streamLocalStart)
+      : (!root.qtLoaded || player.duration <= 0 || resumeRetry.running
+        ? root.streamLocalStart : player.position / 1000))
   readonly property real dispDuration: root.mpvMode
     ? root.mpvDuration
-    : (root.nativeMode ? (root.nativeVideo ? root.nativeVideo.duration : 0)
-      : player.duration / 1000)
+    : (root.nativeMode ? (root.nativeVideo && root.nativeLoaded ? root.nativeVideo.duration : 0)
+      : (root.qtLoaded ? player.duration / 1000 : 0))
+  // What timeline reports carry: the live duration, or the last one seen for
+  // this item while a reload has none yet.
+  readonly property real reportDuration: root.dispDuration > 0 ? root.dispDuration : root.lastKnownDuration
+  onDispDurationChanged: if (root.dispDuration > 0) root.lastKnownDuration = root.dispDuration
   readonly property bool isPaused: root.mpvMode
     ? root.mpvPaused
     : (root.nativeMode ? (root.nativeVideo ? root.nativeVideo.paused : true)
