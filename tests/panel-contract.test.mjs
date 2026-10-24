@@ -19,21 +19,30 @@ test("panel contract pins integration chokepoints", () => {
   assert.match(qml, /id: searchDebounce[\s\S]{0,300}root\.search\(searchInput\.text\)/)
 })
 
+const io = readFileSync(new URL("../Io.js", import.meta.url), "utf8")
+
 test("config and state IO is single-open bounded and atomic", () => {
+  // The scripts live in Io.js; the panel passes paths as positional args.
+  const qmlio = qml + io
   assert.doesNotMatch(qml, /FileView\s*\{/)
   assert.doesNotMatch(qml, /stat -c|cat --/)
-  assert.match(qml, /if=config\.json iflag=nofollow,nonblock bs=4097 count=1/)
-  assert.match(qml, /if=window\.json iflag=nofollow,nonblock bs=1025 count=1/)
+  assert.match(qmlio, /if=config\.json iflag=nofollow,nonblock bs=4097 count=1/)
+  assert.match(qmlio, /if=window\.json iflag=nofollow,nonblock bs=1025 count=1/)
   assert.match(qml, /raw\.length > 4096/)
   assert.match(qml, /raw\.length > 1024/)
-  assert.match(qml, /\.config\.\$\$\.tmp/)
-  assert.match(qml, /\.window\.\$\$\.tmp/)
-  assert.match(qml, /mv -f --/)
+  assert.match(qmlio, /\.config\.\$\$\.tmp/)
+  assert.match(qmlio, /\.window\.\$\$\.tmp/)
+  assert.match(qmlio, /mv -f --/)
   assert.match(qml, /stdinEnabled: true/)
   assert.match(qml, /onStarted: write\(root\.server/)
   assert.doesNotMatch(qml, /OMARCHY_PLEX_TOKEN|PLEX_TOKEN=|root\.token \+ "' '/)
-  assert.match(qml, /cd -P --/)
+  assert.match(qmlio, /cd -P --/)
   assert.match(qml, /onReleased: root\.saveWidth\(\)/)
+  // Nothing environment-derived is spliced into shell source any more.
+  assert.doesNotMatch(qml, /"d='" \+/)
+  assert.doesNotMatch(qml, /UNIX-CONNECT:'" \+/)
+  for (const m of qml.matchAll(/\["sh", "-c", ([^,\]]+)/g))
+    assert.match(m[1], /^Io\.\w+Script$/, "sh -c source must be a fixed Io.js script: " + m[1])
 })
 
 const theater = readFileSync(new URL("../TheaterView.qml", import.meta.url), "utf8")

@@ -9,6 +9,7 @@ import qs.Ui
 import "Model.js" as Model
 import "Api.js" as Api
 import "Pool.js" as Pool
+import "Io.js" as Io
 
 // Omarchy Plex panel entry point.
 // Hosted by omarchy-shell; summoned with:
@@ -109,12 +110,8 @@ Item {
   Process {
     id: configRead
     running: false
-    command: ["sh", "-c",
-      "d='" + root.configDir + "'; d=${d%/}; b=${d##*/}; "
-      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 0; "
-      + "[ -d \"$p/$b\" ] && [ ! -L \"$p/$b\" ] && cd -P -- \"$p/$b\" "
-      + "&& [ \"$(pwd -P)\" = \"$p/$b\" ] "
-      + "&& dd if=config.json iflag=nofollow,nonblock bs=4097 count=1 status=none 2>/dev/null || true"]
+    // Fixed script, directory as $1 — see Io.js.
+    command: ["sh", "-c", Io.readConfigScript, "sh", root.configDir]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -154,16 +151,9 @@ Item {
     stdinEnabled: true
     onStarted: write(root.server + "\t" + root.token + "\t"
       + (root.backend === "internal" ? "internal" : "mpv") + "\n")
-    command: ["sh", "-c",
-      "IFS=$(printf '\t') read -r plex_server plex_token plex_backend || exit 1; "
-      + "d='" + root.configDir + "'; d=${d%/}; b=${d##*/}; "
-      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 1; "
-      + "mkdir -p -- \"$p/$b\" && [ ! -L \"$p/$b\" ] && chmod 700 \"$p/$b\" "
-      + "&& cd -P -- \"$p/$b\" && [ \"$(pwd -P)\" = \"$p/$b\" ] "
-      + "&& umask 077 && t=.config.$$.tmp && trap 'rm -f -- \"$t\"' EXIT "
-      + "&& printf '{\"server\":\"%s\",\"token\":\"%s\",\"backend\":\"%s\"}' "
-      + "\"$plex_server\" \"$plex_token\" \"$plex_backend\" > \"$t\" "
-      + "&& chmod 600 \"$t\" && mv -f -- \"$t\" config.json && trap - EXIT"]
+    // Fixed script (Io.saveConfigScript), directory as $1; the values come
+    // in on stdin above.
+    command: ["sh", "-c", Io.saveConfigScript, "sh", root.configDir]
   }
 
   // Adopts a pre-rename install once. Read-only on the old paths — nothing
@@ -174,12 +164,7 @@ Item {
   Process {
     id: legacyConfigRead
     running: false
-    command: ["sh", "-c",
-      "d='" + root.legacyConfigDir + "'; d=${d%/}; b=${d##*/}; "
-      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 0; "
-      + "[ -d \"$p/$b\" ] && [ ! -L \"$p/$b\" ] && cd -P -- \"$p/$b\" "
-      + "&& [ \"$(pwd -P)\" = \"$p/$b\" ] "
-      + "&& dd if=config.json iflag=nofollow,nonblock bs=4097 count=1 status=none 2>/dev/null || true"]
+    command: ["sh", "-c", Io.readConfigScript, "sh", root.legacyConfigDir]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -724,16 +709,11 @@ Item {
     // quality pick is a deliberate act, not a drag.
     property string quality: "" + root.qualityKbps
     running: false
-    command: ["sh", "-c",
-      "d='" + root.stateDir + "'; d=${d%/}; b=${d##*/}; "
-      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 1; "
-      + "mkdir -p -- \"$p/$b\" && [ ! -L \"$p/$b\" ] && chmod 700 \"$p/$b\" "
-      + "&& cd -P -- \"$p/$b\" && [ \"$(pwd -P)\" = \"$p/$b\" ] "
-      + "&& umask 077 && t=.window.$$.tmp && trap 'rm -f -- \"$t\"' EXIT "
-      + "&& printf '{\"right\":%s,\"bottom\":%s,\"width\":%s,\"windowed\":%s,\"volume\":%s,\"quality\":%s}' "
-      + posSave.right + " " + posSave.bottom + " " + posSave.width + " " + posSave.windowed
-      + " " + posSave.volume + " " + posSave.quality
-      + " > \"$t\" && chmod 600 \"$t\" && mv -f -- \"$t\" window.json && trap - EXIT"]
+    // Fixed script (Io.saveStateScript): the directory and every value are
+    // positional parameters, never shell source.
+    command: ["sh", "-c", Io.saveStateScript, "sh", root.stateDir,
+      posSave.right, posSave.bottom, posSave.width, posSave.windowed,
+      posSave.volume, posSave.quality]
   }
 
   function applyWindowState(raw) {
@@ -761,12 +741,8 @@ Item {
   Process {
     id: positionRead
     running: false
-    command: ["sh", "-c",
-      "d='" + root.stateDir + "'; d=${d%/}; b=${d##*/}; "
-      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 0; "
-      + "[ -d \"$p/$b\" ] && [ ! -L \"$p/$b\" ] && cd -P -- \"$p/$b\" "
-      + "&& [ \"$(pwd -P)\" = \"$p/$b\" ] "
-      + "&& dd if=window.json iflag=nofollow,nonblock bs=1025 count=1 status=none 2>/dev/null || true"]
+    // Fixed script, directory as $1 — see Io.js.
+    command: ["sh", "-c", Io.readStateScript, "sh", root.stateDir]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -785,12 +761,7 @@ Item {
   Process {
     id: legacyPositionRead
     running: false
-    command: ["sh", "-c",
-      "d='" + root.legacyStateDir + "'; d=${d%/}; b=${d##*/}; "
-      + "p=$(cd -P -- \"${d%/*}\" 2>/dev/null && pwd -P) || exit 0; "
-      + "[ -d \"$p/$b\" ] && [ ! -L \"$p/$b\" ] && cd -P -- \"$p/$b\" "
-      + "&& [ \"$(pwd -P)\" = \"$p/$b\" ] "
-      + "&& dd if=window.json iflag=nofollow,nonblock bs=1025 count=1 status=none 2>/dev/null || true"]
+    command: ["sh", "-c", Io.readStateScript, "sh", root.legacyStateDir]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -1330,15 +1301,13 @@ Item {
   Process {
     id: mpvQuit
     running: false
-    command: ["sh", "-c",
-      "test -S '" + root.ipcSock + "' && echo '{\"command\":[\"quit\"]}' | socat - UNIX-CONNECT:'" + root.ipcSock + "' >/dev/null 2>&1 || true"]
+    command: ["sh", "-c", Io.mpvQuitScript, "sh", root.ipcSock]
   }
 
   function mpvSend(payload) {
     // Command fully built BEFORE running (Quickshell ignores later writes).
     // Payloads here are fixed JSON templates plus numbers only.
-    mpvCtl.command = ["sh", "-c",
-      "echo '" + payload.replace(/'/g, "") + "' | socat - UNIX-CONNECT:'" + root.ipcSock + "'"]
+    mpvCtl.command = ["sh", "-c", Io.mpvSendScript, "sh", root.ipcSock, String(payload)]
     mpvCtl.running = true
   }
 
