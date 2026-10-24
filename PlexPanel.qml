@@ -1144,14 +1144,21 @@ Item {
       var partKey = parsed.partKey
       root.currentRatingKey = String(ratingKey)
       root.sessionId = "" + Date.now()
-      root.triedTranscode = false
+      // A saved quality tier applies from the first frame. It used to be read
+      // only by the picker: every item started on direct play regardless, the
+      // picker still showed the tier as current, and picking that same tier
+      // again was a no-op (activateQualityRow returns early on "no change"),
+      // so the only way to get the tier you had chosen was to pick another one
+      // and come back. A tier IS a transcode, so start on transcodeUrl() and
+      // mark it tried — a transcode that then fails has nowhere further to go.
+      root.triedTranscode = root.qualityKbps > 0
       root.userStop = false
       root.scrobbled = false
       root.tickCount = 0
       root.resumeSec = parsed.viewOffsetSec
       root.currentThumbPath = root.metadataThumb(jsonText)
       root.stashStreams(jsonText)
-      var mediaUrl = root.directPlayUrl(partKey)
+      var mediaUrl = root.triedTranscode ? root.transcodeUrl() : root.directPlayUrl(partKey)
       // Only QtMultimedia needs the token on the URL: its media loader cannot
       // send an HTTP header at all, which is the documented exception the
       // artwork URLs share. Both mpv engines carry it in a header instead, so
@@ -2029,8 +2036,15 @@ Item {
     // started later is muxed from it. Best-effort by construction — there is no
     // cheap readback to confirm the mux order matched, so a file whose
     // container order disagreed with Plex's would pick the neighbouring track.
+    //
+    // Except during a transcode, on these engines exactly as on Qt below: the
+    // server muxed ONE audio track (and burned or dropped subtitles), so an
+    // ordinal counted off the original file points at nothing. A film with
+    // four audio tracks transcoding with one: picking the third sets aid=3 on
+    // a stream that only has aid=1, and mpv answers with silence. A server
+    // restart muxed from the new selection is the only real answer.
     if (root.mpvMode || root.nativeMode) {
-      if (needsServer) { root.putTrackSelection(true); return }
+      if (needsServer || root.triedTranscode) { root.putTrackSelection(true); return }
       if (kind === "audio") root.setMpvAudioTrack(Number(row.ordinal) + 1)
       else root.setMpvSubtitleTrack(row.none === true ? -1 : Number(row.ordinal) + 1)
       root.putTrackSelection(false)

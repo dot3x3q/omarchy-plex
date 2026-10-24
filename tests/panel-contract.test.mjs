@@ -145,3 +145,13 @@ test("curl argv never carries the Plex token", () => {
   // no quote, backslash or newline.
   assert.match(qml, /function curlAuthConfig\(\) \{\s*return "header = \\"X-Plex-Token: " \+ root\.token \+ "\\"\\n"/)
 })
+
+test("a saved quality tier starts the item on the transcoder; track picks respect it", () => {
+  const apply = qml.slice(qml.indexOf("function applyMetadata"), qml.indexOf("// ---- where the token may go"))
+  assert.match(apply, /root\.triedTranscode = root\.qualityKbps > 0/)
+  assert.match(apply, /root\.triedTranscode \? root\.transcodeUrl\(/)
+  // A transcode carries one audio track: an ordinal off the original file
+  // would select nothing on either mpv engine.
+  const pick = qml.slice(qml.indexOf("function activateTrackRow"), qml.indexOf("function putTrackSelection"))
+  assert.match(pick, /if \(root\.mpvMode \|\| root\.nativeMode\) \{\s*if \(needsServer \|\| root\.triedTranscode\)/)
+})
